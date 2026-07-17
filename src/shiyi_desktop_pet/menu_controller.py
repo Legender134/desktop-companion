@@ -81,55 +81,92 @@ def _choice(
     )
 
 
-MENU_ITEMS = (
-    MenuItem(
-        "动作",
-        children=(
-            *(MenuItem(label, MenuCommand("action", action)) for label, action in _ACTION_LABELS),
-            MenuItem(
-                "观察方向",
-                children=tuple(
-                    MenuItem(_direction_label(index * 22.5), MenuCommand("look", index * 22.5))
-                    for index in range(16)
+def _menu_items(
+    pet_choices: tuple[tuple[str, str], ...],
+) -> tuple[MenuItem, ...]:
+    return (
+        MenuItem(
+            "动作",
+            children=(
+                *(
+                    MenuItem(label, MenuCommand("action", action))
+                    for label, action in _ACTION_LABELS
+                ),
+                MenuItem(
+                    "观察方向",
+                    children=tuple(
+                        MenuItem(
+                            _direction_label(index * 22.5),
+                            MenuCommand("look", index * 22.5),
+                        )
+                        for index in range(16)
+                    ),
                 ),
             ),
         ),
-    ),
-    _toggle("自动闲逛", "wander_enabled"),
-    _toggle("看向鼠标", "gaze_enabled"),
-    _toggle("悬停数字快捷键", "hover_digits_enabled"),
-    _toggle("始终置顶", "always_on_top"),
-    MenuItem(
-        "开机启动",
-        MenuCommand("toggle", target="startup_enabled"),
-        checked_from="startup_enabled",
-    ),
-    MenuItem("切换宠物（十一 ⇄ 紫灵）", MenuCommand("cycle_pet")),
-    MenuItem(
-        "大小",
-        children=tuple(
-            _choice(f"{scale}%", "scale", scale, "scale_percent", "scale")
-            for scale in (75, 100, 125, 150)
+        _toggle("自动闲逛", "wander_enabled"),
+        _toggle("看向鼠标", "gaze_enabled"),
+        _toggle("悬停数字快捷键", "hover_digits_enabled"),
+        _toggle("始终置顶", "always_on_top"),
+        MenuItem(
+            "开机启动",
+            MenuCommand("toggle", target="startup_enabled"),
+            checked_from="startup_enabled",
         ),
-    ),
-    MenuItem(
-        "动画速度",
-        children=tuple(
-            _choice(label, "animation_speed", speed, "animation_speed", "animation_speed")
-            for label, speed in (("慢速", "slow"), ("正常", "normal"), ("快速", "fast"))
+        MenuItem(
+            "切换宠物",
+            children=tuple(
+                _choice(display_name, "pet", pet_id, "pet_id", "pet")
+                for pet_id, display_name in pet_choices
+            ),
         ),
-    ),
-    MenuItem(
-        "移动速度",
-        children=tuple(
-            _choice(label, "movement_speed", speed, "movement_speed", "movement_speed")
-            for label, speed in (("慢速", "slow"), ("正常", "normal"), ("快速", "fast"))
+        MenuItem("重新扫描宠物", MenuCommand("refresh_pets")),
+        MenuItem("打开宠物目录", MenuCommand("open_pets_directory")),
+        MenuItem(
+            "大小",
+            children=tuple(
+                _choice(f"{scale}%", "scale", scale, "scale_percent", "scale")
+                for scale in (75, 100, 125, 150)
+            ),
         ),
-    ),
-    MenuItem("回到屏幕中央", MenuCommand("center")),
-    MenuItem("关于桌面灵伴", MenuCommand("about")),
-    MenuItem("退出", MenuCommand("quit")),
-)
+        MenuItem(
+            "动画速度",
+            children=tuple(
+                _choice(
+                    label,
+                    "animation_speed",
+                    speed,
+                    "animation_speed",
+                    "animation_speed",
+                )
+                for label, speed in (
+                    ("慢速", "slow"),
+                    ("正常", "normal"),
+                    ("快速", "fast"),
+                )
+            ),
+        ),
+        MenuItem(
+            "移动速度",
+            children=tuple(
+                _choice(
+                    label,
+                    "movement_speed",
+                    speed,
+                    "movement_speed",
+                    "movement_speed",
+                )
+                for label, speed in (
+                    ("慢速", "slow"),
+                    ("正常", "normal"),
+                    ("快速", "fast"),
+                )
+            ),
+        ),
+        MenuItem("回到屏幕中央", MenuCommand("center")),
+        MenuItem("关于桌面灵伴", MenuCommand("about")),
+        MenuItem("退出", MenuCommand("quit")),
+    )
 
 
 class MenuController:
@@ -141,16 +178,18 @@ class MenuController:
         startup_supplier: Callable[[], bool],
         dispatch: Callable[[MenuCommand], None],
         error_reporter: ErrorReporter | None = None,
+        pet_choices_supplier: Callable[[], tuple[tuple[str, str], ...]] | None = None,
     ) -> None:
         self._settings_supplier = settings_supplier
         self._startup_supplier = startup_supplier
         self._dispatch = dispatch
         self._error_reporter = error_reporter if error_reporter is not None else _LOGGER
+        self._pet_choices_supplier = pet_choices_supplier or (lambda: ())
         self._menus: list[QMenu] = []
 
     @property
     def items(self) -> tuple[MenuItem, ...]:
-        return MENU_ITEMS
+        return _menu_items(self._pet_choices())
 
     def flattened_labels(self) -> tuple[str, ...]:
         def flatten(items: tuple[MenuItem, ...]):
@@ -162,17 +201,22 @@ class MenuController:
 
     def create_menu(self, parent: QWidget | None = None) -> QMenu:
         menu = QMenu(parent)
+        self._rebuild(menu)
+        menu.aboutToShow.connect(lambda current=menu: self.refresh(current))
+        self._menus.append(menu)
+        return menu
+
+    def _rebuild(self, menu: QMenu) -> None:
+        menu.clear()
         bindings: list[_ActionBinding] = []
         groups: dict[str, QActionGroup] = {}
         retained: list[object] = []
         self._populate(menu, self.items, bindings, groups, retained)
         menu._shiyi_bindings = bindings
         menu._shiyi_retained = retained
-        menu.aboutToShow.connect(lambda current=menu: self.refresh(current))
-        self._menus.append(menu)
-        return menu
 
     def refresh(self, menu: QMenu) -> None:
+        self._rebuild(menu)
         try:
             settings = self._settings_supplier()
             if not isinstance(settings, AppSettings):
@@ -199,6 +243,26 @@ class MenuController:
             )
             expected = binding.item.checked_value
             binding.action.setChecked(bool(actual) if expected is None else actual == expected)
+
+    def refresh_all(self) -> None:
+        for menu in tuple(self._menus):
+            self.refresh(menu)
+
+    def _pet_choices(self) -> tuple[tuple[str, str], ...]:
+        try:
+            choices = tuple(self._pet_choices_supplier())
+            if any(
+                not isinstance(pet_id, str)
+                or not isinstance(display_name, str)
+                or not pet_id
+                or not display_name
+                for pet_id, display_name in choices
+            ):
+                raise TypeError("pet choices supplier returned invalid values")
+            return choices
+        except Exception as error:
+            self._report_supplier_error("pet choices supplier", error)
+            return ()
 
     def _report_supplier_error(self, context: str, error: Exception) -> None:
         error_type = type(error).__name__

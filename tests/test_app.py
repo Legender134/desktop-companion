@@ -2,7 +2,9 @@ from dataclasses import replace
 from io import StringIO
 import json
 import logging
+from pathlib import Path
 from random import Random
+import shutil
 import sys
 
 import pytest
@@ -25,7 +27,9 @@ from shiyi_desktop_pet.geometry import Point, Rect, Size
 from shiyi_desktop_pet.logging_setup import configure_logging, install_exception_hook
 from shiyi_desktop_pet.menu_controller import MenuCommand
 from shiyi_desktop_pet.models import ActionId
+from shiyi_desktop_pet.pet_registry import PetRegistry
 from shiyi_desktop_pet.pet_window import PetWindow
+from shiyi_desktop_pet.resource_locator import resource_root
 from shiyi_desktop_pet.settings import AppSettings
 from shiyi_desktop_pet.wander import WanderTarget
 
@@ -147,6 +151,23 @@ def _catalog():
     return AnimationCatalog.load_default()
 
 
+def _install_test_pet(user_root: Path, pet_id: str, display_name: str) -> Path:
+    directory = user_root / pet_id
+    directory.mkdir(parents=True)
+    manifest = json.loads(
+        (resource_root() / "pets" / "shiyi" / "pet.json").read_text(encoding="utf-8")
+    )
+    manifest.update({"id": pet_id, "displayName": display_name})
+    (directory / "pet.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    shutil.copyfile(
+        resource_root() / "pets" / "shiyi" / "spritesheet.webp",
+        directory / "spritesheet.webp",
+    )
+    return directory
+
+
 def _controller(
     qapp,
     *,
@@ -155,11 +176,14 @@ def _controller(
     tray_factory=None,
     window_factory=PetWindow,
     qa_window=False,
+    pet_registry=None,
+    open_pet_directory=None,
 ):
     store = MemorySettingsStore(settings)
     startup = FakeStartup()
     hooks = []
     trays = []
+    pet_registry = pet_registry or PetRegistry(resource_root() / "pets", None)
 
     if hook_factory is None:
         def hook_factory(hit_test, *, enabled=True):
@@ -183,6 +207,8 @@ def _controller(
         random=Random(0),
         window_factory=window_factory,
         qa_window=qa_window,
+        pet_registry=pet_registry,
+        open_pet_directory=open_pet_directory or (lambda path: True),
     )
     return controller, store, startup, hooks, trays
 
@@ -551,7 +577,7 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.dispatch_menu(MenuCommand("toggle", False, "wander_enabled"))
     controller.dispatch_menu(MenuCommand("center"))
     controller.dispatch_menu(MenuCommand("about"))
-    assert about == [("关于桌面灵伴", "桌面灵伴 2.0\n内置宠物：十一、紫灵")]
+    assert about == [("关于桌面灵伴", "桌面灵伴 2.1\n可用宠物：2（十一、紫灵）")]
 
     hooks[0].digit_pressed.emit(4)
     assert controller.current_action is ActionId.WAVE
@@ -573,16 +599,67 @@ def test_pet_switch_is_immediate_and_persisted(qapp):
     controller, store, _, _, _ = _controller(qapp)
     original = controller.window.current_frame.image
 
-    controller.dispatch_menu(MenuCommand("cycle_pet"))
+    controller.dispatch_menu(MenuCommand("pet", "ziling"))
 
     assert controller.settings.pet_id == "ziling"
     assert controller.catalog.pet_id == "ziling"
     assert controller.window.current_frame.image != original
     assert store.saved[-1].pet_id == "ziling"
 
-    controller.dispatch_menu(MenuCommand("cycle_pet"))
+    controller.dispatch_menu(MenuCommand("pet", "shiyi"))
     assert controller.settings.pet_id == "shiyi"
     assert controller.catalog.pet_id == "shiyi"
+    controller.shutdown()
+
+
+def test_dynamic_pet_pack_refresh_switch_and_open_directory(tmp_path, qapp):
+    user_root = tmp_path / "pets"
+    opened = []
+    registry = PetRegistry(
+        resource_root() / "pets",
+        user_root,
+        validator=AnimationCatalog.load_definition,
+    )
+    controller, store, _, _, trays = _controller(
+        qapp,
+        pet_registry=registry,
+        open_pet_directory=lambda path: opened.append(path) or True,
+    )
+    assert controller.pet_choices == (("shiyi", "十一"), ("ziling", "紫灵"))
+
+    _install_test_pet(user_root, "new_pet", "新宠物")
+    controller.dispatch_menu(MenuCommand("refresh_pets"))
+
+    assert controller.pet_choices == (
+        ("shiyi", "十一"),
+        ("ziling", "紫灵"),
+        ("new_pet", "新宠物"),
+    )
+    assert trays[0].messages[-1][0] == "桌面灵伴"
+    controller.dispatch_menu(MenuCommand("pet", "new_pet"))
+    assert controller.catalog.pet_id == "new_pet"
+    assert controller.settings.pet_id == "new_pet"
+    assert store.saved[-1].pet_id == "new_pet"
+
+    controller.dispatch_menu(MenuCommand("open_pets_directory"))
+    assert opened == [user_root]
+
+    shutil.rmtree(user_root / "new_pet")
+    controller.dispatch_menu(MenuCommand("refresh_pets"))
+    assert controller.settings.pet_id == "shiyi"
+    assert controller.catalog.pet_id == "shiyi"
+    assert store.saved[-1].pet_id == "shiyi"
+    controller.shutdown()
+
+
+def test_missing_saved_pet_falls_back_to_default_and_is_persisted(qapp):
+    controller, store, _, _, _ = _controller(
+        qapp, settings=AppSettings(pet_id="missing_pet")
+    )
+
+    assert controller.settings.pet_id == "shiyi"
+    assert controller.catalog.pet_id == "shiyi"
+    assert store.saved[-1].pet_id == "shiyi"
     controller.shutdown()
 
 

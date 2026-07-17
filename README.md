@@ -1,6 +1,6 @@
-# 桌面灵伴 2.0
+# 桌面灵伴 2.1
 
-桌面灵伴 2.0 是面向 Windows 10/11 x64 的多角色透明桌面宠物，内置“十一”和“紫灵”。右键选择“切换宠物（十一 ⇄ 紫灵）”即可立即切换，并会记住当前选择。两套角色共享休息、奔跑、招手、跳跃等动作，以及拖动、鼠标注视、自动闲逛、数字快捷键、托盘菜单和当前用户开机启动。程序本身不发起网络请求，也不依赖 Codex。
+桌面灵伴 2.1 是面向 Windows 10/11 x64 的可扩展透明桌面宠物，内置“十一”和“紫灵”，并支持安装采用统一 v2 图集格式的用户宠物包。把一个包含 `pet.json` 和 `spritesheet.webp` 的合格文件夹放入用户宠物目录，重新扫描后即可在动态菜单中切换，无需修改代码或重新生成安装包。所有角色共享休息、奔跑、招手、跳跃等动作，以及拖动、鼠标注视、自动闲逛、数字快捷键、托盘菜单和当前用户开机启动。程序本身不发起网络请求，也不依赖 Codex。
 
 ## 发布状态
 
@@ -10,7 +10,7 @@
 
 - `安装说明.md`：安装、操作、恢复、隐私和卸载说明；
 - `SHA256SUMS.txt`：安装程序和源码 ZIP 的 SHA-256；
-- `桌面灵伴2.0源代码.zip`：从最终发布提交导出的已跟踪源码；
+- `桌面灵伴2.1源代码.zip`：从最终发布提交导出的已跟踪源码；
 
 自动验收结果、人工检查范围和已知工具限制见 [docs/manual-qa-v2.md](docs/manual-qa-v2.md)。
 
@@ -76,6 +76,27 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 
 日志以 UTF-8 轮转；单文件最大 1 MiB，保留 3 个备份。
 
+## 安装用户宠物包
+
+在宠物或托盘菜单中选择“打开宠物目录”，程序会打开并在需要时创建：
+
+```text
+%APPDATA%\DesktopCompanion\pets
+```
+
+每只宠物必须独占一个以宠物 ID 命名的子目录，其中只能依赖数据文件：
+
+```text
+pets\
+└─ new_pet\
+   ├─ pet.json
+   └─ spritesheet.webp
+```
+
+复制完成后选择“重新扫描宠物”。通过校验的角色会出现在“切换宠物”子菜单中；损坏、重复或不符合 v2 图集契约的宠物包会被忽略并显示通知，不会阻止内置宠物启动。内置 ID `shiyi` 和 `ziling` 不允许被用户包覆盖。
+
+`pet.json` 的最小示例、尺寸、帧布局、安全限制和制作检查表见 [v2 宠物包格式](docs/pet-pack-format-v2.md)。覆盖升级会保留用户宠物目录；卸载会清理整个 `%APPDATA%\DesktopCompanion`，需要保留自制宠物时请先备份 `pets` 文件夹。
+
 ## 鼠标和托盘控制
 
 - 左键按住并拖动：移动宠物；未超过 Windows 拖动阈值的单击不触发动作。
@@ -86,7 +107,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 - 托盘图标右键：打开与宠物右键相同的完整菜单。
 - 托盘图标双击：显示并激活宠物窗口。
 
-托盘使用打包的紫灵图标并显示“桌面灵伴”提示。Windows 11 可能把首次出现的通知图标放入右下角 `^` 的隐藏图标区域；是否固定在任务栏主区域由 Windows 和用户偏好决定，应用不会擅自修改该系统设置。
+托盘使用桌面灵伴的应用图标并显示“桌面灵伴”提示。Windows 11 可能把首次出现的通知图标放入右下角 `^` 的隐藏图标区域；是否固定在任务栏主区域由 Windows 和用户偏好决定，应用不会擅自修改该系统设置。
 
 窗口只用当前帧的非透明像素作为输入区域，外接矩形中的透明部分不会阻挡后面的桌面或应用。
 
@@ -123,7 +144,9 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 悬停数字快捷键
 始终置顶
 开机启动
-切换宠物（十一 ⇄ 紫灵）
+切换宠物 > 十一 / 紫灵 / 所有通过校验的用户宠物
+重新扫描宠物
+打开宠物目录
 大小 > 75% / 100% / 125% / 150%
 动画速度 > 慢速 / 正常 / 快速
 移动速度 > 慢速 / 正常 / 快速
@@ -148,7 +171,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 2. 首次安装默认勾选开机启动；向导末页可立即运行。覆盖安装会先请求现有实例安全退出，并保留已有设置和用户当前的开机启动选择。
 3. 卸载时打开 Windows“设置 > 应用 > 已安装的应用”，找到“桌面灵伴”并选择卸载。卸载程序会请求现有实例退出，并清除应用文件、该应用的 HKCU 启动项、设置和日志。
 
-桌面灵伴使用新的安装目录、卸载 GUID、设置目录、自启动项和单实例标识，可以与“十一桌面宠物 1.0”同时安装；安装或卸载 2.0 不会删除 1.0。两版也能同时运行，但初始位置可能重叠，建议拖开或只保留一版开机启动。
+桌面灵伴使用新的安装目录、卸载 GUID、设置目录、自启动项和单实例标识，可以与“十一桌面宠物 1.0”同时安装；安装或卸载 2.1 不会删除 1.0。两版也能同时运行，但初始位置可能重叠，建议拖开或只保留一版开机启动。
 
 如需核验下载文件，请在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256`，并与同目录的 `SHA256SUMS.txt` 比较。更简明的用户说明见发布目录中的 `安装说明.md`。
 
@@ -173,5 +196,9 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 ### 资源或 WebP 自检失败
 
 运行 `--self-test` 查看 JSON 结果；成功报告中的 `pets` 应为 `["shiyi","ziling"]`。源码模式中重新安装精确锁定的 `requirements\dev.txt`，并确认 `src\shiyi_desktop_pet\resources\pets\shiyi`、`pets\ziling` 和 `app.ico` 没有缺失。资源契约失败时程序会记录错误并退出，不会显示空白宠物窗口。
+
+### 新宠物没有出现在菜单中
+
+确认文件夹位于 `%APPDATA%\DesktopCompanion\pets\<pet_id>`，目录名与 JSON 的 `id` 完全对应，并且文件名正好是 `pet.json` 和 `spritesheet.webp`。选择“重新扫描宠物”后查看托盘通知和 `%LOCALAPPDATA%\DesktopCompanion\logs\DesktopCompanion.log`。内置宠物自检只报告 `shiyi`、`ziling`；用户宠物由正常启动和重新扫描流程单独校验。
 
 第三方组件及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -1,11 +1,9 @@
-import json
-
 from PySide6.QtGui import QImage
 
 from .constants import ACTION_SPECS, CELL_HEIGHT, CELL_WIDTH, LOOK_DEGREES
 from .models import ActionId, FrameAsset
-from .product import PET_IDS
-from .resource_locator import resource_path
+from .pet_registry import PetDefinition, PetRegistry
+from .resource_locator import resource_root
 
 
 def _has_visible_pixel(image: QImage) -> bool:
@@ -54,24 +52,18 @@ class AnimationCatalog:
 
     @classmethod
     def load_pet(cls, pet_id: str) -> "AnimationCatalog":
-        if pet_id not in PET_IDS:
+        snapshot = PetRegistry(resource_root() / "pets", None).refresh()
+        definition = snapshot.by_id(pet_id)
+        if definition is None:
             raise ValueError(f"unknown pet: {pet_id}")
-        root = f"pets/{pet_id}"
-        manifest_path = resource_path(f"{root}/pet.json")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("id") != pet_id:
-            raise ValueError(f"pet manifest id mismatch: {pet_id}")
-        if manifest.get("spriteVersionNumber") != 2:
-            raise ValueError(f"unsupported sprite version for pet: {pet_id}")
-        if manifest.get("spritesheetPath") != "spritesheet.webp":
-            raise ValueError(f"unexpected spritesheet path for pet: {pet_id}")
-        display_name = manifest.get("displayName")
-        if not isinstance(display_name, str) or not display_name.strip():
-            raise ValueError(f"missing display name for pet: {pet_id}")
+        return cls.load_definition(definition)
+
+    @classmethod
+    def load_definition(cls, definition: PetDefinition) -> "AnimationCatalog":
         return cls(
-            QImage(str(resource_path(f"{root}/spritesheet.webp"))),
-            pet_id=pet_id,
-            display_name=display_name,
+            QImage(str(definition.spritesheet_path)),
+            pet_id=definition.pet_id,
+            display_name=definition.display_name,
         )
 
     def _cell(self, row: int, column: int) -> QImage:

@@ -14,8 +14,8 @@ from random import Random
 import sys
 from collections.abc import Callable, Mapping
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QTimer, Qt, qVersion
-from PySide6.QtGui import QCursor, QGuiApplication, QImage, QImageReader
+from PySide6.QtCore import QElapsedTimer, QPoint, QTimer, Qt, QUrl, qVersion
+from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QImage, QImageReader
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .animation_catalog import AnimationCatalog
@@ -28,15 +28,16 @@ from .keyboard_hook import LowLevelKeyboardHook
 from .logging_setup import configure_logging, install_exception_hook
 from .menu_controller import MenuCommand, MenuController
 from .models import ActionId, FrameAsset
+from .pet_registry import PetDefinition, PetRegistry
 from .pet_window import PetWindow
 from .product import (
     APP_IDENTIFIER,
-    PET_CHOICES,
-    PET_IDS,
+    DEFAULT_PET_ID,
     PRODUCT_NAME,
     PRODUCT_VERSION,
     SETTINGS_DIRECTORY,
 )
+from .resource_locator import resource_root
 from .settings import AppSettings, SettingsStore
 from .single_instance import SingleInstanceGuard
 from .startup import StartupManager, WinRegRunKey
@@ -148,11 +149,16 @@ def run_self_test(
     catalog_factory: Callable[[], AnimationCatalog] | None = None,
 ) -> dict[str, object]:
     """Decode and validate packaged resources plus the Qt WebP reader plugin."""
-    catalogs = (
-        [catalog_factory()]
-        if catalog_factory is not None
-        else [AnimationCatalog.load_pet(pet_id) for pet_id in sorted(PET_IDS)]
-    )
+    if catalog_factory is not None:
+        catalogs = [catalog_factory()]
+    else:
+        snapshot = PetRegistry(
+            resource_root() / "pets",
+            None,
+        ).refresh()
+        if snapshot.issues:
+            raise ValueError(snapshot.issues[0].message)
+        catalogs = [AnimationCatalog.load_definition(pet) for pet in snapshot.pets]
     standard_frames = [
         sum(len(catalog.frames(action)) for action in ACTION_SPECS)
         for catalog in catalogs
@@ -179,7 +185,9 @@ class DesktopPetApplication:
         settings_store: SettingsStore,
         startup_manager: StartupManager,
         catalog_factory: Callable[[], AnimationCatalog] | None = None,
-        catalog_loader: Callable[[str], AnimationCatalog] = AnimationCatalog.load_pet,
+        catalog_loader: Callable[[PetDefinition], AnimationCatalog] = (
+            AnimationCatalog.load_definition
+        ),
         hook_factory: Callable[..., object] = LowLevelKeyboardHook,
         tray_factory: Callable[..., object] = TrayController,
         random: Random | None = None,
@@ -187,6 +195,8 @@ class DesktopPetApplication:
         window_factory: Callable[[AnimationCatalog], PetWindow] = PetWindow,
         about_dialog: Callable[[object, str, str], object] = QMessageBox.about,
         qa_window: bool = False,
+        pet_registry: PetRegistry | None = None,
+        open_pet_directory: Callable[[Path], object] | None = None,
     ) -> None:
         self.qapp = qapp
         self.logger = logger or _LOGGER
@@ -194,10 +204,29 @@ class DesktopPetApplication:
         self.startup_manager = startup_manager
         self._settings = settings_store.load()
         self._catalog_loader = catalog_loader
+        self.pet_registry = pet_registry or PetRegistry(
+            resource_root() / "pets",
+            _default_data_root("APPDATA") / SETTINGS_DIRECTORY / "pets",
+            validator=self._catalog_loader,
+            logger=self.logger,
+        )
+        self._pet_snapshot = self.pet_registry.refresh()
+        selected_pet = self._pet_snapshot.by_id(self._settings.pet_id)
+        if selected_pet is None:
+            selected_pet = self._pet_snapshot.by_id(DEFAULT_PET_ID)
+            if selected_pet is None and self._pet_snapshot.pets:
+                selected_pet = self._pet_snapshot.pets[0]
+            if selected_pet is None:
+                raise ValueError("no valid desktop-pet packs are available")
+            self._settings = replace(self._settings, pet_id=selected_pet.pet_id)
+            self.settings_store.save(self._settings)
+        self._open_pet_directory = open_pet_directory or (
+            lambda path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        )
         self.catalog = (
             catalog_factory()
             if catalog_factory is not None
-            else self._catalog_loader(self._settings.pet_id)
+            else self._catalog_loader(selected_pet)
         )
         self._session_hover_digits_enabled = self._settings.hover_digits_enabled
         self._hook_available = True
@@ -238,6 +267,7 @@ class DesktopPetApplication:
             self.startup_manager.is_enabled,
             self.dispatch_menu,
             self.logger,
+            pet_choices_supplier=lambda: self.pet_choices,
         )
         self.body_menu = self.menu_controller.create_menu(self.window)
         self.tray = tray_factory(self.window, self.menu_controller)
@@ -290,6 +320,10 @@ class DesktopPetApplication:
         return self._hover_snapshot
 
     @property
+    def pet_choices(self) -> tuple[tuple[str, str], ...]:
+        return self._pet_snapshot.choices
+
+    @property
     def wander_target(self) -> Point | None:
         return self._wander_target
 
@@ -306,6 +340,11 @@ class DesktopPetApplication:
             return
         self._started = True
         self.tray.show()
+        if self._pet_snapshot.issues:
+            self.tray.show_message(
+                PRODUCT_NAME,
+                f"已忽略 {len(self._pet_snapshot.issues)} 个无效宠物包。",
+            )
         if startup:
             attribute = Qt.WidgetAttribute.WA_ShowWithoutActivating
             previous = self.window.testAttribute(attribute)
@@ -436,10 +475,11 @@ class DesktopPetApplication:
         if kind == "pet":
             self._switch_pet(str(command.value))
             return
-        if kind == "cycle_pet":
-            pet_ids = tuple(pet_id for pet_id, _ in PET_CHOICES)
-            current_index = pet_ids.index(self._settings.pet_id)
-            self._switch_pet(pet_ids[(current_index + 1) % len(pet_ids)])
+        if kind == "refresh_pets":
+            self._refresh_pets(notify=True)
+            return
+        if kind == "open_pets_directory":
+            self._open_user_pet_directory()
             return
         if kind == "animation_speed":
             self._settings = replace(self._settings, animation_speed=str(command.value))
@@ -451,10 +491,12 @@ class DesktopPetApplication:
             self.center_on_cursor_screen()
             return
         if kind == "about":
+            names = "、".join(display_name for _, display_name in self.pet_choices)
             self._about_dialog(
                 self.window,
                 f"关于{PRODUCT_NAME}",
-                f"{PRODUCT_NAME} {PRODUCT_VERSION}\n内置宠物：十一、紫灵",
+                f"{PRODUCT_NAME} {PRODUCT_VERSION}\n"
+                f"可用宠物：{len(self.pet_choices)}（{names}）",
             )
             return
         if kind == "quit":
@@ -462,12 +504,13 @@ class DesktopPetApplication:
             return
         raise ValueError(f"unsupported menu command: {kind}")
 
-    def _switch_pet(self, pet_id: str) -> None:
-        if pet_id not in PET_IDS:
+    def _switch_pet(self, pet_id: str, *, force: bool = False) -> None:
+        definition = self._pet_snapshot.by_id(pet_id)
+        if definition is None:
             raise ValueError(f"unknown pet: {pet_id}")
-        if pet_id == self._settings.pet_id and self.catalog.pet_id == pet_id:
+        if not force and pet_id == self._settings.pet_id and self.catalog.pet_id == pet_id:
             return
-        catalog = self._catalog_loader(pet_id)
+        catalog = self._catalog_loader(definition)
         self.catalog = catalog
         self.window.set_catalog(catalog)
         self._settings = replace(self._settings, pet_id=pet_id)
@@ -476,6 +519,34 @@ class DesktopPetApplication:
         self._render_current_frame()
         self._recover_window_visibility()
         self.settings_store.save(self._settings)
+
+    def _refresh_pets(self, *, notify: bool) -> None:
+        snapshot = self.pet_registry.refresh()
+        if not snapshot.pets:
+            if notify:
+                self.tray.show_message(PRODUCT_NAME, "没有发现可用宠物，继续使用当前宠物。")
+            return
+        self._pet_snapshot = snapshot
+        selected = snapshot.by_id(self._settings.pet_id)
+        if selected is None:
+            fallback = snapshot.by_id(DEFAULT_PET_ID) or snapshot.pets[0]
+            self._switch_pet(fallback.pet_id)
+        else:
+            self._switch_pet(selected.pet_id, force=True)
+        if notify:
+            message = f"已发现 {len(snapshot.pets)} 只可用宠物。"
+            if snapshot.issues:
+                message += f" 已忽略 {len(snapshot.issues)} 个无效宠物包。"
+            self.tray.show_message(PRODUCT_NAME, message)
+
+    def _open_user_pet_directory(self) -> None:
+        root = self.pet_registry.user_root
+        if root is None:
+            self.tray.show_message(PRODUCT_NAME, "当前版本没有可写的用户宠物目录。")
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        if self._open_pet_directory(root) is False:
+            self.tray.show_message(PRODUCT_NAME, "无法打开宠物目录。")
 
     def center_on_cursor_screen(self) -> None:
         screen = QGuiApplication.screenAt(QCursor.pos()) or self.qapp.primaryScreen()

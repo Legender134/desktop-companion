@@ -41,10 +41,17 @@ def test_older_schema_is_migrated_with_new_defaults(tmp_path: Path):
     assert loaded.gaze_enabled is True
 
 
+def test_unknown_but_valid_pet_id_is_preserved_for_dynamic_registry(tmp_path: Path):
+    path = tmp_path / "settings.ini"
+    path.write_text("[settings]\nschema_version=2\npet_id=new_pet\n", encoding="utf-8")
+
+    assert SettingsStore(path).load().pet_id == "new_pet"
+
+
 def test_invalid_values_are_normalized_and_future_schema_falls_back(tmp_path: Path):
     path = tmp_path / "settings.ini"
     path.write_text(
-        "[settings]\nschema_version=2\npet_id=unknown\nscale_percent=98\n"
+        "[settings]\nschema_version=2\npet_id=../unsafe\nscale_percent=98\n"
         "animation_speed=turbo\nrelative_x=2\nrelative_y=-1\n",
         encoding="utf-8",
     )

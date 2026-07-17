@@ -9,7 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .product import PET_IDS
+from .pet_registry import is_valid_pet_id
+from .product import DEFAULT_PET_ID
 
 
 CURRENT_SCHEMA_VERSION = 2
@@ -24,7 +25,7 @@ class Logger(Protocol):
 @dataclass(frozen=True)
 class AppSettings:
     schema_version: int = CURRENT_SCHEMA_VERSION
-    pet_id: str = "shiyi"
+    pet_id: str = DEFAULT_PET_ID
     wander_enabled: bool = False
     gaze_enabled: bool = True
     hover_digits_enabled: bool = True
@@ -84,8 +85,8 @@ class SettingsStore:
         defaults = AppSettings()
         section = parser["settings"]
         values = asdict(defaults)
-        pet_id = section.get("pet_id", defaults.pet_id).lower()
-        values["pet_id"] = pet_id if pet_id in PET_IDS else defaults.pet_id
+        pet_id = section.get("pet_id", defaults.pet_id).strip().lower()
+        values["pet_id"] = pet_id if is_valid_pet_id(pet_id) else defaults.pet_id
         values["wander_enabled"] = self._read_bool(section, "wander_enabled", defaults.wander_enabled)
         values["gaze_enabled"] = self._read_bool(section, "gaze_enabled", defaults.gaze_enabled)
         values["hover_digits_enabled"] = self._read_bool(
@@ -155,7 +156,7 @@ class SettingsStore:
         """Ensure programmatic callers persist only supported current settings."""
         return AppSettings(
             schema_version=CURRENT_SCHEMA_VERSION,
-            pet_id=settings.pet_id.lower() if settings.pet_id.lower() in PET_IDS else AppSettings.pet_id,
+            pet_id=SettingsStore._normalize_pet_id(settings.pet_id),
             wander_enabled=bool(settings.wander_enabled),
             gaze_enabled=bool(settings.gaze_enabled),
             hover_digits_enabled=bool(settings.hover_digits_enabled),
@@ -177,3 +178,8 @@ class SettingsStore:
             relative_x=SettingsStore._clamp(float(settings.relative_x), AppSettings.relative_x),
             relative_y=SettingsStore._clamp(float(settings.relative_y), AppSettings.relative_y),
         )
+
+    @staticmethod
+    def _normalize_pet_id(value: object) -> str:
+        normalized = value.strip().lower() if isinstance(value, str) else ""
+        return normalized if is_valid_pet_id(normalized) else AppSettings.pet_id

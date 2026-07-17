@@ -38,6 +38,11 @@ def test_menu_contains_every_action_direction_and_toggle():
         settings_supplier=AppSettings,
         startup_supplier=lambda: True,
         dispatch=lambda command: None,
+        pet_choices_supplier=lambda: (
+            ("shiyi", "十一"),
+            ("ziling", "紫灵"),
+            ("new_pet", "新宠物"),
+        ),
     )
     labels = menu_controller.flattened_labels()
     for label in (
@@ -57,7 +62,12 @@ def test_menu_contains_every_action_direction_and_toggle():
     for label in ("自动闲逛", "看向鼠标", "悬停数字快捷键", "始终置顶", "开机启动"):
         assert label in labels
     for label in (
-        "切换宠物（十一 ⇄ 紫灵）",
+        "切换宠物",
+        "十一",
+        "紫灵",
+        "新宠物",
+        "重新扫描宠物",
+        "打开宠物目录",
         "75%",
         "100%",
         "125%",
@@ -74,20 +84,33 @@ def test_menu_contains_every_action_direction_and_toggle():
 
 def test_menu_dispatches_typed_values_from_one_command_model(qtbot):
     dispatched = []
-    controller = MenuController(AppSettings, lambda: False, dispatched.append)
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        dispatched.append,
+        pet_choices_supplier=lambda: (
+            ("shiyi", "十一"),
+            ("ziling", "紫灵"),
+            ("new_pet", "新宠物"),
+        ),
+    )
     menu = controller.create_menu()
 
     _action(menu, "跳跃").trigger()
     _action(menu, "观察 067.5°").trigger()
     _action(menu, "125%").trigger()
-    _action(menu, "切换宠物（十一 ⇄ 紫灵）").trigger()
+    _action(menu, "新宠物").trigger()
+    _action(menu, "重新扫描宠物").trigger()
+    _action(menu, "打开宠物目录").trigger()
     _action(menu, "自动闲逛").trigger()
 
     assert dispatched == [
         MenuCommand("action", ActionId.JUMP),
         MenuCommand("look", 67.5),
         MenuCommand("scale", 125),
-        MenuCommand("cycle_pet"),
+        MenuCommand("pet", "new_pet"),
+        MenuCommand("refresh_pets"),
+        MenuCommand("open_pets_directory"),
         MenuCommand("toggle", True, "wander_enabled"),
     ]
 
@@ -95,7 +118,10 @@ def test_menu_dispatches_typed_values_from_one_command_model(qtbot):
 def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     state = {"settings": AppSettings(), "startup": False}
     controller = MenuController(
-        lambda: state["settings"], lambda: state["startup"], lambda command: None
+        lambda: state["settings"],
+        lambda: state["startup"],
+        lambda command: None,
+        pet_choices_supplier=lambda: (("shiyi", "十一"), ("ziling", "紫灵")),
     )
     menu = controller.create_menu()
 
@@ -124,6 +150,24 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     assert _action(_submenu(menu, "动画速度"), "快速").isChecked()
     assert _action(_submenu(menu, "移动速度"), "慢速").isChecked()
     assert _action(menu, "开机启动").isChecked()
+    assert _action(_submenu(menu, "切换宠物"), "紫灵").isChecked()
+
+
+def test_pet_choices_are_rebuilt_when_menu_opens(qtbot):
+    choices = [[("shiyi", "十一"), ("ziling", "紫灵")]]
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        lambda command: None,
+        pet_choices_supplier=lambda: tuple(choices[0]),
+    )
+    menu = controller.create_menu()
+    assert _action(menu, "新宠物") is None
+
+    choices[0].append(("new_pet", "新宠物"))
+    menu.aboutToShow.emit()
+
+    assert _action(_submenu(menu, "切换宠物"), "新宠物") is not None
 
 
 def test_unavailable_tray_is_a_safe_disabled_object(monkeypatch, qtbot):
@@ -207,20 +251,32 @@ def test_supplier_failures_fall_back_report_and_do_not_escape_refresh(qtbot):
 
 
 def test_command_model_has_complete_exact_payload_table():
-    controller = MenuController(AppSettings, lambda: False, lambda command: None)
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        lambda command: None,
+        pet_choices_supplier=lambda: (
+            ("shiyi", "十一"),
+            ("ziling", "紫灵"),
+            ("new_pet", "新宠物"),
+        ),
+    )
     commands = [item.command for item in _leaf_items(controller.items)]
     action_commands = [command for command in commands if command.kind == "action"]
     look_commands = [command for command in commands if command.kind == "look"]
     toggle_commands = [command for command in commands if command.kind == "toggle"]
     scale_commands = [command for command in commands if command.kind == "scale"]
-    cycle_pet_commands = [command for command in commands if command.kind == "cycle_pet"]
+    pet_commands = [command for command in commands if command.kind == "pet"]
     speed_commands = [
         command
         for command in commands
         if command.kind in {"animation_speed", "movement_speed"}
     ]
     terminal_commands = [
-        command for command in commands if command.kind in {"center", "about", "quit"}
+        command
+        for command in commands
+        if command.kind
+        in {"refresh_pets", "open_pets_directory", "center", "about", "quit"}
     ]
 
     assert action_commands == [
@@ -245,13 +301,19 @@ def test_command_model_has_complete_exact_payload_table():
     ]
     assert all(command.value is None for command in toggle_commands)
     assert scale_commands == [MenuCommand("scale", value) for value in (75, 100, 125, 150)]
-    assert cycle_pet_commands == [MenuCommand("cycle_pet")]
+    assert pet_commands == [
+        MenuCommand("pet", "shiyi"),
+        MenuCommand("pet", "ziling"),
+        MenuCommand("pet", "new_pet"),
+    ]
     assert speed_commands == [
         MenuCommand(kind, value)
         for kind in ("animation_speed", "movement_speed")
         for value in ("slow", "normal", "fast")
     ]
     assert terminal_commands == [
+        MenuCommand("refresh_pets"),
+        MenuCommand("open_pets_directory"),
         MenuCommand("center"),
         MenuCommand("about"),
         MenuCommand("quit"),
