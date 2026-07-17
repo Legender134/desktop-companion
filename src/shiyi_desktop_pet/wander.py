@@ -40,7 +40,10 @@ class WanderPlanner:
             if room > 0
         ]
         directions = useful_directions or movable_directions
-        direction = self._random.choice(directions) if directions else self._random.choice((-1, 1))
+        if not directions:
+            return WanderTarget(position=current, direction=0)
+
+        direction = self._random.choice(directions)
 
         room = right_room if direction == 1 else left_room
         minimum_motion = 80 if room >= 80 else 0
