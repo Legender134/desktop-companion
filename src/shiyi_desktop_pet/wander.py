@@ -46,8 +46,8 @@ class WanderPlanner:
         direction = self._random.choice(directions)
 
         room = right_room if direction == 1 else left_room
-        minimum_motion = 80 if room >= 80 else 0
-        motion = self._random.uniform(minimum_motion, room) if room > 0 else 0
+        minimum_motion = 80 if room >= 80 else min(1.0, room)
+        motion = self._random.uniform(minimum_motion, room)
         target_x = current.x + direction * motion
         target_y = self._random.uniform(min_y, max_y) if max_y > min_y else min_y
         position = clamp_position(Point(target_x, target_y), pet, area)

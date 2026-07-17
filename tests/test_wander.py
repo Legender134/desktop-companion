@@ -71,6 +71,26 @@ def test_planner_uses_smaller_available_horizontal_motion_when_needed():
     assert 0 < target.position.x <= 70
 
 
+def test_sub_80_motion_stays_positive_when_rng_returns_lower_endpoint():
+    class LowerEndpointRandom:
+        def choice(self, values):
+            return values[0]
+
+        def uniform(self, start, end):
+            return start
+
+    planner = WanderPlanner(LowerEndpointRandom())
+    target = planner.choose_target(Point(0, 0), Size(10, 10), Rect(0, 0, 80, 100))
+    assert target.direction == 1
+    assert target.position.x > 0
+    assert (target.position.x - 0) * target.direction > 0
+
+    fractional_target = planner.choose_target(
+        Point(0, 0), Size(10, 10), Rect(0, 0, 10.5, 100)
+    )
+    assert fractional_target == WanderTarget(Point(0.5, 0), 1)
+
+
 def test_seeded_planners_produce_identical_target_sequences():
     first = WanderPlanner(Random(17))
     second = WanderPlanner(Random(17))
