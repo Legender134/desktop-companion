@@ -16,6 +16,10 @@ param(
 
     [switch]$SafeFunctionalFailureProbe,
 
+    [switch]$InjectSafeFunctionalFailureAfterStateCapture,
+
+    [string]$InternalProbeToken,
+
     [ValidateRange(1, 3600)]
     [int]$UninstallTimeoutSeconds = 180
 )
@@ -45,6 +49,19 @@ $allJobTreesQuiescent = $true
 $rollbackSafetyUnknown = $false
 $rollbackSafetyReasons = [System.Collections.Generic.List[string]]::new()
 $uninstallLaunchCount = 0
+
+if ($InjectSafeFunctionalFailureAfterStateCapture) {
+    if (
+        $PreflightOnly -or
+        -not $InternalProbeToken -or
+        $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN -cne $InternalProbeToken
+    ) {
+        throw 'Internal safe-functional-failure injection requires the matching wrapper token and a production-flow invocation'
+    }
+}
+elseif ($InternalProbeToken) {
+    throw 'InternalProbeToken is valid only with InjectSafeFunctionalFailureAfterStateCapture'
+}
 
 if ($null -eq ('ShiyiVerifier.JobObject' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -895,6 +912,21 @@ function Test-RollbackSafetyKnown {
     return ($allJobTreesQuiescent -and -not $rollbackSafetyUnknown)
 }
 
+function Format-ExceptionDetails {
+    param([AllowNull()][System.Exception]$Exception)
+
+    if ($null -eq $Exception) {
+        return '<none>'
+    }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $current = $Exception
+    while ($null -ne $current) {
+        $parts.Add("$($current.GetType().FullName): $($current.Message)")
+        $current = $current.InnerException
+    }
+    return ($parts -join ' -> INNER: ')
+}
+
 function Invoke-Uninstall {
     param([Parameter(Mandatory = $true)][string]$Directory)
 
@@ -936,7 +968,7 @@ exit $exitCode
             else {
                 '<no uninstall log>'
             }
-            throw "silent uninstall failed with exit code $exitCode. log=$logTail"
+            throw "silent uninstall failed with exit code $exitCode; job-active=$($result.JobActive); elapsed=$($result.ElapsedSeconds) seconds. log=$logTail"
         }
         Write-Output "JOB-CONTAINED UNINSTALL: directory=$Directory; timeout=$UninstallTimeoutSeconds seconds; elapsed=$($result.ElapsedSeconds) seconds; exit=$exitCode; job-active=$($result.JobActive)"
     }
@@ -1304,86 +1336,144 @@ function Invoke-FallbackForeignProcessProbe {
     }
 }
 
-function Invoke-SafeFunctionalFailureProbe {
-    $probeRoot = Join-Path $workRoot "functional-failure-probe-$([guid]::NewGuid().ToString('N'))"
-    if (-not (Test-DescendantPath -Path $probeRoot -Root $workRoot)) {
-        throw "Unsafe functional-failure probe root: $probeRoot"
+function Get-ProtectedProductStateSnapshot {
+    $holds = @(Get-ChildItem -LiteralPath $env:APPDATA, $env:LOCALAPPDATA -Force -ErrorAction Stop |
+        Where-Object Name -like 'ShiyiDesktopPet.sdd-hold-*' |
+        Sort-Object FullName |
+        ForEach-Object {
+            $fingerprint = if ($_.PSIsContainer) { Get-DirectoryFingerprint -Path $_.FullName } else { '<not-a-directory>' }
+            "$($_.FullName)|$fingerprint"
+        })
+    $processes = @(Get-TestProcesses | Sort-Object ProcessId | ForEach-Object {
+        "PID=$($_.ProcessId)|PATH=$(if ($_.ExecutablePath) { $_.ExecutablePath } else { '<unavailable>' })"
+    })
+    return [ordered]@{
+        RoamingFingerprint = if (Test-Path -LiteralPath $roamingPath) { Get-DirectoryFingerprint -Path $roamingPath } else { '<absent>' }
+        LocalFingerprint = if (Test-Path -LiteralPath $localPath) { Get-DirectoryFingerprint -Path $localPath } else { '<absent>' }
+        Run = Convert-RegistrySnapshotToCanonicalJson -Snapshot (Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName)
+        Uninstall = Convert-RegistrySnapshotToCanonicalJson -Snapshot (Get-RegistryTreeSnapshot -SubKey $uninstallKeyPath)
+        Processes = $processes
+        Holds = $holds
     }
-    [void](Assert-NoReparseComponents -Path $workRoot -Purpose 'functional-failure probe')
-    [void](New-Item -ItemType Directory -Path $probeRoot)
-    $dummyPath = Join-Path $probeRoot 'dummy-uninstaller.ps1'
-    $helperPath = Join-Path $probeRoot 'gated-dummy-helper.ps1'
-    $restoreBranchMarker = Join-Path $probeRoot 'restore-branch-executed.marker'
-    [System.IO.File]::WriteAllText(
-        $dummyPath,
-        'exit 23',
-        [System.Text.UTF8Encoding]::new($false)
-    )
-    $helperText = @'
-param([string]$GateName, [string]$DummyPath)
-$gate = [System.Threading.EventWaitHandle]::OpenExisting($GateName)
-try {
-    if (-not $gate.WaitOne(30000)) { exit 1460 }
 }
-finally {
-    $gate.Dispose()
-}
-$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-$startInfo.FileName = (Get-Process -Id $PID).Path
-$startInfo.UseShellExecute = $false
-$startInfo.CreateNoWindow = $true
-foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $DummyPath)) {
-    $startInfo.ArgumentList.Add($argument)
-}
-$dummy = [System.Diagnostics.Process]::new()
-$dummy.StartInfo = $startInfo
-[void]$dummy.Start()
-$dummy.WaitForExit()
-$exitCode = $dummy.ExitCode
-$dummy.Dispose()
-exit $exitCode
-'@
-    [System.IO.File]::WriteAllText($helperPath, $helperText, [System.Text.UTF8Encoding]::new($false))
 
-    $probePassed = $false
+function Convert-ProtectedProductStateToJson {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+    return ($Snapshot | ConvertTo-Json -Depth 20 -Compress)
+}
+
+function Invoke-SafeFunctionalFailureProbe {
+    if ((Test-Path -LiteralPath $testDirPath) -or (Test-Path -LiteralPath $upgradeDirPath)) {
+        throw 'Production-finalizer fault-injection probe requires both strict-work test roots to start absent'
+    }
+    $beforeState = Get-ProtectedProductStateSnapshot
+    $beforeStateJson = Convert-ProtectedProductStateToJson -Snapshot $beforeState
+    $beforeWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
+    $beforeBackups = @(Get-ChildItem -LiteralPath $workRoot -Force -Filter 'release-verify-*' | Select-Object -ExpandProperty FullName)
+    $token = [guid]::NewGuid().ToString('N')
+    $oldToken = $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN
     try {
-        $result = Invoke-GatedJobProcess -HelperPath $helperPath -HelperArguments @(
-            '-DummyPath', $dummyPath
-        ) -TimeoutSeconds 30 -Description 'dummy nonzero uninstaller functional-failure probe'
-        $functionalErrors = [System.Collections.Generic.List[string]]::new()
-        if ($result.ExitCode -ne 0) {
-            $functionalErrors.Add("dummy uninstaller functional exit=$($result.ExitCode)")
-        }
-        if ($functionalErrors.Count -ne 1 -or $result.ExitCode -ne 23 -or $result.JobActive -ne 0) {
-            throw "Functional-failure probe did not capture the expected quiescent nonzero result: $($result | ConvertTo-Json -Compress)"
-        }
-        $rollbackAllowed = Test-RollbackSafetyKnown
-        if (-not $rollbackAllowed) {
-            throw "Quiescent functional failure incorrectly disabled rollback: $($rollbackSafetyReasons -join '; ')"
-        }
-        # This is the same safety decision used by the real finally. The marker
-        # proves the restore/cleanup branch executed despite the functional error.
-        if ($rollbackAllowed) {
-            [System.IO.File]::WriteAllText(
-                $restoreBranchMarker,
-                'executed',
-                [System.Text.UTF8Encoding]::new($false)
-            )
-        }
-        if ([System.IO.File]::ReadAllText($restoreBranchMarker) -cne 'executed') {
-            throw 'Functional-failure probe restore branch did not execute'
-        }
-        $probePassed = $true
-        Write-Output 'FUNCTIONAL FAILURE PROBE PASSED: dummy-exit=23; job-active=0; functional-error-captured=true; rollbackAllowed=true; restore-branch-executed=true; product-state-mutated=false'
+        $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN = $token
+        $childResult = Invoke-CapturedProcess -FilePath (Get-Process -Id $PID).Path -Arguments @(
+            '-NoProfile',
+            '-NonInteractive',
+            '-File',
+            $PSCommandPath,
+            '-Installer',
+            $installerPath,
+            '-TestDir',
+            $testDirPath,
+            '-UninstallTimeoutSeconds',
+            $UninstallTimeoutSeconds.ToString(),
+            '-InjectSafeFunctionalFailureAfterStateCapture',
+            '-InternalProbeToken',
+            $token
+        ) -TimeoutSeconds 180
     }
     finally {
-        if ($probePassed -and (Test-Path -LiteralPath $probeRoot)) {
-            Remove-SafeTree -Path $probeRoot -AllowedRoots @($workRoot) -Purpose 'functional-failure probe cleanup'
-        }
-        elseif (Test-Path -LiteralPath $probeRoot) {
-            Write-Warning "Functional-failure probe evidence retained after failure: $probeRoot"
+        [System.Environment]::SetEnvironmentVariable(
+            'SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN',
+            $oldToken,
+            [System.EnvironmentVariableTarget]::Process
+        )
+    }
+
+    $childEvidence = "$($childResult.Stdout)`n$($childResult.Stderr)"
+    if ($childResult.ExitCode -eq 0) {
+        throw 'Production-finalizer fault-injection child unexpectedly exited 0'
+    }
+    foreach ($evidence in @(
+        [pscustomobject]@{ Label = 'user data backup'; Pattern = 'USER DATA BACKUP:' },
+        [pscustomobject]@{ Label = 'registry backup'; Pattern = 'REGISTRY BACKUP:' },
+        [pscustomobject]@{ Label = 'primary injection'; Pattern = 'INJECTED PRIMARY FAILURE AFTER STATE CAPTURE' },
+        [pscustomobject]@{ Label = 'complete Job quiescence'; Pattern = 'job-active=0' },
+        [pscustomobject]@{ Label = 'safe functional fallback'; Pattern = 'Fallback uninstall functional failure is quiescent; exact rollback will continue' },
+        [pscustomobject]@{ Label = 'registry restore'; Pattern = 'REGISTRY RESTORE:' },
+        [pscustomobject]@{ Label = 'functional priority error'; Pattern = 'Release verification functional failure after safe rollback:' },
+        [pscustomobject]@{ Label = 'preserved primary error'; Pattern = '(?s)primary=.*INJECTED\W+PRIMARY\W+FAILURE\W+AFTER\W+STATE\W+CAPTURE' }
+    )) {
+        if ($childEvidence -notmatch $evidence.Pattern) {
+            throw "Production-finalizer child output missing $($evidence.Label) evidence. stdout=$($childResult.Stdout) stderr=$($childResult.Stderr)"
         }
     }
+    $markerEvidenceCount = [regex]::Matches($childEvidence, 'STATE ISOLATION: verifier-owned ordinary root').Count
+    if ($markerEvidenceCount -ne 2) {
+        throw "Production-finalizer child did not report both verifier-owned marker roots: count=$markerEvidenceCount"
+    }
+    if ($beforeState.LocalFingerprint -ne '<absent>' -and $childEvidence -notmatch 'USER DATA RESTORE:') {
+        throw 'Production-finalizer child did not report restoring existing Local data'
+    }
+
+    $afterState = Get-ProtectedProductStateSnapshot
+    $afterStateJson = Convert-ProtectedProductStateToJson -Snapshot $afterState
+    if ($afterStateJson -cne $beforeStateJson) {
+        throw "Production-finalizer probe changed protected state. before=$beforeStateJson after=$afterStateJson"
+    }
+    if ((Test-Path -LiteralPath $testDirPath) -or (Test-Path -LiteralPath $upgradeDirPath)) {
+        throw 'Production-finalizer probe left a test install root after quiescent functional failure'
+    }
+
+    $afterBackups = @(Get-ChildItem -LiteralPath $workRoot -Force -Filter 'release-verify-*' | Select-Object -ExpandProperty FullName)
+    $newBackups = @($afterBackups | Where-Object { $_ -notin $beforeBackups })
+    if ($newBackups.Count -ne 1) {
+        throw "Expected one retained production recovery backup, found $($newBackups.Count): $($newBackups -join ', ')"
+    }
+    $retainedBackup = [System.IO.Path]::GetFullPath($newBackups[0])
+    [void](Assert-SafeRecursiveTarget -Path $retainedBackup -AllowedRoots @($workRoot) -Purpose 'production-finalizer retained backup validation')
+    $retainedRegistryPath = Join-Path $retainedBackup 'registry-state.clixml'
+    if (-not (Test-Path -LiteralPath $retainedRegistryPath -PathType Leaf)) {
+        throw "Retained production recovery backup lacks CLIXML: $retainedRegistryPath"
+    }
+    $retainedRegistry = Import-Clixml -LiteralPath $retainedRegistryPath
+    Assert-RegistrySnapshotEqual -Expected $retainedRegistry.Run -Actual (Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName) -Description 'retained/live Run registry'
+    Assert-RegistrySnapshotEqual -Expected $retainedRegistry.Uninstall -Actual (Get-RegistryTreeSnapshot -SubKey $uninstallKeyPath) -Description 'retained/live uninstall registry'
+
+    foreach ($dataEvidence in @(
+        [pscustomobject]@{ Name = 'roaming'; LivePath = $roamingPath; BackupPath = Join-Path $retainedBackup 'original-data\roaming'; Expected = $beforeState.RoamingFingerprint },
+        [pscustomobject]@{ Name = 'local'; LivePath = $localPath; BackupPath = Join-Path $retainedBackup 'original-data\local'; Expected = $beforeState.LocalFingerprint }
+    )) {
+        if ($dataEvidence.Expected -eq '<absent>') {
+            if (Test-Path -LiteralPath $dataEvidence.BackupPath) {
+                throw "Unexpected retained backup for originally absent $($dataEvidence.Name) data"
+            }
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $dataEvidence.BackupPath -PathType Container)) {
+            throw "Missing retained backup for $($dataEvidence.Name) data: $($dataEvidence.BackupPath)"
+        }
+        $backupFingerprint = Get-DirectoryFingerprint -Path $dataEvidence.BackupPath
+        $liveFingerprint = Get-DirectoryFingerprint -Path $dataEvidence.LivePath
+        if ($backupFingerprint -ne $dataEvidence.Expected -or $liveFingerprint -ne $dataEvidence.Expected) {
+            throw "Retained/live $($dataEvidence.Name) fingerprints differ: expected=$($dataEvidence.Expected), backup=$backupFingerprint, live=$liveFingerprint"
+        }
+    }
+
+    Remove-SafeTree -Path $retainedBackup -AllowedRoots @($workRoot) -Purpose 'validated production-finalizer recovery cleanup'
+    $afterWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
+    if (($afterWorkEntries | ConvertTo-Json -Compress) -cne ($beforeWorkEntries | ConvertTo-Json -Compress)) {
+        throw "Production-finalizer probe did not restore work inventory. before=$($beforeWorkEntries -join ', ') after=$($afterWorkEntries -join ', ')"
+    }
+    Write-Output "PRODUCTION FINALIZER FAILURE PROBE PASSED: child-exit=$($childResult.ExitCode); primary-preserved=true; functional-nonzero=true; job-active=0; strict-cleanup=true; registry-structural-restore=true; data-fingerprint-restore=true; retained-backup-validated-and-removed=true"
 }
 
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
@@ -1492,6 +1582,9 @@ $localState = $dataStates | Where-Object Name -eq 'local'
 $registryState = $null
 $stateCaptured = $false
 $verificationSucceeded = $false
+$primaryVerificationError = $null
+$restoreErrors = [System.Collections.Generic.List[string]]::new()
+$functionalErrors = [System.Collections.Generic.List[string]]::new()
 
 try {
     foreach ($state in $dataStates) {
@@ -1533,6 +1626,13 @@ try {
     Ensure-IsolatedDataRoots -States $dataStates
     foreach ($directory in @($testDirPath, $upgradeDirPath)) {
         Remove-SafeTree -Path $directory -AllowedRoots @($workRoot) -Purpose 'pre-test cleanup'
+    }
+
+    if ($InjectSafeFunctionalFailureAfterStateCapture) {
+        [void](New-Item -ItemType Directory -Path $testDirPath)
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination (Join-Path $testDirPath 'unins000.exe')
+        Write-Output 'INJECTED PRIMARY FAILURE AFTER STATE CAPTURE: dummy nonzero uninstaller created in strict work test root'
+        throw 'INJECTED PRIMARY FAILURE AFTER STATE CAPTURE'
     }
 
     Write-Output '--- ordinary install/self-test/uninstall ---'
@@ -1647,9 +1747,11 @@ try {
     Write-Output 'UPGRADE UNINSTALL VERIFY: process/run/uninstall/install/settings/log cleanup=true'
     $verificationSucceeded = $true
 }
+catch {
+    $primaryVerificationError = $_.Exception
+}
 finally {
-    $restoreErrors = [System.Collections.Generic.List[string]]::new()
-    $functionalErrors = [System.Collections.Generic.List[string]]::new()
+    try {
     $rollbackAllowed = Test-RollbackSafetyKnown
     if (-not $rollbackAllowed) {
         $restoreErrors.Add("rollback prohibited: process/job safety is unknown ($($rollbackSafetyReasons -join '; '))")
@@ -1664,12 +1766,13 @@ finally {
                 }
             }
             catch {
-                $functionalErrors.Add("fallback uninstall blocked/failed (${directory}): $($_.Exception.Message)")
+                $functionalDetail = Format-ExceptionDetails -Exception $_.Exception
+                $functionalErrors.Add("fallback uninstall blocked/failed (${directory}): $functionalDetail")
                 if (-not (Test-RollbackSafetyKnown)) {
                     $rollbackAllowed = $false
                     break
                 }
-                Write-Warning "Fallback uninstall functional failure is quiescent; exact rollback will continue: $($_.Exception.Message)"
+                Write-Warning "Fallback uninstall functional failure is quiescent; exact rollback will continue: $functionalDetail"
             }
         }
     }
@@ -1679,7 +1782,7 @@ finally {
             Assert-UninstallOwnershipGate -Context 'pre-rollback global check'
         }
         catch {
-            $restoreErrors.Add("rollback process-ownership gate: $($_.Exception.Message)")
+            $restoreErrors.Add("rollback process-ownership gate: $(Format-ExceptionDetails -Exception $_.Exception)")
             $rollbackAllowed = $false
         }
     }
@@ -1695,7 +1798,7 @@ finally {
                 Remove-SafeTree -Path $directory -AllowedRoots @($workRoot) -Purpose 'final test cleanup'
             }
             catch {
-                $restoreErrors.Add("cleanup ${directory}: $($_.Exception.Message)")
+                $restoreErrors.Add("cleanup ${directory}: $(Format-ExceptionDetails -Exception $_.Exception)")
             }
         }
     }
@@ -1705,27 +1808,27 @@ finally {
             Restore-RegistryValue -SubKey $runKeyPath -Name $runValueName -Snapshot $registryState.Run
         }
         catch {
-            $restoreErrors.Add("Run registry restore: $($_.Exception.Message)")
+            $restoreErrors.Add("Run registry restore: $(Format-ExceptionDetails -Exception $_.Exception)")
         }
         try {
             Restore-RegistryTree -SubKey $uninstallKeyPath -Snapshot $registryState.Uninstall
         }
         catch {
-            $restoreErrors.Add("uninstall registry restore: $($_.Exception.Message)")
+            $restoreErrors.Add("uninstall registry restore: $(Format-ExceptionDetails -Exception $_.Exception)")
         }
         try {
             $actualRun = Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName
             Assert-RegistrySnapshotEqual -Expected $registryState.Run -Actual $actualRun -Description 'Run registry'
         }
         catch {
-            $restoreErrors.Add("Run registry post-restore verification: $($_.Exception.Message)")
+            $restoreErrors.Add("Run registry post-restore verification: $(Format-ExceptionDetails -Exception $_.Exception)")
         }
         try {
             $actualUninstall = Get-RegistryTreeSnapshot -SubKey $uninstallKeyPath
             Assert-RegistrySnapshotEqual -Expected $registryState.Uninstall -Actual $actualUninstall -Description 'uninstall registry tree'
         }
         catch {
-            $restoreErrors.Add("uninstall registry post-restore verification: $($_.Exception.Message)")
+            $restoreErrors.Add("uninstall registry post-restore verification: $(Format-ExceptionDetails -Exception $_.Exception)")
         }
         Write-Output "REGISTRY RESTORE: Run=$($registryState.Run.Exists), Uninstall=$($registryState.Uninstall.Exists)"
     }
@@ -1750,7 +1853,7 @@ finally {
                 }
             }
             catch {
-                $restoreErrors.Add("user data restore ($($state.Name)): $($_.Exception.Message)")
+                $restoreErrors.Add("user data restore ($($state.Name)): $(Format-ExceptionDetails -Exception $_.Exception)")
             }
         }
     }
@@ -1763,7 +1866,7 @@ finally {
             Remove-SafeTree -Path $backupRoot -AllowedRoots @($workRoot) -Purpose 'verified backup cleanup'
         }
         catch {
-            $restoreErrors.Add("backup cleanup: $($_.Exception.Message)")
+            $restoreErrors.Add("backup cleanup: $(Format-ExceptionDetails -Exception $_.Exception)")
         }
     }
 
@@ -1796,16 +1899,23 @@ finally {
         Write-Warning "RECOVERY REGISTRY SNAPSHOT: $registryBackupPath (exists=$(Test-Path -LiteralPath $registryBackupPath))"
         Write-Warning "NON-DESTRUCTIVE RECOVERY OUTLINE: inspect listed hold/backup paths with Get-ChildItem -LiteralPath '<Path>' -Force; copy one to a new recovery directory with Copy-Item -LiteralPath '<Path>' -Destination '<NewPath>' -Recurse; inspect Import-Clixml -LiteralPath '$registryBackupPath'. Do not delete or overwrite current user data until contents are compared."
     }
-
-    if ($restoreErrors.Count -ne 0) {
-        throw "Release verification restore failed: $($restoreErrors -join ' | ')"
     }
-    if ($functionalErrors.Count -ne 0) {
-        throw "Release verification functional failure after safe rollback: $($functionalErrors -join ' | ')"
+    catch {
+        $restoreErrors.Add("unexpected finalization failure: $(Format-ExceptionDetails -Exception $_.Exception)")
     }
 }
 
+$primaryDetails = Format-ExceptionDetails -Exception $primaryVerificationError
+if ($restoreErrors.Count -ne 0) {
+    throw "Release verification restore failed: restore=$($restoreErrors -join ' | '); functional=$($functionalErrors -join ' | '); primary=$primaryDetails"
+}
+if ($functionalErrors.Count -ne 0) {
+    throw "Release verification functional failure after safe rollback: functional=$($functionalErrors -join ' | '); primary=$primaryDetails"
+}
+if ($null -ne $primaryVerificationError) {
+    throw "Release verification failed after exact rollback: primary=$primaryDetails"
+}
 if (-not $verificationSucceeded) {
-    throw 'Release verification did not complete'
+    throw 'Release verification did not complete without a captured primary error'
 }
 Write-Output 'RELEASE VERIFY PASSED: ordinary install/self-test/uninstall and upgrade preservation'
