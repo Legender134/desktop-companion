@@ -7,9 +7,11 @@ import re
 from pathlib import Path
 from typing import Protocol
 
+from .product import APP_IDENTIFIER
+
 
 RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
-VALUE_NAME = "ShiyiDesktopPet"
+VALUE_NAME = APP_IDENTIFIER
 
 
 class RunKey(Protocol):

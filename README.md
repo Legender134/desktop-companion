@@ -1,19 +1,18 @@
-# 十一桌面宠物
+# 桌面灵伴 2.0
 
-十一桌面宠物是面向 Windows 10/11 x64 的透明桌面宠物。它使用项目内经过批准的 WebP 图集展示休息、奔跑、招手、跳跃等动作，支持拖动、鼠标注视、自动闲逛、悬停数字快捷键、托盘菜单和当前用户开机启动。程序本身不发起网络请求，也不依赖 Codex。
+桌面灵伴 2.0 是面向 Windows 10/11 x64 的多角色透明桌面宠物，内置“十一”和“紫灵”。右键选择“切换宠物（十一 ⇄ 紫灵）”即可立即切换，并会记住当前选择。两套角色共享休息、奔跑、招手、跳跃等动作，以及拖动、鼠标注视、自动闲逛、数字快捷键、托盘菜单和当前用户开机启动。程序本身不发起网络请求，也不依赖 Codex。
 
 ## 发布状态
 
-本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。面向普通用户的主入口是发布目录中的 `十一桌面宠物安装程序.exe`，无需安装 Python、Qt、Codex 或开发工具。
+本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。面向普通用户的主入口是发布目录中的 `桌面灵伴安装程序.exe`，无需安装 Python、Qt、Codex 或开发工具。
 
 完整发布目录还包含：
 
 - `安装说明.md`：安装、操作、恢复、隐私和卸载说明；
 - `SHA256SUMS.txt`：安装程序和源码 ZIP 的 SHA-256；
-- `十一桌面宠物源代码.zip`：从最终发布提交导出的已跟踪源码；
-- `qa/`：真实安装版的 JPG 截图和对应 JSON 窗口元数据。
+- `桌面灵伴2.0源代码.zip`：从最终发布提交导出的已跟踪源码；
 
-自动验收结果、人工检查范围和已知工具限制见 [docs/manual-qa.md](docs/manual-qa.md)。
+自动验收结果、人工检查范围和已知工具限制见 [docs/manual-qa-v2.md](docs/manual-qa-v2.md)。
 
 ## 从源码准备、构建与验证
 
@@ -24,17 +23,18 @@ py -3.12 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -r requirements\dev.txt
 & .\.venv\Scripts\python.exe -m pip install -e .
 & .\.venv\Scripts\python.exe tools\make_icon.py
-& .\.venv\Scripts\python.exe -m pytest -q
-& .\.venv\Scripts\python.exe -m coverage run -m pytest
+& .\.venv\Scripts\python.exe -m pytest -q --ignore=tests/integration/test_frozen_smoke.py
+& .\.venv\Scripts\python.exe -m coverage run -m pytest --ignore=tests/integration/test_frozen_smoke.py
 & .\.venv\Scripts\python.exe -m coverage report --fail-under=85
 & .\.venv\Scripts\python.exe -m shiyi_desktop_pet --self-test
 & .\scripts\build_installer.ps1
+& .\.venv\Scripts\python.exe -m pytest tests\integration\test_frozen_smoke.py -q
 & .\scripts\verify_release.ps1 `
-    -Installer .\artifacts\十一桌面宠物安装程序.exe `
+    -Installer .\artifacts\桌面灵伴安装程序.exe `
     -TestDir (Join-Path $PWD 'work\release-smoke')
 ```
 
-`tools\make_icon.py` 只读取批准图集的休息动作第 0 行第 0 列，裁剪透明边界后居中并加入 8% 透明留白，确定性生成包含 16、32、48 和 256 像素图层的 `app.ico`。它不重绘宠物。
+`tools\make_icon.py` 读取紫灵图集的休息动作第 0 行第 0 列，裁剪透明边界后居中并加入 8% 透明留白，确定性生成包含 16、32、48 和 256 像素图层的 `app.ico`。它不重绘角色。
 
 通过自检后可从源码启动：
 
@@ -54,24 +54,24 @@ py -3.12 -m venv .venv
 
 ## 首次启动和记忆内容
 
-首次启动时，自动闲逛关闭、看向鼠标开启、悬停数字快捷键开启、始终置顶开启，大小为 100%，动画和移动速度均为正常。宠物出现在主屏幕右下方、任务栏上方。安装向导首次安装时默认勾选开机启动；也可在安装前取消，或安装后随时从宠物右键菜单关闭。
+首次启动默认显示十一；自动闲逛关闭、看向鼠标开启、悬停数字快捷键开启、始终置顶开启，大小为 100%，动画和移动速度均为正常。宠物出现在主屏幕右下方、任务栏上方。安装向导首次安装时默认勾选开机启动；也可在安装前取消，或安装后随时从宠物右键菜单关闭。
 
-受控退出时会保存自动闲逛、看向鼠标、数字快捷键、始终置顶、大小、两种速度、显示器和相对位置：
+切换角色时会立即保存当前宠物；受控退出时还会保存自动闲逛、看向鼠标、数字快捷键、始终置顶、大小、两种速度、显示器和相对位置：
 
 ```text
-%APPDATA%\ShiyiDesktopPet\settings.ini
+%APPDATA%\DesktopCompanion\settings.ini
 ```
 
 “开机启动”不写入 INI，而是读取或修改当前用户的以下注册表值：
 
 ```text
-HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ShiyiDesktopPet
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 ```
 
 日志位于：
 
 ```text
-%LOCALAPPDATA%\ShiyiDesktopPet\logs\ShiyiDesktopPet.log
+%LOCALAPPDATA%\DesktopCompanion\logs\DesktopCompanion.log
 ```
 
 日志以 UTF-8 轮转；单文件最大 1 MiB，保留 3 个备份。
@@ -121,11 +121,12 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ShiyiDesktopPet
 悬停数字快捷键
 始终置顶
 开机启动
+切换宠物（十一 ⇄ 紫灵）
 大小 > 75% / 100% / 125% / 150%
 动画速度 > 慢速 / 正常 / 快速
 移动速度 > 慢速 / 正常 / 快速
 回到屏幕中央
-关于十一
+关于桌面灵伴
 退出
 ```
 
@@ -139,11 +140,13 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ShiyiDesktopPet
 
 ## 安装与卸载
 
-使用发布目录内的 `十一桌面宠物安装程序.exe`，不要直接复制 `.venv`、`dist` 或源码目录：
+使用发布目录内的 `桌面灵伴安装程序.exe`，不要直接复制 `.venv`、`dist` 或源码目录：
 
-1. 双击安装程序并按向导安装。默认目标为 `%LOCALAPPDATA%\Programs\ShiyiDesktopPet`，仅写当前用户，不请求管理员权限。
+1. 双击安装程序并按向导安装。默认目标为 `%LOCALAPPDATA%\Programs\DesktopCompanion`，仅写当前用户，不请求管理员权限。
 2. 首次安装默认勾选开机启动；向导末页可立即运行。覆盖安装会先请求现有实例安全退出，并保留已有设置和用户当前的开机启动选择。
-3. 卸载时打开 Windows“设置 > 应用 > 已安装的应用”，找到“十一桌面宠物”并选择卸载。卸载程序会请求现有实例退出，并清除应用文件、该应用的 HKCU 启动项、设置和日志。
+3. 卸载时打开 Windows“设置 > 应用 > 已安装的应用”，找到“桌面灵伴”并选择卸载。卸载程序会请求现有实例退出，并清除应用文件、该应用的 HKCU 启动项、设置和日志。
+
+桌面灵伴使用新的安装目录、卸载 GUID、设置目录、自启动项和单实例标识，可以与“十一桌面宠物 1.0”同时安装；安装或卸载 2.0 不会删除 1.0。两版也能同时运行，但初始位置可能重叠，建议拖开或只保留一版开机启动。
 
 如需核验下载文件，请在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256`，并与同目录的 `SHA256SUMS.txt` 比较。更简明的用户说明见发布目录中的 `安装说明.md`。
 
@@ -159,14 +162,14 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ShiyiDesktopPet
 
 ### 宠物跑到屏幕外或显示器已断开
 
-程序会在启动、分辨率变化和显示器变化时把宠物限制到可用屏幕。仍找不到宠物时，先右键托盘图标，选择“回到屏幕中央”；该命令会把宠物移到光标所在显示器中央。如果托盘也不可用，运行 `--quit-existing`，备份后删除 `%APPDATA%\ShiyiDesktopPet\settings.ini`，再重新启动以恢复默认位置。
+程序会在启动、分辨率变化和显示器变化时把宠物限制到可用屏幕。仍找不到宠物时，先右键托盘图标，选择“回到屏幕中央”；该命令会把宠物移到光标所在显示器中央。如果托盘也不可用，运行 `--quit-existing`，备份后删除 `%APPDATA%\DesktopCompanion\settings.ini`，再重新启动以恢复默认位置。
 
 ### 数字快捷键没有反应
 
-确认“悬停数字快捷键”已勾选，宠物处于可见状态，并把光标放在宠物身体的非透明像素上；仅位于透明边缘时不会触发。主键盘和数字小键盘均支持。若键盘钩子启动失败，本次会话会自动关闭快捷键并尝试显示一次托盘通知，鼠标与菜单功能仍可使用。可重启程序并检查 `%LOCALAPPDATA%\ShiyiDesktopPet\logs\ShiyiDesktopPet.log`；安全软件、系统策略或高完整性前台程序也可能限制全局钩子。
+确认“悬停数字快捷键”已勾选，宠物处于可见状态，并把光标放在宠物身体的非透明像素上；仅位于透明边缘时不会触发。主键盘和数字小键盘均支持。若键盘钩子启动失败，本次会话会自动关闭快捷键并尝试显示一次托盘通知，鼠标与菜单功能仍可使用。可重启程序并检查 `%LOCALAPPDATA%\DesktopCompanion\logs\DesktopCompanion.log`；安全软件、系统策略或高完整性前台程序也可能限制全局钩子。
 
 ### 资源或 WebP 自检失败
 
-运行 `--self-test` 查看 JSON 结果。源码模式中重新安装精确锁定的 `requirements\dev.txt`，并确认 `src\shiyi_desktop_pet\resources` 内的 `pet.json`、`spritesheet.webp` 和 `app.ico` 没有缺失。资源契约失败时程序会记录错误并退出，不会显示空白宠物窗口。
+运行 `--self-test` 查看 JSON 结果；成功报告中的 `pets` 应为 `["shiyi","ziling"]`。源码模式中重新安装精确锁定的 `requirements\dev.txt`，并确认 `src\shiyi_desktop_pet\resources\pets\shiyi`、`pets\ziling` 和 `app.ico` 没有缺失。资源契约失败时程序会记录错误并退出，不会显示空白宠物窗口。
 
 第三方组件及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

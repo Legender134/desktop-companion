@@ -1,7 +1,10 @@
+import json
+
 from PySide6.QtGui import QImage
 
 from .constants import ACTION_SPECS, CELL_HEIGHT, CELL_WIDTH, LOOK_DEGREES
 from .models import ActionId, FrameAsset
+from .product import PET_IDS
 from .resource_locator import resource_path
 
 
@@ -14,13 +17,21 @@ def _has_visible_pixel(image: QImage) -> bool:
 
 
 class AnimationCatalog:
-    def __init__(self, atlas: QImage):
+    def __init__(
+        self,
+        atlas: QImage,
+        *,
+        pet_id: str = "custom",
+        display_name: str = "",
+    ):
         if atlas.isNull():
             raise ValueError("spritesheet could not be decoded")
         if (atlas.width(), atlas.height()) != (1536, 2288):
             raise ValueError("spritesheet must be 1536x2288")
         if not atlas.hasAlphaChannel():
             raise ValueError("spritesheet must have alpha")
+        self.pet_id = pet_id
+        self.display_name = display_name
         self._atlas = atlas.convertToFormat(QImage.Format.Format_RGBA8888)
         self.look_degrees = LOOK_DEGREES
         used_counts = (7, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8)
@@ -39,7 +50,29 @@ class AnimationCatalog:
 
     @classmethod
     def load_default(cls) -> "AnimationCatalog":
-        return cls(QImage(str(resource_path("spritesheet.webp"))))
+        return cls.load_pet("shiyi")
+
+    @classmethod
+    def load_pet(cls, pet_id: str) -> "AnimationCatalog":
+        if pet_id not in PET_IDS:
+            raise ValueError(f"unknown pet: {pet_id}")
+        root = f"pets/{pet_id}"
+        manifest_path = resource_path(f"{root}/pet.json")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("id") != pet_id:
+            raise ValueError(f"pet manifest id mismatch: {pet_id}")
+        if manifest.get("spriteVersionNumber") != 2:
+            raise ValueError(f"unsupported sprite version for pet: {pet_id}")
+        if manifest.get("spritesheetPath") != "spritesheet.webp":
+            raise ValueError(f"unexpected spritesheet path for pet: {pet_id}")
+        display_name = manifest.get("displayName")
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise ValueError(f"missing display name for pet: {pet_id}")
+        return cls(
+            QImage(str(resource_path(f"{root}/spritesheet.webp"))),
+            pet_id=pet_id,
+            display_name=display_name,
+        )
 
     def _cell(self, row: int, column: int) -> QImage:
         return self._atlas.copy(column * CELL_WIDTH, row * CELL_HEIGHT, CELL_WIDTH, CELL_HEIGHT)

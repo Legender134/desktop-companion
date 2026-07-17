@@ -205,6 +205,7 @@ def test_self_test_reports_resources_qt_and_webp():
     report = run_self_test()
     assert report["ok"] is True
     assert report["atlas"] == {"width": 1536, "height": 2288, "frames": 74}
+    assert report["pets"] == ["shiyi", "ziling"]
     assert report["webp_plugin"] is True
     assert report["qt"]
 
@@ -274,11 +275,11 @@ def test_qa_window_is_enumerable_without_changing_default_window_type(qapp):
         assert (
             qa_controller.window.windowFlags() & Qt.WindowType.WindowType_Mask
         ) == Qt.WindowType.Window
-        assert qa_controller.window.windowTitle() == "ShiyiDesktopPet QA"
+        assert qa_controller.window.windowTitle() == "DesktopCompanion QA"
         assert (
             default_controller.window.windowFlags() & Qt.WindowType.WindowType_Mask
         ) == Qt.WindowType.Tool
-        assert default_controller.window.windowTitle() != "ShiyiDesktopPet QA"
+        assert default_controller.window.windowTitle() != "DesktopCompanion QA"
     finally:
         qa_controller.shutdown()
         default_controller.shutdown()
@@ -550,7 +551,7 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.dispatch_menu(MenuCommand("toggle", False, "wander_enabled"))
     controller.dispatch_menu(MenuCommand("center"))
     controller.dispatch_menu(MenuCommand("about"))
-    assert about == [("关于十一", "十一桌面宠物 1.0")]
+    assert about == [("关于桌面灵伴", "桌面灵伴 2.0\n内置宠物：十一、紫灵")]
 
     hooks[0].digit_pressed.emit(4)
     assert controller.current_action is ActionId.WAVE
@@ -568,13 +569,30 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.shutdown()
 
 
+def test_pet_switch_is_immediate_and_persisted(qapp):
+    controller, store, _, _, _ = _controller(qapp)
+    original = controller.window.current_frame.image
+
+    controller.dispatch_menu(MenuCommand("cycle_pet"))
+
+    assert controller.settings.pet_id == "ziling"
+    assert controller.catalog.pet_id == "ziling"
+    assert controller.window.current_frame.image != original
+    assert store.saved[-1].pet_id == "ziling"
+
+    controller.dispatch_menu(MenuCommand("cycle_pet"))
+    assert controller.settings.pet_id == "shiyi"
+    assert controller.catalog.pet_id == "shiyi"
+    controller.shutdown()
+
+
 def test_rotating_logging_and_exception_cleanup(tmp_path, qapp, monkeypatch):
     logger = configure_logging(tmp_path)
     assert configure_logging(tmp_path) is logger
     handler = next(
         item
         for item in logger.handlers
-        if getattr(item, "baseFilename", "") == str((tmp_path / "ShiyiDesktopPet.log").resolve())
+        if getattr(item, "baseFilename", "") == str((tmp_path / "DesktopCompanion.log").resolve())
     )
     assert handler.maxBytes == 1_048_576
     assert handler.backupCount == 3
@@ -602,7 +620,7 @@ def test_rotating_logging_and_exception_cleanup(tmp_path, qapp, monkeypatch):
         sys.excepthook = previous
     assert events == ["stop", "hide"]
     handler.flush()
-    assert "Unhandled application exception" in (tmp_path / "ShiyiDesktopPet.log").read_text(
+    assert "Unhandled application exception" in (tmp_path / "DesktopCompanion.log").read_text(
         encoding="utf-8"
     )
 
@@ -761,6 +779,19 @@ def test_stdout_writer_uses_python_stream(monkeypatch):
     monkeypatch.setattr(sys, "stdout", stream)
     _write_stdout("{\"ok\":true}\n")
     assert stream.getvalue() == "{\"ok\":true}\n"
+
+
+def test_stdout_writer_does_not_crash_a_windowed_process_with_a_broken_stream(monkeypatch):
+    class BrokenStream:
+        def write(self, text):
+            del text
+            raise OSError(22, "Invalid argument")
+
+        def flush(self):
+            raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(sys, "stdout", BrokenStream())
+    _write_stdout("{\"ok\":true}\n")
 
 
 def test_atlas_failure_releases_instance_guard_and_returns_nonzero(

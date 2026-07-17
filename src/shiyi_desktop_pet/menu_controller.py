@@ -104,6 +104,7 @@ MENU_ITEMS = (
         MenuCommand("toggle", target="startup_enabled"),
         checked_from="startup_enabled",
     ),
+    MenuItem("切换宠物（十一 ⇄ 紫灵）", MenuCommand("cycle_pet")),
     MenuItem(
         "大小",
         children=tuple(
@@ -126,7 +127,7 @@ MENU_ITEMS = (
         ),
     ),
     MenuItem("回到屏幕中央", MenuCommand("center")),
-    MenuItem("关于十一", MenuCommand("about")),
+    MenuItem("关于桌面灵伴", MenuCommand("about")),
     MenuItem("退出", MenuCommand("quit")),
 )
 

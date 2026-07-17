@@ -29,6 +29,14 @@ from .logging_setup import configure_logging, install_exception_hook
 from .menu_controller import MenuCommand, MenuController
 from .models import ActionId, FrameAsset
 from .pet_window import PetWindow
+from .product import (
+    APP_IDENTIFIER,
+    PET_CHOICES,
+    PET_IDS,
+    PRODUCT_NAME,
+    PRODUCT_VERSION,
+    SETTINGS_DIRECTORY,
+)
 from .settings import AppSettings, SettingsStore
 from .single_instance import SingleInstanceGuard
 from .startup import StartupManager, WinRegRunKey
@@ -127,7 +135,7 @@ def restore_window_position(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="ShiyiDesktopPet")
+    parser = argparse.ArgumentParser(prog=APP_IDENTIFIER)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--self-test", action="store_true")
     modes.add_argument("--quit-existing", action="store_true")
@@ -137,18 +145,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run_self_test(
-    catalog_factory: Callable[[], AnimationCatalog] = AnimationCatalog.load_default,
+    catalog_factory: Callable[[], AnimationCatalog] | None = None,
 ) -> dict[str, object]:
     """Decode and validate packaged resources plus the Qt WebP reader plugin."""
-    catalog = catalog_factory()
-    standard_frames = sum(len(catalog.frames(action)) for action in ACTION_SPECS)
+    catalogs = (
+        [catalog_factory()]
+        if catalog_factory is not None
+        else [AnimationCatalog.load_pet(pet_id) for pet_id in sorted(PET_IDS)]
+    )
+    standard_frames = [
+        sum(len(catalog.frames(action)) for action in ACTION_SPECS)
+        for catalog in catalogs
+    ]
     look_only_frames = 16
     formats = {bytes(item).lower() for item in QImageReader.supportedImageFormats()}
     return {
-        "ok": standard_frames + look_only_frames == 74 and b"webp" in formats,
+        "ok": all(count + look_only_frames == 74 for count in standard_frames)
+        and b"webp" in formats,
         "qt": qVersion(),
         "atlas": {"width": 1536, "height": 2288, "frames": 74},
         "webp_plugin": b"webp" in formats,
+        "pets": [catalog.pet_id for catalog in catalogs],
     }
 
 
@@ -161,7 +178,8 @@ class DesktopPetApplication:
         *,
         settings_store: SettingsStore,
         startup_manager: StartupManager,
-        catalog_factory: Callable[[], AnimationCatalog] = AnimationCatalog.load_default,
+        catalog_factory: Callable[[], AnimationCatalog] | None = None,
+        catalog_loader: Callable[[str], AnimationCatalog] = AnimationCatalog.load_pet,
         hook_factory: Callable[..., object] = LowLevelKeyboardHook,
         tray_factory: Callable[..., object] = TrayController,
         random: Random | None = None,
@@ -172,10 +190,15 @@ class DesktopPetApplication:
     ) -> None:
         self.qapp = qapp
         self.logger = logger or _LOGGER
-        self.catalog = catalog_factory()
         self.settings_store = settings_store
         self.startup_manager = startup_manager
         self._settings = settings_store.load()
+        self._catalog_loader = catalog_loader
+        self.catalog = (
+            catalog_factory()
+            if catalog_factory is not None
+            else self._catalog_loader(self._settings.pet_id)
+        )
         self._session_hover_digits_enabled = self._settings.hover_digits_enabled
         self._hook_available = True
         self._hook_notification_shown = False
@@ -190,7 +213,7 @@ class DesktopPetApplication:
             window_flags = self.window.windowFlags()
             window_flags &= ~Qt.WindowType.WindowType_Mask
             self.window.setWindowFlags(window_flags | Qt.WindowType.Window)
-            self.window.setWindowTitle("ShiyiDesktopPet QA")
+            self.window.setWindowTitle(f"{APP_IDENTIFIER} QA")
         self.window.setWindowFlag(
             Qt.WindowType.WindowStaysOnTopHint, self._settings.always_on_top
         )
@@ -410,6 +433,14 @@ class DesktopPetApplication:
             self._render_current_frame()
             self._recover_window_visibility()
             return
+        if kind == "pet":
+            self._switch_pet(str(command.value))
+            return
+        if kind == "cycle_pet":
+            pet_ids = tuple(pet_id for pet_id, _ in PET_CHOICES)
+            current_index = pet_ids.index(self._settings.pet_id)
+            self._switch_pet(pet_ids[(current_index + 1) % len(pet_ids)])
+            return
         if kind == "animation_speed":
             self._settings = replace(self._settings, animation_speed=str(command.value))
             return
@@ -420,12 +451,31 @@ class DesktopPetApplication:
             self.center_on_cursor_screen()
             return
         if kind == "about":
-            self._about_dialog(self.window, "关于十一", "十一桌面宠物 1.0")
+            self._about_dialog(
+                self.window,
+                f"关于{PRODUCT_NAME}",
+                f"{PRODUCT_NAME} {PRODUCT_VERSION}\n内置宠物：十一、紫灵",
+            )
             return
         if kind == "quit":
             self.request_quit()
             return
         raise ValueError(f"unsupported menu command: {kind}")
+
+    def _switch_pet(self, pet_id: str) -> None:
+        if pet_id not in PET_IDS:
+            raise ValueError(f"unknown pet: {pet_id}")
+        if pet_id == self._settings.pet_id and self.catalog.pet_id == pet_id:
+            return
+        catalog = self._catalog_loader(pet_id)
+        self.catalog = catalog
+        self.window.set_catalog(catalog)
+        self._settings = replace(self._settings, pet_id=pet_id)
+        self._alpha_cache.clear()
+        self._displayed_frame = None
+        self._render_current_frame()
+        self._recover_window_visibility()
+        self.settings_store.save(self._settings)
 
     def center_on_cursor_screen(self) -> None:
         screen = QGuiApplication.screenAt(QCursor.pos()) or self.qapp.primaryScreen()
@@ -497,7 +547,7 @@ class DesktopPetApplication:
             self._hook_notification_shown = True
             try:
                 self.tray.show_message(
-                    "十一桌面宠物",
+                    PRODUCT_NAME,
                     "数字快捷键暂时不可用，其他功能仍可正常使用。",
                 )
             except Exception:
@@ -833,7 +883,7 @@ def _default_data_root(environment_name: str) -> Path:
 
 
 def _default_settings_store() -> SettingsStore:
-    return SettingsStore(_default_data_root("APPDATA") / "ShiyiDesktopPet" / "settings.ini")
+    return SettingsStore(_default_data_root("APPDATA") / SETTINGS_DIRECTORY / "settings.ini")
 
 
 def _default_startup_manager() -> StartupManager:
@@ -844,8 +894,13 @@ def _write_stdout(text: str) -> None:
     """Write JSON in console and PyInstaller windowed/inherited-pipe modes."""
     stream = sys.stdout
     if stream is not None:
-        stream.write(text)
-        stream.flush()
+        try:
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            # A windowed executable started without redirected output can
+            # inherit a placeholder stream whose Win32 handle is invalid.
+            pass
         return
     data = text.encode("utf-8")
     if sys.platform == "win32":
@@ -868,7 +923,10 @@ def _write_stdout(text: str) -> None:
             buffer = ctypes.create_string_buffer(data)
             if write_file(handle, buffer, len(data), ctypes.byref(written), None):
                 return
-    os.write(1, data)
+    try:
+        os.write(1, data)
+    except OSError:
+        pass
 
 
 def main(
@@ -876,7 +934,7 @@ def main(
     *,
     qapp: QApplication | None = None,
     guard_factory: Callable[[], SingleInstanceGuard] = SingleInstanceGuard,
-    catalog_factory: Callable[[], AnimationCatalog] = AnimationCatalog.load_default,
+    catalog_factory: Callable[[], AnimationCatalog] | None = None,
     settings_store_factory: Callable[[], SettingsStore] = _default_settings_store,
     startup_manager_factory: Callable[[], StartupManager] = _default_startup_manager,
     hook_factory: Callable[..., object] = LowLevelKeyboardHook,
@@ -913,7 +971,7 @@ def main(
         guard.close()
         return 0
 
-    logger = configure_logging(_default_data_root("LOCALAPPDATA") / "ShiyiDesktopPet" / "logs")
+    logger = configure_logging(_default_data_root("LOCALAPPDATA") / SETTINGS_DIRECTORY / "logs")
     dialog = critical_error or (
         lambda title, message: QMessageBox.critical(None, title, message)
     )
@@ -932,7 +990,7 @@ def main(
     except Exception as error:
         logger.exception("Desktop-pet atlas or runtime construction failed")
         try:
-            dialog("十一桌面宠物无法启动", f"资源加载失败：{error}")
+            dialog(f"{PRODUCT_NAME}无法启动", f"资源加载失败：{error}")
         except Exception:
             logger.exception("Could not show startup failure dialog")
         finally:

@@ -57,6 +57,7 @@ def test_menu_contains_every_action_direction_and_toggle():
     for label in ("自动闲逛", "看向鼠标", "悬停数字快捷键", "始终置顶", "开机启动"):
         assert label in labels
     for label in (
+        "切换宠物（十一 ⇄ 紫灵）",
         "75%",
         "100%",
         "125%",
@@ -65,7 +66,7 @@ def test_menu_contains_every_action_direction_and_toggle():
         "正常",
         "快速",
         "回到屏幕中央",
-        "关于十一",
+        "关于桌面灵伴",
         "退出",
     ):
         assert label in labels
@@ -79,12 +80,14 @@ def test_menu_dispatches_typed_values_from_one_command_model(qtbot):
     _action(menu, "跳跃").trigger()
     _action(menu, "观察 067.5°").trigger()
     _action(menu, "125%").trigger()
+    _action(menu, "切换宠物（十一 ⇄ 紫灵）").trigger()
     _action(menu, "自动闲逛").trigger()
 
     assert dispatched == [
         MenuCommand("action", ActionId.JUMP),
         MenuCommand("look", 67.5),
         MenuCommand("scale", 125),
+        MenuCommand("cycle_pet"),
         MenuCommand("toggle", True, "wander_enabled"),
     ]
 
@@ -111,6 +114,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
         scale_percent=150,
         animation_speed="fast",
         movement_speed="slow",
+        pet_id="ziling",
     )
     state["startup"] = True
     menu.aboutToShow.emit()
@@ -207,6 +211,7 @@ def test_command_model_has_complete_exact_payload_table():
     look_commands = [command for command in commands if command.kind == "look"]
     toggle_commands = [command for command in commands if command.kind == "toggle"]
     scale_commands = [command for command in commands if command.kind == "scale"]
+    cycle_pet_commands = [command for command in commands if command.kind == "cycle_pet"]
     speed_commands = [
         command
         for command in commands
@@ -238,6 +243,7 @@ def test_command_model_has_complete_exact_payload_table():
     ]
     assert all(command.value is None for command in toggle_commands)
     assert scale_commands == [MenuCommand("scale", value) for value in (75, 100, 125, 150)]
+    assert cycle_pet_commands == [MenuCommand("cycle_pet")]
     assert speed_commands == [
         MenuCommand(kind, value)
         for kind in ("animation_speed", "movement_speed")

@@ -11,12 +11,14 @@ from collections.abc import Callable
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from .product import LOG_FILENAME
+
 
 def configure_logging(log_dir: Path) -> logging.Logger:
     """Configure the package logger with a bounded UTF-8 rotating file."""
     directory = Path(log_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    log_path = directory / "ShiyiDesktopPet.log"
+    log_path = directory / LOG_FILENAME
     logger = logging.getLogger("shiyi_desktop_pet")
     logger.setLevel(logging.INFO)
     logger.propagate = False

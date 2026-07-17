@@ -2,11 +2,16 @@ from uuid import uuid4
 
 from PySide6.QtCore import QTimer
 
-from shiyi_desktop_pet.single_instance import SingleInstanceGuard
+from shiyi_desktop_pet.single_instance import MUTEX_NAME, SERVER_NAME, SingleInstanceGuard
+
+
+def test_v2_uses_an_independent_product_instance_identity():
+    assert MUTEX_NAME == r"Local\DesktopCompanion.Singleton.v2"
+    assert SERVER_NAME == "DesktopCompanion.IPC.v2"
 
 
 def test_second_guard_sends_activate_to_first(qtbot):
-    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    instance_name = f"DesktopCompanion.Test.{uuid4().hex}"
     first = SingleInstanceGuard(instance_name)
     assert first.acquire()
 
@@ -20,7 +25,7 @@ def test_second_guard_sends_activate_to_first(qtbot):
 
 
 def test_second_guard_sends_quit_and_owner_close_is_idempotent(qtbot):
-    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    instance_name = f"DesktopCompanion.Test.{uuid4().hex}"
     first = SingleInstanceGuard(instance_name)
     assert first.acquire()
 
@@ -35,7 +40,7 @@ def test_second_guard_sends_quit_and_owner_close_is_idempotent(qtbot):
 
 
 def test_guard_rejects_unknown_command():
-    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    instance_name = f"DesktopCompanion.Test.{uuid4().hex}"
     guard = SingleInstanceGuard(instance_name)
     try:
         with __import__("pytest").raises(ValueError):
@@ -50,7 +55,7 @@ def test_guard_validation_owner_properties_and_missing_peer():
     with __import__("pytest").raises(ValueError):
         SingleInstanceGuard("test", timeout_ms=0)
 
-    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    instance_name = f"DesktopCompanion.Test.{uuid4().hex}"
     owner = SingleInstanceGuard(instance_name)
     try:
         assert not owner.is_owner
@@ -71,7 +76,7 @@ def test_guard_validation_owner_properties_and_missing_peer():
 
     missing = ExistingMutex()
     peer = SingleInstanceGuard(
-        f"ShiyiDesktopPet.Test.{uuid4().hex}",
+        f"DesktopCompanion.Test.{uuid4().hex}",
         timeout_ms=10,
         mutex_factory=lambda name: missing,
     )
@@ -81,7 +86,7 @@ def test_guard_validation_owner_properties_and_missing_peer():
 
 
 def test_existing_mutex_retries_until_delayed_server_listens(qtbot):
-    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    instance_name = f"DesktopCompanion.Test.{uuid4().hex}"
 
     class Mutex:
         def __init__(self, already_exists):

@@ -12,8 +12,8 @@ from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QTimer, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
-MUTEX_NAME = r"Local\ShiyiDesktopPet.Singleton.v1"
-SERVER_NAME = "ShiyiDesktopPet.IPC.v1"
+MUTEX_NAME = r"Local\DesktopCompanion.Singleton.v2"
+SERVER_NAME = "DesktopCompanion.IPC.v2"
 ERROR_ALREADY_EXISTS = 183
 _VALID_COMMANDS = frozenset({"activate", "quit"})
 _LOGGER = logging.getLogger(__name__)

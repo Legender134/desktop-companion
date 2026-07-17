@@ -6,7 +6,7 @@ $buildApp = Join-Path $scriptRoot 'build_app.ps1'
 $installerScript = Join-Path $repoRoot 'packaging\installer.iss'
 $languageFile = Join-Path $repoRoot 'packaging\languages\ChineseSimplified.isl'
 $artifactsDir = Join-Path $repoRoot 'artifacts'
-$expectedInstaller = Join-Path $artifactsDir '十一桌面宠物安装程序.exe'
+$expectedInstaller = Join-Path $artifactsDir '桌面灵伴安装程序.exe'
 $expectedLanguageHash = '869E43E7C7B8D20C7E4397C8E98F7D1B7CF0528803ACDF019AD350143EC85469'
 
 function Get-InnoInstallRecords {
@@ -209,7 +209,7 @@ try {
         throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
     }
 
-    $installers = @(Get-ChildItem -LiteralPath $artifactsDir -File -Filter '十一桌面宠物安装程序*.exe')
+    $installers = @(Get-ChildItem -LiteralPath $artifactsDir -File -Filter '桌面灵伴安装程序*.exe')
     if ($installers.Count -ne 1) {
         throw "Expected exactly one installer, found $($installers.Count) in $artifactsDir"
     }

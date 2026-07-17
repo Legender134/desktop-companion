@@ -9,7 +9,15 @@ from PIL import Image
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ATLAS_PATH = REPO_ROOT / "src" / "shiyi_desktop_pet" / "resources" / "spritesheet.webp"
+ATLAS_PATH = (
+    REPO_ROOT
+    / "src"
+    / "shiyi_desktop_pet"
+    / "resources"
+    / "pets"
+    / "ziling"
+    / "spritesheet.webp"
+)
 ICON_PATH = REPO_ROOT / "src" / "shiyi_desktop_pet" / "resources" / "app.ico"
 IDLE_CELL = (0, 0, 192, 208)
 ICON_SIZES = (16, 32, 48, 256)

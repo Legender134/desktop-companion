@@ -47,6 +47,20 @@ def test_catalog_exposes_all_actions_and_look_directions():
     assert all(not catalog.look_frame(degrees).image.isNull() for degrees in catalog.look_degrees)
 
 
+def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():
+    shiyi = AnimationCatalog.load_pet("shiyi")
+    ziling = AnimationCatalog.load_pet("ziling")
+
+    assert shiyi.pet_id == "shiyi"
+    assert shiyi.display_name == "十一"
+    assert ziling.pet_id == "ziling"
+    assert ziling.display_name == "紫灵"
+    assert shiyi.frames(ActionId.IDLE)[0].image != ziling.frames(ActionId.IDLE)[0].image
+
+    with pytest.raises(ValueError, match="unknown pet"):
+        AnimationCatalog.load_pet("missing")
+
+
 def test_alpha_hit_test_uses_scaled_visible_pixel():
     catalog = AnimationCatalog.load_default()
     frame = catalog.frames(ActionId.IDLE)[0]

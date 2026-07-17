@@ -89,10 +89,10 @@ $registryBackupPath = Join-Path $backupRoot 'registry-state.clixml'
 $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
 
 $runKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Run'
-$runValueName = 'ShiyiDesktopPet'
-$uninstallKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{5F4B3AD9-7C91-4E2D-A4C4-70C5C4F5A211}_is1'
-$roamingPath = [System.IO.Path]::GetFullPath((Join-Path $env:APPDATA 'ShiyiDesktopPet'))
-$localPath = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ShiyiDesktopPet'))
+$runValueName = 'DesktopCompanion'
+$uninstallKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{024D8DE0-D8D7-46BD-B09D-CB89484282B4}_is1'
+$roamingPath = [System.IO.Path]::GetFullPath((Join-Path $env:APPDATA 'DesktopCompanion'))
+$localPath = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'DesktopCompanion'))
 $ownedProcesses = [System.Collections.Generic.List[object]]::new()
 $retainedJobHandles = [System.Collections.Generic.List[object]]::new()
 $allJobTreesQuiescent = $true
@@ -117,7 +117,7 @@ $localSystemSid = [System.Security.Principal.SecurityIdentifier]::new(
     [System.Security.Principal.WellKnownSidType]::LocalSystemSid,
     $null
 )
-$releaseVerificationMutexName = "Global\ShiyiDesktopPet.ReleaseVerify.$currentUserSidValue.v1"
+$releaseVerificationMutexName = "Global\DesktopCompanion.ReleaseVerify.$currentUserSidValue.v2"
 
 if ($null -eq ('ShiyiVerifier.JobObject' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -727,7 +727,7 @@ function Invoke-CapturedProcess {
         $startedAt = $process.StartTime.ToUniversalTime()
         $resolvedFile = [System.IO.Path]::GetFullPath($FilePath)
         if (
-            [System.IO.Path]::GetFileName($resolvedFile) -ieq 'ShiyiDesktopPet.exe' -and
+            [System.IO.Path]::GetFileName($resolvedFile) -ieq 'DesktopCompanion.exe' -and
             ((Test-DescendantPath -Path $resolvedFile -Root $testDirPath) -or
              (Test-DescendantPath -Path $resolvedFile -Root $upgradeDirPath))
         ) {
@@ -1143,7 +1143,7 @@ function Write-AbandonedMutexRecoveryInventory {
         }
 
         $holds = @(Get-ChildItem -LiteralPath $env:APPDATA, $env:LOCALAPPDATA -Force |
-            Where-Object Name -like 'ShiyiDesktopPet.sdd-hold-*' |
+            Where-Object Name -like 'DesktopCompanion.sdd-hold-*' |
             Sort-Object FullName)
         if ($holds.Count -eq 0) {
             Write-Warning 'ABANDONED MUTEX RECOVERY HOLDS: <none>'
@@ -1332,7 +1332,7 @@ exit $exitCode
 }
 
 function Get-TestProcesses {
-    return @(Get-CimInstance Win32_Process -Filter "Name = 'ShiyiDesktopPet.exe'" -ErrorAction Stop)
+    return @(Get-CimInstance Win32_Process -Filter "Name = 'DesktopCompanion.exe'" -ErrorAction Stop)
 }
 
 function Assert-NoTestProcesses {
@@ -1341,7 +1341,7 @@ function Assert-NoTestProcesses {
         $details = @($processes | ForEach-Object {
             "PID=$($_.ProcessId), path=$(if ($_.ExecutablePath) { $_.ExecutablePath } else { '<unavailable>' })"
         }) -join '; '
-        throw "ShiyiDesktopPet process remains or appeared during verification: $details"
+        throw "DesktopCompanion process remains or appeared during verification: $details"
     }
 }
 
@@ -1398,7 +1398,7 @@ function Set-StartupViaManager {
         [void](Invoke-CheckedProcess -FilePath $python -Arguments @(
             '-c',
             $startupCode,
-            (Join-Path $Directory 'ShiyiDesktopPet.exe'),
+            (Join-Path $Directory 'DesktopCompanion.exe'),
             $Enabled.ToString().ToLowerInvariant()
         ) -TimeoutSeconds 30 -Description "StartupManager set_enabled($Enabled)")
     }
@@ -1419,7 +1419,7 @@ function Assert-UninstallEntry {
 function Assert-InstalledLayout {
     param([Parameter(Mandatory = $true)][string]$Directory)
 
-    foreach ($name in @('ShiyiDesktopPet.exe', 'unins000.exe')) {
+    foreach ($name in @('DesktopCompanion.exe', 'unins000.exe')) {
         $path = Join-Path $Directory $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Missing installed file: $path"
@@ -1430,7 +1430,7 @@ function Assert-InstalledLayout {
 function Invoke-FrozenSelfTest {
     param([Parameter(Mandatory = $true)][string]$Directory)
 
-    $exe = Join-Path $Directory 'ShiyiDesktopPet.exe'
+    $exe = Join-Path $Directory 'DesktopCompanion.exe'
     $result = Invoke-CheckedProcess -FilePath $exe -Arguments @('--self-test') -TimeoutSeconds 30 -Description 'installed frozen self-test'
     try {
         $report = $result.Stdout | ConvertFrom-Json -ErrorAction Stop
@@ -1618,7 +1618,7 @@ function Invoke-FallbackForeignProcessProbe {
     }
     [void](Assert-NoReparseComponents -Path $workRoot -Purpose 'foreign-process probe')
     [void](New-Item -ItemType Directory -Path $dummyInstall -Force)
-    $foreignExe = Join-Path $probeRoot 'ShiyiDesktopPet.exe'
+    $foreignExe = Join-Path $probeRoot 'DesktopCompanion.exe'
     $dummyUninstaller = Join-Path $dummyInstall 'unins000.exe'
     Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination $foreignExe
     Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination $dummyUninstaller
@@ -1654,7 +1654,7 @@ function Invoke-FallbackForeignProcessProbe {
             throw 'Foreign-process probe unexpectedly allowed fallback uninstall'
         }
         catch {
-            if ($_.Exception.Message -notmatch 'ShiyiDesktopPet process remains or appeared during verification') {
+            if ($_.Exception.Message -notmatch 'DesktopCompanion process remains or appeared during verification') {
                 throw
             }
         }
@@ -1695,7 +1695,7 @@ function Invoke-FallbackForeignProcessProbe {
 
 function Get-ProtectedProductStateSnapshot {
     $holds = @(Get-ChildItem -LiteralPath $env:APPDATA, $env:LOCALAPPDATA -Force -ErrorAction Stop |
-        Where-Object Name -like 'ShiyiDesktopPet.sdd-hold-*' |
+        Where-Object Name -like 'DesktopCompanion.sdd-hold-*' |
         Sort-Object FullName |
         ForEach-Object {
             $fingerprint = if ($_.PSIsContainer) { Get-DirectoryFingerprint -Path $_.FullName } else { '<not-a-directory>' }
@@ -2438,7 +2438,7 @@ $protectedPaths = @(
     $env:LOCALAPPDATA,
     $roamingPath,
     $localPath,
-    (Join-Path $env:LOCALAPPDATA 'Programs\ShiyiDesktopPet'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\DesktopCompanion'),
     (Join-Path $repoRoot '.git'),
     (Join-Path $repoRoot '.superpowers'),
     (Join-Path $repoRoot 'approved-input'),
@@ -2476,7 +2476,7 @@ if ($existingProcesses.Count -ne 0) {
     $details = @($existingProcesses | ForEach-Object {
         "PID=$($_.ProcessId), path=$(if ($_.ExecutablePath) { $_.ExecutablePath } else { '<unavailable>' })"
     }) -join '; '
-    throw "Refusing release verification while any ShiyiDesktopPet process exists: $details"
+    throw "Refusing release verification while any DesktopCompanion process exists: $details"
 }
 
 Write-Output "PREFLIGHT PASSED: test roots are canonical strict work children; protected/reparse/process checks passed"
@@ -2647,7 +2647,7 @@ try {
     Assert-DirectSentinel -Path $ordinaryTargetSettings -ExpectedText $ordinarySettingsText
     Assert-DirectSentinel -Path $ordinaryTargetLog -ExpectedText $ordinaryLogText
 
-    $ordinaryExpectedRun = '"' + (Join-Path $testDirPath 'ShiyiDesktopPet.exe') + '" --startup'
+    $ordinaryExpectedRun = '"' + (Join-Path $testDirPath 'DesktopCompanion.exe') + '" --startup'
     Set-StartupViaManager -Directory $testDirPath -Enabled $true
     Assert-RegistryValueExact -Expected $ordinaryExpectedRun
 
@@ -2680,7 +2680,7 @@ try {
     Invoke-Install -Directory $upgradeDirPath -Startup enable
     Assert-InstalledLayout -Directory $upgradeDirPath
     Assert-UninstallEntry -Expected $true
-    $expectedRun = '"' + (Join-Path $upgradeDirPath 'ShiyiDesktopPet.exe') + '" --startup'
+    $expectedRun = '"' + (Join-Path $upgradeDirPath 'DesktopCompanion.exe') + '" --startup'
     Assert-RegistryValueExact -Expected $expectedRun
 
     $settingsPath = Join-Path $roamingPath 'settings.ini'

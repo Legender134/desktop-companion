@@ -12,7 +12,7 @@ resource_root = source_root / "shiyi_desktop_pet" / "resources"
 # A package's ``__main__.py`` cannot be executed as a plain script because its
 # relative imports require package context. Generate a build-only launcher that
 # imports the same public entry point used by ``python -m shiyi_desktop_pet``.
-entry_script = repo_root / "build" / ".generated" / "ShiyiDesktopPet-entry.py"
+entry_script = repo_root / "build" / ".generated" / "DesktopCompanion-entry.py"
 entry_script.parent.mkdir(parents=True, exist_ok=True)
 entry_script.write_text(
     "from shiyi_desktop_pet.app import main\n\nraise SystemExit(main())\n",
@@ -60,9 +60,7 @@ a = Analysis(
     pathex=[str(source_root)],
     binaries=qt_plugins,
     datas=[
-        (str(resource_root / "pet.json"), "resources"),
-        (str(resource_root / "spritesheet.webp"), "resources"),
-        (str(resource_root / "app.ico"), "resources"),
+        (str(resource_root), "resources"),
         (str(repo_root / "THIRD_PARTY_NOTICES.md"), "."),
     ],
     hiddenimports=["PySide6.QtNetwork"],
@@ -115,7 +113,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ShiyiDesktopPet",
+    name="DesktopCompanion",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -133,5 +131,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="ShiyiDesktopPet",
+    name="DesktopCompanion",
 )

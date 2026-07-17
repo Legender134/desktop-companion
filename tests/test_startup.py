@@ -71,27 +71,32 @@ class FakeRegistry:
 
 def test_startup_command_quotes_path_and_round_trips():
     backend = FakeRunKey()
-    manager = StartupManager(backend, Path(r"C:\Program Files\Shiyi\ShiyiDesktopPet.exe"))
+    manager = StartupManager(backend, Path(r"C:\Program Files\DesktopCompanion\DesktopCompanion.exe"))
     manager.set_enabled(True)
-    assert backend.value == r'"C:\Program Files\Shiyi\ShiyiDesktopPet.exe" --startup'
+    assert backend.value == r'"C:\Program Files\DesktopCompanion\DesktopCompanion.exe" --startup'
     assert manager.is_enabled()
     manager.set_enabled(False)
     assert not manager.is_enabled()
+    assert VALUE_NAME == "DesktopCompanion"
 
 
 def test_startup_requires_exact_normalized_command():
     backend = FakeRunKey()
-    manager = StartupManager(backend, Path(r"C:\Shiyi\ShiyiDesktopPet.exe"))
-    backend.value = r' "C:\Shiyi\ShiyiDesktopPet.exe" --startup '
+    manager = StartupManager(backend, Path(r"C:\DesktopCompanion\DesktopCompanion.exe"))
+    backend.value = r' "C:\DesktopCompanion\DesktopCompanion.exe" --startup '
     assert manager.is_enabled()
-    backend.value = r'"C:\Shiyi\ShiyiDesktopPet.exe" --startup --extra'
+    backend.value = r'"C:\DesktopCompanion\DesktopCompanion.exe" --startup --extra'
     assert not manager.is_enabled()
 
 
 def test_startup_rejects_malformed_stored_commands():
     backend = FakeRunKey()
-    manager = StartupManager(backend, Path(r"C:\Shiyi\ShiyiDesktopPet.exe"))
-    for malformed in ("C:\\Shiyi\\ShiyiDesktopPet.exe --startup", '"C:\\Shiyi\\ShiyiDesktopPet.exe"', None):
+    manager = StartupManager(backend, Path(r"C:\DesktopCompanion\DesktopCompanion.exe"))
+    for malformed in (
+        "C:\\DesktopCompanion\\DesktopCompanion.exe --startup",
+        '"C:\\DesktopCompanion\\DesktopCompanion.exe"',
+        None,
+    ):
         backend.value = malformed
         assert not manager.is_enabled()
 

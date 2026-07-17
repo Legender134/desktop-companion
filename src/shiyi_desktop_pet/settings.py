@@ -9,8 +9,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .product import PET_IDS
 
-CURRENT_SCHEMA_VERSION = 1
+
+CURRENT_SCHEMA_VERSION = 2
 VALID_SCALES = frozenset({75, 100, 125, 150})
 VALID_SPEEDS = frozenset({"slow", "normal", "fast"})
 
@@ -22,6 +24,7 @@ class Logger(Protocol):
 @dataclass(frozen=True)
 class AppSettings:
     schema_version: int = CURRENT_SCHEMA_VERSION
+    pet_id: str = "shiyi"
     wander_enabled: bool = False
     gaze_enabled: bool = True
     hover_digits_enabled: bool = True
@@ -81,6 +84,8 @@ class SettingsStore:
         defaults = AppSettings()
         section = parser["settings"]
         values = asdict(defaults)
+        pet_id = section.get("pet_id", defaults.pet_id).lower()
+        values["pet_id"] = pet_id if pet_id in PET_IDS else defaults.pet_id
         values["wander_enabled"] = self._read_bool(section, "wander_enabled", defaults.wander_enabled)
         values["gaze_enabled"] = self._read_bool(section, "gaze_enabled", defaults.gaze_enabled)
         values["hover_digits_enabled"] = self._read_bool(
@@ -150,6 +155,7 @@ class SettingsStore:
         """Ensure programmatic callers persist only supported current settings."""
         return AppSettings(
             schema_version=CURRENT_SCHEMA_VERSION,
+            pet_id=settings.pet_id.lower() if settings.pet_id.lower() in PET_IDS else AppSettings.pet_id,
             wander_enabled=bool(settings.wander_enabled),
             gaze_enabled=bool(settings.gaze_enabled),
             hover_digits_enabled=bool(settings.hover_digits_enabled),

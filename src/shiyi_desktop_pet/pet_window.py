@@ -61,6 +61,10 @@ class PetWindow(QWidget):
         self.setMask(QBitmap.fromPixmap(scaled_mask))
         self.update()
 
+    def set_catalog(self, catalog: AnimationCatalog) -> None:
+        """Replace the active compatible v2 catalog without recreating the window."""
+        self._catalog = catalog
+
     def paintEvent(self, event: QPaintEvent) -> None:
         del event
         if self._current_frame is None:

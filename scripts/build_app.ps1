@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $scriptRoot '..')).Path
 $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
-$spec = Join-Path $repoRoot 'packaging\ShiyiDesktopPet.spec'
-$exe = Join-Path $repoRoot 'dist\ShiyiDesktopPet\ShiyiDesktopPet.exe'
+$spec = Join-Path $repoRoot 'packaging\DesktopCompanion.spec'
+$exe = Join-Path $repoRoot 'dist\DesktopCompanion\DesktopCompanion.exe'
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Missing build interpreter: $python"

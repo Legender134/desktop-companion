@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_frozen_exe_self_test(repo_root: Path):
-    exe = repo_root / "dist" / "ShiyiDesktopPet" / "ShiyiDesktopPet.exe"
+    exe = repo_root / "dist" / "DesktopCompanion" / "DesktopCompanion.exe"
     assert exe.is_file(), f"missing frozen executable: {exe}"
     result = subprocess.run(
         [exe, "--self-test"], capture_output=True, text=True, timeout=20
@@ -14,3 +14,4 @@ def test_frozen_exe_self_test(repo_root: Path):
     assert report["ok"] is True
     assert report["webp_plugin"] is True
     assert report["atlas"]["frames"] == 74
+    assert report["pets"] == ["shiyi", "ziling"]
