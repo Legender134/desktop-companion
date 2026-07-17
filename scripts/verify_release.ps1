@@ -16,9 +16,15 @@ param(
 
     [switch]$SafeFunctionalFailureProbe,
 
+    [switch]$MutexContentionProbe,
+
     [switch]$InjectSafeFunctionalFailureAfterStateCapture,
 
+    [switch]$InternalMutexContentionAttempt,
+
     [string]$InternalProbeToken,
+
+    [string]$InternalVerificationId,
 
     [ValidateRange(1, 3600)]
     [int]$UninstallTimeoutSeconds = 180
@@ -33,8 +39,28 @@ $workRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'work'))
 $installerPath = (Resolve-Path -LiteralPath $Installer -ErrorAction Stop).Path
 $testDirPath = [System.IO.Path]::GetFullPath($TestDir)
 $upgradeDirPath = [System.IO.Path]::GetFullPath("$testDirPath-upgrade")
-$verificationId = [guid]::NewGuid().ToString('N')
-$backupRoot = Join-Path $workRoot "release-verify-$verificationId"
+$internalProductionProbe = $InjectSafeFunctionalFailureAfterStateCapture -or $InternalMutexContentionAttempt
+if ($InjectSafeFunctionalFailureAfterStateCapture -and $InternalMutexContentionAttempt) {
+    throw 'Only one internal production probe mode may be selected'
+}
+if ($internalProductionProbe) {
+    if (
+        $PreflightOnly -or
+        -not $InternalProbeToken -or
+        $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN -cne $InternalProbeToken -or
+        $InternalVerificationId -cnotmatch '^[0-9a-f]{32}$'
+    ) {
+        throw 'Internal production probe requires a matching wrapper token, a lowercase 32-hex verification ID, and a production-flow invocation'
+    }
+    $verificationId = $InternalVerificationId
+}
+else {
+    if ($InternalProbeToken -or $InternalVerificationId) {
+        throw 'InternalProbeToken and InternalVerificationId are valid only with an internal production probe'
+    }
+    $verificationId = [guid]::NewGuid().ToString('N')
+}
+$backupRoot = [System.IO.Path]::GetFullPath((Join-Path $workRoot "release-verify-$verificationId"))
 $registryBackupPath = Join-Path $backupRoot 'registry-state.clixml'
 $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
 
@@ -49,19 +75,7 @@ $allJobTreesQuiescent = $true
 $rollbackSafetyUnknown = $false
 $rollbackSafetyReasons = [System.Collections.Generic.List[string]]::new()
 $uninstallLaunchCount = 0
-
-if ($InjectSafeFunctionalFailureAfterStateCapture) {
-    if (
-        $PreflightOnly -or
-        -not $InternalProbeToken -or
-        $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN -cne $InternalProbeToken
-    ) {
-        throw 'Internal safe-functional-failure injection requires the matching wrapper token and a production-flow invocation'
-    }
-}
-elseif ($InternalProbeToken) {
-    throw 'InternalProbeToken is valid only with InjectSafeFunctionalFailureAfterStateCapture'
-}
+$releaseVerificationMutexName = 'Local\ShiyiDesktopPet.ReleaseVerify.v1'
 
 if ($null -eq ('ShiyiVerifier.JobObject' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -927,6 +941,86 @@ function Format-ExceptionDetails {
     return ($parts -join ' -> INNER: ')
 }
 
+function Enter-ReleaseVerificationMutex {
+    $createdNew = $false
+    $mutex = [System.Threading.Mutex]::new($false, $releaseVerificationMutexName, [ref]$createdNew)
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne(0)
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            throw "Another Shiyi release verification is already active for the current user: $releaseVerificationMutexName"
+        }
+        Write-Host "RELEASE VERIFY MUTEX ACQUIRED: $releaseVerificationMutexName"
+        return $mutex
+    }
+    catch {
+        if (-not $acquired) {
+            $mutex.Dispose()
+        }
+        throw
+    }
+}
+
+function Exit-ReleaseVerificationMutex {
+    param([Parameter(Mandatory = $true)][System.Threading.Mutex]$Mutex)
+
+    try {
+        $Mutex.ReleaseMutex()
+    }
+    finally {
+        $Mutex.Dispose()
+    }
+    Write-Host "RELEASE VERIFY MUTEX RELEASED: $releaseVerificationMutexName"
+}
+
+function Invoke-InProcessProductionProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$Token,
+        [Parameter(Mandatory = $true)][string]$VerificationId,
+        [Parameter(Mandatory = $true)][ValidateSet('FunctionalFailure', 'MutexContention')][string]$Mode
+    )
+
+    $records = [System.Collections.Generic.List[object]]::new()
+    $caughtException = $null
+    $arguments = @{
+        Installer = $installerPath
+        TestDir = $testDirPath
+        UninstallTimeoutSeconds = $UninstallTimeoutSeconds
+        InternalProbeToken = $Token
+        InternalVerificationId = $VerificationId
+    }
+    if ($Mode -eq 'FunctionalFailure') {
+        $arguments.InjectSafeFunctionalFailureAfterStateCapture = $true
+    }
+    else {
+        $arguments.InternalMutexContentionAttempt = $true
+    }
+
+    try {
+        & $PSCommandPath @arguments *>&1 | ForEach-Object {
+            $records.Add($_)
+        }
+    }
+    catch {
+        $caughtException = $_.Exception
+        $records.Add($_)
+    }
+
+    $recordText = @($records | ForEach-Object { $_.ToString() })
+    $exceptionDetails = Format-ExceptionDetails -Exception $caughtException
+    return [pscustomobject]@{
+        Records = $records.ToArray()
+        Exception = $caughtException
+        ExceptionDetails = $exceptionDetails
+        Evidence = (($recordText + $exceptionDetails) -join "`n")
+    }
+}
+
 function Invoke-Uninstall {
     param([Parameter(Mandatory = $true)][string]$Directory)
 
@@ -1369,26 +1463,120 @@ function Invoke-SafeFunctionalFailureProbe {
     $beforeState = Get-ProtectedProductStateSnapshot
     $beforeStateJson = Convert-ProtectedProductStateToJson -Snapshot $beforeState
     $beforeWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
-    $beforeBackups = @(Get-ChildItem -LiteralPath $workRoot -Force -Filter 'release-verify-*' | Select-Object -ExpandProperty FullName)
     $token = [guid]::NewGuid().ToString('N')
+    $probeVerificationId = [guid]::NewGuid().ToString('N')
+    $expectedBackup = [System.IO.Path]::GetFullPath((Join-Path $workRoot "release-verify-$probeVerificationId"))
+    $siblingVerificationId = [guid]::NewGuid().ToString('N')
+    $siblingRoot = [System.IO.Path]::GetFullPath((Join-Path $workRoot "release-verify-$siblingVerificationId"))
+    $siblingMarker = Join-Path $siblingRoot '.sdd-owned-sibling-fixture'
+    $siblingFingerprint = $null
+    $siblingCreated = $false
+    $probeSucceeded = $false
     $oldToken = $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN
     try {
-        $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN = $token
-        $childResult = Invoke-CapturedProcess -FilePath (Get-Process -Id $PID).Path -Arguments @(
-            '-NoProfile',
-            '-NonInteractive',
-            '-File',
-            $PSCommandPath,
-            '-Installer',
-            $installerPath,
-            '-TestDir',
-            $testDirPath,
-            '-UninstallTimeoutSeconds',
-            $UninstallTimeoutSeconds.ToString(),
-            '-InjectSafeFunctionalFailureAfterStateCapture',
-            '-InternalProbeToken',
-            $token
-        ) -TimeoutSeconds 180
+        foreach ($ownedPath in @($expectedBackup, $siblingRoot)) {
+            if (Test-Path -LiteralPath $ownedPath) {
+                throw "Generated probe recovery identity unexpectedly exists: $ownedPath"
+            }
+        }
+        [void](New-Item -ItemType Directory -Path $siblingRoot)
+        $siblingCreated = $true
+        [System.IO.File]::WriteAllText($siblingMarker, $token, [System.Text.UTF8Encoding]::new($false))
+        $siblingFingerprint = Get-DirectoryFingerprint -Path $siblingRoot
+
+        try {
+            $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN = $token
+            $childResult = Invoke-InProcessProductionProbe -Token $token -VerificationId $probeVerificationId -Mode FunctionalFailure
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable(
+                'SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN',
+                $oldToken,
+                [System.EnvironmentVariableTarget]::Process
+            )
+        }
+
+        $childEvidence = $childResult.Evidence
+        if ($null -eq $childResult.Exception) {
+            throw 'In-process production-finalizer fault injection did not throw its final aggregate error'
+        }
+        foreach ($evidence in @(
+            [pscustomobject]@{ Label = 'exact recovery identity'; Pattern = [regex]::Escape($expectedBackup) },
+            [pscustomobject]@{ Label = 'user data backup'; Pattern = 'USER DATA BACKUP:' },
+            [pscustomobject]@{ Label = 'registry backup'; Pattern = 'REGISTRY BACKUP:' },
+            [pscustomobject]@{ Label = 'primary injection'; Pattern = 'INJECTED PRIMARY FAILURE AFTER STATE CAPTURE' },
+            [pscustomobject]@{ Label = 'complete Job quiescence'; Pattern = 'job-active=0' },
+            [pscustomobject]@{ Label = 'safe functional fallback'; Pattern = 'Fallback uninstall functional failure is quiescent; exact rollback will continue' },
+            [pscustomobject]@{ Label = 'registry restore'; Pattern = 'REGISTRY RESTORE:' },
+            [pscustomobject]@{ Label = 'mutex release'; Pattern = 'RELEASE VERIFY MUTEX RELEASED:' },
+            [pscustomobject]@{ Label = 'functional priority error'; Pattern = 'Release verification functional failure after safe rollback:' },
+            [pscustomobject]@{ Label = 'preserved primary error'; Pattern = '(?s)primary=.*INJECTED\W+PRIMARY\W+FAILURE\W+AFTER\W+STATE\W+CAPTURE' }
+        )) {
+            if ($childEvidence -notmatch $evidence.Pattern) {
+                throw "In-process production-finalizer output missing $($evidence.Label) evidence. evidence=$childEvidence"
+            }
+        }
+        $markerEvidenceCount = [regex]::Matches($childEvidence, 'STATE ISOLATION: verifier-owned ordinary root').Count
+        if ($markerEvidenceCount -ne 2) {
+            throw "In-process production-finalizer did not report both verifier-owned marker roots: count=$markerEvidenceCount"
+        }
+        if ($beforeState.LocalFingerprint -ne '<absent>' -and $childEvidence -notmatch 'USER DATA RESTORE:') {
+            throw 'In-process production-finalizer did not report restoring existing Local data'
+        }
+
+        $afterState = Get-ProtectedProductStateSnapshot
+        $afterStateJson = Convert-ProtectedProductStateToJson -Snapshot $afterState
+        if ($afterStateJson -cne $beforeStateJson) {
+            throw "Production-finalizer probe changed protected state. before=$beforeStateJson after=$afterStateJson"
+        }
+        if ((Test-Path -LiteralPath $testDirPath) -or (Test-Path -LiteralPath $upgradeDirPath)) {
+            throw 'Production-finalizer probe left a test install root after quiescent functional failure'
+        }
+
+        if (-not (Test-Path -LiteralPath $expectedBackup -PathType Container)) {
+            throw "Expected exact retained production recovery backup is absent: $expectedBackup"
+        }
+        [void](Assert-SafeRecursiveTarget -Path $expectedBackup -AllowedRoots @($workRoot) -Purpose 'exact production-finalizer retained backup validation')
+        $retainedRegistryPath = Join-Path $expectedBackup 'registry-state.clixml'
+        if (-not (Test-Path -LiteralPath $retainedRegistryPath -PathType Leaf)) {
+            throw "Retained production recovery backup lacks CLIXML: $retainedRegistryPath"
+        }
+        $retainedRegistry = Import-Clixml -LiteralPath $retainedRegistryPath
+        Assert-RegistrySnapshotEqual -Expected $retainedRegistry.Run -Actual (Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName) -Description 'retained/live Run registry'
+        Assert-RegistrySnapshotEqual -Expected $retainedRegistry.Uninstall -Actual (Get-RegistryTreeSnapshot -SubKey $uninstallKeyPath) -Description 'retained/live uninstall registry'
+
+        foreach ($dataEvidence in @(
+            [pscustomobject]@{ Name = 'roaming'; LivePath = $roamingPath; BackupPath = Join-Path $expectedBackup 'original-data\roaming'; Expected = $beforeState.RoamingFingerprint },
+            [pscustomobject]@{ Name = 'local'; LivePath = $localPath; BackupPath = Join-Path $expectedBackup 'original-data\local'; Expected = $beforeState.LocalFingerprint }
+        )) {
+            if ($dataEvidence.Expected -eq '<absent>') {
+                if (Test-Path -LiteralPath $dataEvidence.BackupPath) {
+                    throw "Unexpected retained backup for originally absent $($dataEvidence.Name) data"
+                }
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $dataEvidence.BackupPath -PathType Container)) {
+                throw "Missing retained backup for $($dataEvidence.Name) data: $($dataEvidence.BackupPath)"
+            }
+            $backupFingerprint = Get-DirectoryFingerprint -Path $dataEvidence.BackupPath
+            $liveFingerprint = Get-DirectoryFingerprint -Path $dataEvidence.LivePath
+            if ($backupFingerprint -ne $dataEvidence.Expected -or $liveFingerprint -ne $dataEvidence.Expected) {
+                throw "Retained/live $($dataEvidence.Name) fingerprints differ: expected=$($dataEvidence.Expected), backup=$backupFingerprint, live=$liveFingerprint"
+            }
+        }
+
+        if (-not (Test-Path -LiteralPath $siblingMarker -PathType Leaf) -or [System.IO.File]::ReadAllText($siblingMarker) -cne $token) {
+            throw 'Unrelated release-verify sibling ownership marker changed while validating exact probe identity'
+        }
+        if ((Get-DirectoryFingerprint -Path $siblingRoot) -cne $siblingFingerprint) {
+            throw 'Unrelated release-verify sibling changed while validating exact probe identity'
+        }
+
+        Remove-SafeTree -Path $expectedBackup -AllowedRoots @($workRoot) -Purpose 'validated exact production-finalizer recovery cleanup'
+        if (-not (Test-Path -LiteralPath $siblingRoot -PathType Container) -or (Get-DirectoryFingerprint -Path $siblingRoot) -cne $siblingFingerprint) {
+            throw 'Exact recovery cleanup removed or changed the unrelated release-verify sibling fixture'
+        }
+        $probeSucceeded = $true
     }
     finally {
         [System.Environment]::SetEnvironmentVariable(
@@ -1396,84 +1584,139 @@ function Invoke-SafeFunctionalFailureProbe {
             $oldToken,
             [System.EnvironmentVariableTarget]::Process
         )
-    }
-
-    $childEvidence = "$($childResult.Stdout)`n$($childResult.Stderr)"
-    if ($childResult.ExitCode -eq 0) {
-        throw 'Production-finalizer fault-injection child unexpectedly exited 0'
-    }
-    foreach ($evidence in @(
-        [pscustomobject]@{ Label = 'user data backup'; Pattern = 'USER DATA BACKUP:' },
-        [pscustomobject]@{ Label = 'registry backup'; Pattern = 'REGISTRY BACKUP:' },
-        [pscustomobject]@{ Label = 'primary injection'; Pattern = 'INJECTED PRIMARY FAILURE AFTER STATE CAPTURE' },
-        [pscustomobject]@{ Label = 'complete Job quiescence'; Pattern = 'job-active=0' },
-        [pscustomobject]@{ Label = 'safe functional fallback'; Pattern = 'Fallback uninstall functional failure is quiescent; exact rollback will continue' },
-        [pscustomobject]@{ Label = 'registry restore'; Pattern = 'REGISTRY RESTORE:' },
-        [pscustomobject]@{ Label = 'functional priority error'; Pattern = 'Release verification functional failure after safe rollback:' },
-        [pscustomobject]@{ Label = 'preserved primary error'; Pattern = '(?s)primary=.*INJECTED\W+PRIMARY\W+FAILURE\W+AFTER\W+STATE\W+CAPTURE' }
-    )) {
-        if ($childEvidence -notmatch $evidence.Pattern) {
-            throw "Production-finalizer child output missing $($evidence.Label) evidence. stdout=$($childResult.Stdout) stderr=$($childResult.Stderr)"
-        }
-    }
-    $markerEvidenceCount = [regex]::Matches($childEvidence, 'STATE ISOLATION: verifier-owned ordinary root').Count
-    if ($markerEvidenceCount -ne 2) {
-        throw "Production-finalizer child did not report both verifier-owned marker roots: count=$markerEvidenceCount"
-    }
-    if ($beforeState.LocalFingerprint -ne '<absent>' -and $childEvidence -notmatch 'USER DATA RESTORE:') {
-        throw 'Production-finalizer child did not report restoring existing Local data'
-    }
-
-    $afterState = Get-ProtectedProductStateSnapshot
-    $afterStateJson = Convert-ProtectedProductStateToJson -Snapshot $afterState
-    if ($afterStateJson -cne $beforeStateJson) {
-        throw "Production-finalizer probe changed protected state. before=$beforeStateJson after=$afterStateJson"
-    }
-    if ((Test-Path -LiteralPath $testDirPath) -or (Test-Path -LiteralPath $upgradeDirPath)) {
-        throw 'Production-finalizer probe left a test install root after quiescent functional failure'
-    }
-
-    $afterBackups = @(Get-ChildItem -LiteralPath $workRoot -Force -Filter 'release-verify-*' | Select-Object -ExpandProperty FullName)
-    $newBackups = @($afterBackups | Where-Object { $_ -notin $beforeBackups })
-    if ($newBackups.Count -ne 1) {
-        throw "Expected one retained production recovery backup, found $($newBackups.Count): $($newBackups -join ', ')"
-    }
-    $retainedBackup = [System.IO.Path]::GetFullPath($newBackups[0])
-    [void](Assert-SafeRecursiveTarget -Path $retainedBackup -AllowedRoots @($workRoot) -Purpose 'production-finalizer retained backup validation')
-    $retainedRegistryPath = Join-Path $retainedBackup 'registry-state.clixml'
-    if (-not (Test-Path -LiteralPath $retainedRegistryPath -PathType Leaf)) {
-        throw "Retained production recovery backup lacks CLIXML: $retainedRegistryPath"
-    }
-    $retainedRegistry = Import-Clixml -LiteralPath $retainedRegistryPath
-    Assert-RegistrySnapshotEqual -Expected $retainedRegistry.Run -Actual (Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName) -Description 'retained/live Run registry'
-    Assert-RegistrySnapshotEqual -Expected $retainedRegistry.Uninstall -Actual (Get-RegistryTreeSnapshot -SubKey $uninstallKeyPath) -Description 'retained/live uninstall registry'
-
-    foreach ($dataEvidence in @(
-        [pscustomobject]@{ Name = 'roaming'; LivePath = $roamingPath; BackupPath = Join-Path $retainedBackup 'original-data\roaming'; Expected = $beforeState.RoamingFingerprint },
-        [pscustomobject]@{ Name = 'local'; LivePath = $localPath; BackupPath = Join-Path $retainedBackup 'original-data\local'; Expected = $beforeState.LocalFingerprint }
-    )) {
-        if ($dataEvidence.Expected -eq '<absent>') {
-            if (Test-Path -LiteralPath $dataEvidence.BackupPath) {
-                throw "Unexpected retained backup for originally absent $($dataEvidence.Name) data"
+        if ($siblingCreated -and (Test-Path -LiteralPath $siblingRoot)) {
+            $siblingOwned = $false
+            try {
+                $siblingOwned =
+                    (Test-Path -LiteralPath $siblingMarker -PathType Leaf) -and
+                    ([System.IO.File]::ReadAllText($siblingMarker) -ceq $token) -and
+                    ((Get-DirectoryFingerprint -Path $siblingRoot) -ceq $siblingFingerprint)
             }
-            continue
-        }
-        if (-not (Test-Path -LiteralPath $dataEvidence.BackupPath -PathType Container)) {
-            throw "Missing retained backup for $($dataEvidence.Name) data: $($dataEvidence.BackupPath)"
-        }
-        $backupFingerprint = Get-DirectoryFingerprint -Path $dataEvidence.BackupPath
-        $liveFingerprint = Get-DirectoryFingerprint -Path $dataEvidence.LivePath
-        if ($backupFingerprint -ne $dataEvidence.Expected -or $liveFingerprint -ne $dataEvidence.Expected) {
-            throw "Retained/live $($dataEvidence.Name) fingerprints differ: expected=$($dataEvidence.Expected), backup=$backupFingerprint, live=$liveFingerprint"
+            catch {
+                Write-Warning "Sibling fixture ownership check failed; fixture retained: $(Format-ExceptionDetails -Exception $_.Exception)"
+            }
+            if ($siblingOwned) {
+                Remove-SafeTree -Path $siblingRoot -AllowedRoots @($workRoot) -Purpose 'owned unrelated recovery sibling fixture cleanup'
+            }
+            else {
+                Write-Warning "Sibling fixture retained because exact ownership/fingerprint could not be proven: $siblingRoot"
+            }
         }
     }
 
-    Remove-SafeTree -Path $retainedBackup -AllowedRoots @($workRoot) -Purpose 'validated production-finalizer recovery cleanup'
+    if (-not $probeSucceeded) {
+        throw 'Production-finalizer fault injection did not complete its exact-identity assertions'
+    }
     $afterWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
     if (($afterWorkEntries | ConvertTo-Json -Compress) -cne ($beforeWorkEntries | ConvertTo-Json -Compress)) {
         throw "Production-finalizer probe did not restore work inventory. before=$($beforeWorkEntries -join ', ') after=$($afterWorkEntries -join ', ')"
     }
-    Write-Output "PRODUCTION FINALIZER FAILURE PROBE PASSED: child-exit=$($childResult.ExitCode); primary-preserved=true; functional-nonzero=true; job-active=0; strict-cleanup=true; registry-structural-restore=true; data-fingerprint-restore=true; retained-backup-validated-and-removed=true"
+    Write-Output "PRODUCTION FINALIZER FAILURE PROBE PASSED: same-process=true; inner-final-aggregate-caught=true; exact-verification-id=$probeVerificationId; primary-preserved=true; functional-nonzero=true; job-active=0; strict-cleanup=true; registry-structural-restore=true; data-fingerprint-restore=true; exact-backup-validated-and-removed=true; sibling-preserved-then-owned-cleanup=true"
+}
+
+function Invoke-MutexContentionProbe {
+    $beforeState = Convert-ProtectedProductStateToJson -Snapshot (Get-ProtectedProductStateSnapshot)
+    $beforeWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
+    $token = [guid]::NewGuid().ToString('N')
+    $probeVerificationId = [guid]::NewGuid().ToString('N')
+    $expectedBackup = [System.IO.Path]::GetFullPath((Join-Path $workRoot "release-verify-$probeVerificationId"))
+    $oldToken = $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN
+    $ready = [System.Threading.ManualResetEventSlim]::new($false)
+    $release = [System.Threading.ManualResetEventSlim]::new($false)
+    $holderRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $holder = [System.Management.Automation.PowerShell]::Create()
+    $async = $null
+    $holderEnded = $false
+    $holderFailure = $null
+    $probeAssertionsPassed = $false
+    try {
+        $holderRunspace.Open()
+        $holder.Runspace = $holderRunspace
+        [void]$holder.AddScript(@'
+param($MutexName, $Ready, $Release)
+$ErrorActionPreference = 'Stop'
+$createdNew = $false
+$mutex = [System.Threading.Mutex]::new($false, $MutexName, [ref]$createdNew)
+$acquired = $false
+try {
+    $acquired = $mutex.WaitOne(0)
+    if (-not $acquired) { throw "Mutex holder could not acquire $MutexName" }
+    $Ready.Set()
+    if (-not $Release.Wait(30000)) { throw 'Mutex holder release wait timed out' }
+}
+finally {
+    if ($acquired) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+}
+'@).AddArgument($releaseVerificationMutexName).AddArgument($ready).AddArgument($release)
+        $async = $holder.BeginInvoke()
+        if (-not $ready.Wait(5000)) {
+            throw 'Mutex contention holder did not acquire and signal within five seconds'
+        }
+
+        try {
+            $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN = $token
+            $contentionResult = Invoke-InProcessProductionProbe -Token $token -VerificationId $probeVerificationId -Mode MutexContention
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable(
+                'SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN',
+                $oldToken,
+                [System.EnvironmentVariableTarget]::Process
+            )
+        }
+        if ($null -eq $contentionResult.Exception -or $contentionResult.ExceptionDetails -notmatch 'Another Shiyi release verification is already active') {
+            throw "Second production verification did not fail on mutex contention before mutation: $($contentionResult.Evidence)"
+        }
+        if ($contentionResult.Evidence -match 'USER DATA BACKUP:|REGISTRY BACKUP:|STATE ISOLATION:|INTERNAL MUTEX CONTENTION ATTEMPT ACQUIRED') {
+            throw "Mutex contention reached a state-mutation marker: $($contentionResult.Evidence)"
+        }
+        if (Test-Path -LiteralPath $expectedBackup) {
+            throw "Mutex-rejected verification created its recovery root: $expectedBackup"
+        }
+        if ((Convert-ProtectedProductStateToJson -Snapshot (Get-ProtectedProductStateSnapshot)) -cne $beforeState) {
+            throw 'Mutex contention probe changed protected product state'
+        }
+        if ((Test-Path -LiteralPath $testDirPath) -or (Test-Path -LiteralPath $upgradeDirPath)) {
+            throw 'Mutex contention probe created a test install root'
+        }
+        $afterWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
+        if (($afterWorkEntries | ConvertTo-Json -Compress) -cne ($beforeWorkEntries | ConvertTo-Json -Compress)) {
+            throw 'Mutex contention probe changed work inventory before rejection'
+        }
+        $probeAssertionsPassed = $true
+    }
+    finally {
+        $release.Set()
+        if ($null -ne $async -and -not $holderEnded) {
+            try {
+                [void]$holder.EndInvoke($async)
+                $holderEnded = $true
+            }
+            catch {
+                $holderFailure = Format-ExceptionDetails -Exception $_.Exception
+            }
+        }
+        if ($holder.Streams.Error.Count -ne 0) {
+            $holderFailure = @($holder.Streams.Error | ForEach-Object { $_.ToString() }) -join ' | '
+        }
+        $holder.Dispose()
+        $holderRunspace.Dispose()
+        $ready.Dispose()
+        $release.Dispose()
+        [System.Environment]::SetEnvironmentVariable(
+            'SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN',
+            $oldToken,
+            [System.EnvironmentVariableTarget]::Process
+        )
+    }
+    if ($null -ne $holderFailure) {
+        throw "Mutex contention holder failed: $holderFailure"
+    }
+    if (-not $probeAssertionsPassed) {
+        throw 'Mutex contention probe did not complete all before-mutation assertions'
+    }
+    Write-Output "MUTEX CONTENTION PROBE PASSED: current-user-mutex=$releaseVerificationMutexName; second-verification-rejected-before-mutation=true; exact-backup-absent=true; product-state-mutated=false"
 }
 
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
@@ -1524,7 +1767,7 @@ foreach ($dataPath in @($roamingPath, $localPath)) {
 }
 
 $existingProcesses = @(Get-TestProcesses)
-if (($ProcessContainmentProbe -or $FallbackForeignProcessProbe -or $SafeFunctionalFailureProbe) -and -not $PreflightOnly) {
+if (($ProcessContainmentProbe -or $FallbackForeignProcessProbe -or $SafeFunctionalFailureProbe -or $MutexContentionProbe) -and -not $PreflightOnly) {
     throw 'Process safety probes are permitted only with -PreflightOnly'
 }
 if ($SimulateUnresolvedShiyiProcess) {
@@ -1550,10 +1793,25 @@ if ($FallbackForeignProcessProbe) {
 if ($SafeFunctionalFailureProbe) {
     Invoke-SafeFunctionalFailureProbe
 }
+if ($MutexContentionProbe) {
+    Invoke-MutexContentionProbe
+}
 if ($PreflightOnly) {
     return
 }
 
+$releaseVerificationMutex = $null
+$productionCompletionError = $null
+$mutexReleaseError = $null
+try {
+$releaseVerificationMutex = Enter-ReleaseVerificationMutex
+if ($InternalMutexContentionAttempt) {
+    Write-Output 'INTERNAL MUTEX CONTENTION ATTEMPT ACQUIRED: no product state was mutated'
+    return
+}
+if (Test-Path -LiteralPath $backupRoot) {
+    throw "Verification recovery identity already exists before state mutation: $backupRoot"
+}
 [void](New-Item -ItemType Directory -Path $backupRoot)
 $dataStates = @(
     [pscustomobject]@{
@@ -1919,3 +2177,26 @@ if (-not $verificationSucceeded) {
     throw 'Release verification did not complete without a captured primary error'
 }
 Write-Output 'RELEASE VERIFY PASSED: ordinary install/self-test/uninstall and upgrade preservation'
+}
+catch {
+    $productionCompletionError = $_.Exception
+}
+finally {
+    if ($null -ne $releaseVerificationMutex) {
+        try {
+            Exit-ReleaseVerificationMutex -Mutex $releaseVerificationMutex
+        }
+        catch {
+            if ($InternalMutexContentionAttempt) {
+                throw
+            }
+            $mutexReleaseError = $_.Exception
+        }
+    }
+}
+if ($null -ne $mutexReleaseError) {
+    throw "Release verification mutex release failed: mutex=$(Format-ExceptionDetails -Exception $mutexReleaseError); production=$(Format-ExceptionDetails -Exception $productionCompletionError)"
+}
+if ($null -ne $productionCompletionError) {
+    throw $productionCompletionError
+}
