@@ -1,0 +1,78 @@
+from uuid import uuid4
+
+from shiyi_desktop_pet.single_instance import SingleInstanceGuard
+
+
+def test_second_guard_sends_activate_to_first(qtbot):
+    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    first = SingleInstanceGuard(instance_name)
+    assert first.acquire()
+
+    with qtbot.waitSignal(first.command_received) as signal:
+        second = SingleInstanceGuard(instance_name)
+        assert not second.acquire(command="activate")
+
+    assert signal.args == ["activate"]
+    second.close()
+    first.close()
+
+
+def test_second_guard_sends_quit_and_owner_close_is_idempotent(qtbot):
+    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    first = SingleInstanceGuard(instance_name)
+    assert first.acquire()
+
+    with qtbot.waitSignal(first.command_received) as signal:
+        second = SingleInstanceGuard(instance_name)
+        assert not second.acquire(command="quit")
+
+    assert signal.args == ["quit"]
+    second.close()
+    first.close()
+    first.close()
+
+
+def test_guard_rejects_unknown_command():
+    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    guard = SingleInstanceGuard(instance_name)
+    try:
+        with __import__("pytest").raises(ValueError):
+            guard.acquire(command="digits")
+    finally:
+        guard.close()
+
+
+def test_guard_validation_owner_properties_and_missing_peer():
+    with __import__("pytest").raises(ValueError):
+        SingleInstanceGuard("")
+    with __import__("pytest").raises(ValueError):
+        SingleInstanceGuard("test", timeout_ms=0)
+
+    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+    owner = SingleInstanceGuard(instance_name)
+    try:
+        assert not owner.is_owner
+        assert owner.acquire()
+        assert owner.is_owner
+        assert owner.acquire()
+    finally:
+        owner.close()
+
+    class ExistingMutex:
+        already_exists = True
+
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    missing = ExistingMutex()
+    peer = SingleInstanceGuard(
+        f"ShiyiDesktopPet.Test.{uuid4().hex}",
+        timeout_ms=10,
+        mutex_factory=lambda name: missing,
+    )
+    assert not peer.acquire()
+    assert peer.last_delivery_succeeded is False
+    assert missing.closed

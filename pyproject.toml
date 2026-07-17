@@ -19,3 +19,6 @@ shiyi_desktop_pet = ["resources/*"]
 pythonpath = ["src"]
 qt_api = "pyside6"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/shiyi_desktop_pet"]
