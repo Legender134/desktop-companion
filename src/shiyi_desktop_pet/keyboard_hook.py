@@ -3,8 +3,11 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Protocol
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
@@ -30,7 +33,7 @@ class HookDecision:
 
 
 _PASS_THROUGH = HookDecision(consume=False)
-_CONSUME_KEYUP_OR_REPEAT = HookDecision(consume=True)
+_CONSUME_WITHOUT_EMIT = HookDecision(consume=True)
 
 
 def _digit_for_virtual_key(vk_code: int) -> int | None:
@@ -42,10 +45,10 @@ def _digit_for_virtual_key(vk_code: int) -> int | None:
 
 
 class KeyboardDecisionEngine:
-    """Pure state machine deciding which digit events belong to the pet."""
+    """Track the consume decision made by every recognized physical press."""
 
     def __init__(self) -> None:
-        self._consumed_keys: set[int] = set()
+        self._down_keys: dict[int, bool] = {}
 
     def handle(
         self,
@@ -59,25 +62,73 @@ class KeyboardDecisionEngine:
             return _PASS_THROUGH
 
         if is_down:
-            if vk_code in self._consumed_keys:
-                return _CONSUME_KEYUP_OR_REPEAT
-            if not enabled or not hovered:
+            if vk_code in self._down_keys:
+                if self._down_keys[vk_code]:
+                    return _CONSUME_WITHOUT_EMIT
                 return _PASS_THROUGH
-            self._consumed_keys.add(vk_code)
-            return HookDecision(consume=True, digit=digit)
 
-        if vk_code not in self._consumed_keys:
+            consume = bool(enabled and hovered)
+            self._down_keys[vk_code] = consume
+            if consume:
+                return HookDecision(consume=True, digit=digit)
             return _PASS_THROUGH
-        self._consumed_keys.remove(vk_code)
-        return _CONSUME_KEYUP_OR_REPEAT
+
+        consume = self._down_keys.pop(vk_code, False)
+        if consume:
+            return _CONSUME_WITHOUT_EMIT
+        return _PASS_THROUGH
+
+    def is_down(self, vk_code: int) -> bool:
+        return vk_code in self._down_keys
+
+    def mark_press_passed_through(self, vk_code: int) -> None:
+        if vk_code in self._down_keys:
+            self._down_keys[vk_code] = False
 
 
 @dataclass(frozen=True, slots=True)
 class _HookInputSnapshot:
-    """Atomically replaced UI-owned inputs read by the hook callback."""
-
     enabled: bool
     hover_hit_test: Callable[[], bool]
+
+
+class HookLifecycleState(Enum):
+    STOPPED = auto()
+    STARTING = auto()
+    RUNNING = auto()
+    STOPPING = auto()
+    FAILED = auto()
+
+
+class KeyboardHookError(RuntimeError):
+    """A sanitized hook failure that never contains keyboard event data."""
+
+
+class _WorkerFailure(Exception):
+    def __init__(self, public_message: str, cause: BaseException | None = None):
+        super().__init__(public_message)
+        self.public_message = public_message
+        self.cause = cause
+
+
+class _KeyboardBackend(Protocol):
+    def prepare(self) -> int: ...
+
+    def make_callback(self, target: Callable[[int, int, int], int]) -> object: ...
+
+    def install(self, callback: object) -> object: ...
+
+    def get_message(self) -> int: ...
+
+    def post_quit(self, thread_id: int) -> bool: ...
+
+    def unhook(self, handle: object) -> bool: ...
+
+    def call_next(self, handle: object | None, code: int, message: int, data: int) -> int: ...
+
+    def decode_vk(self, data: int) -> int: ...
+
+    def error(self, operation: str) -> BaseException: ...
 
 
 if sys.platform == "win32":
@@ -105,11 +156,132 @@ if sys.platform == "win32":
     )
 
 
+class _WindowsKeyboardBackend:
+    """Small typed Win32 surface, constructed only inside the hook worker."""
+
+    def __init__(self) -> None:
+        if sys.platform != "win32":
+            raise OSError("low-level keyboard hooks are available only on Windows")
+
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._message = wintypes.MSG()
+
+        self._set_windows_hook = self._user32.SetWindowsHookExW
+        self._set_windows_hook.argtypes = (
+            ctypes.c_int,
+            _LowLevelKeyboardProc,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+        )
+        self._set_windows_hook.restype = ctypes.c_void_p
+
+        self._unhook_windows_hook = self._user32.UnhookWindowsHookEx
+        self._unhook_windows_hook.argtypes = (ctypes.c_void_p,)
+        self._unhook_windows_hook.restype = ctypes.c_int
+
+        self._call_next_hook = self._user32.CallNextHookEx
+        self._call_next_hook.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_int,
+            WPARAM,
+            LPARAM,
+        )
+        self._call_next_hook.restype = LRESULT
+
+        self._get_message = self._user32.GetMessageW
+        self._get_message.argtypes = (
+            ctypes.POINTER(wintypes.MSG),
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_uint,
+        )
+        self._get_message.restype = ctypes.c_int
+
+        self._peek_message = self._user32.PeekMessageW
+        self._peek_message.argtypes = (
+            ctypes.POINTER(wintypes.MSG),
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+        )
+        self._peek_message.restype = ctypes.c_int
+
+        self._post_thread_message = self._user32.PostThreadMessageW
+        self._post_thread_message.argtypes = (
+            ctypes.c_ulong,
+            ctypes.c_uint,
+            WPARAM,
+            LPARAM,
+        )
+        self._post_thread_message.restype = ctypes.c_int
+
+        self._get_current_thread_id = self._kernel32.GetCurrentThreadId
+        self._get_current_thread_id.restype = ctypes.c_ulong
+        self._get_module_handle = self._kernel32.GetModuleHandleW
+        self._get_module_handle.argtypes = (wintypes.LPCWSTR,)
+        self._get_module_handle.restype = ctypes.c_void_p
+
+    def prepare(self) -> int:
+        thread_id = int(self._get_current_thread_id())
+        self._peek_message(
+            ctypes.byref(self._message),
+            None,
+            0,
+            0,
+            PM_NOREMOVE,
+        )
+        return thread_id
+
+    def make_callback(self, target: Callable[[int, int, int], int]) -> object:
+        return _LowLevelKeyboardProc(target)
+
+    def install(self, callback: object) -> object:
+        return self._set_windows_hook(
+            WH_KEYBOARD_LL,
+            callback,
+            self._get_module_handle(None),
+            0,
+        )
+
+    def get_message(self) -> int:
+        return int(self._get_message(ctypes.byref(self._message), None, 0, 0))
+
+    def post_quit(self, thread_id: int) -> bool:
+        return bool(self._post_thread_message(thread_id, WM_QUIT, 0, 0))
+
+    def unhook(self, handle: object) -> bool:
+        return bool(self._unhook_windows_hook(handle))
+
+    def call_next(
+        self,
+        handle: object | None,
+        code: int,
+        message: int,
+        data: int,
+    ) -> int:
+        return int(self._call_next_hook(handle, code, message, data))
+
+    def decode_vk(self, data: int) -> int:
+        return int(
+            ctypes.cast(
+                data,
+                ctypes.POINTER(_KBDLLHOOKSTRUCT),
+            ).contents.vkCode
+        )
+
+    def error(self, operation: str) -> BaseException:
+        return ctypes.WinError(ctypes.get_last_error())
+
+
 class LowLevelKeyboardHook(QObject):
-    """Own a Windows low-level keyboard hook and its message-loop thread."""
+    """Coordinate a Windows keyboard hook through an auditable state machine."""
 
     digit_pressed = Signal(int)
+    hook_failed = Signal(str)
     _digit_detected = Signal(int)
+    _failure_detected = Signal(str)
 
     def __init__(
         self,
@@ -117,29 +289,52 @@ class LowLevelKeyboardHook(QObject):
         *,
         enabled: bool = True,
         parent: QObject | None = None,
+        backend_factory: Callable[[], _KeyboardBackend] | None = None,
     ) -> None:
         super().__init__(parent)
         if not callable(hover_hit_test):
             raise TypeError("hover_hit_test must be callable")
 
         self._input_snapshot = _HookInputSnapshot(bool(enabled), hover_hit_test)
-        self._engine = KeyboardDecisionEngine()
+        self._backend_factory = backend_factory or _WindowsKeyboardBackend
+        self._condition = threading.Condition(threading.RLock())
+        self._state = HookLifecycleState.STOPPED
+        self._last_error: KeyboardHookError | None = None
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
-        self._hook_handle: int | None = None
-        self._callback = None
-        self._startup_error: BaseException | None = None
-        self._ready = threading.Event()
-        self._lifecycle_lock = threading.Lock()
+        self._backend: _KeyboardBackend | None = None
+        self._callback: object | None = None
+        self._hook_handle: object | None = None
+        self._engine = KeyboardDecisionEngine()
+        self._stop_requested = False
+        self._control_error: KeyboardHookError | None = None
+
         self._digit_detected.connect(
             self._deliver_digit,
             Qt.ConnectionType.QueuedConnection,
         )
+        self._failure_detected.connect(
+            self._deliver_failure,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    @property
+    def state(self) -> HookLifecycleState:
+        with self._condition:
+            return self._state
+
+    @property
+    def last_error(self) -> KeyboardHookError | None:
+        with self._condition:
+            return self._last_error
 
     @property
     def is_running(self) -> bool:
-        thread = self._thread
-        return thread is not None and thread.is_alive()
+        with self._condition:
+            thread = self._thread
+            return self._state is HookLifecycleState.RUNNING and bool(
+                thread is not None and thread.is_alive()
+            )
 
     def set_enabled(self, enabled: bool) -> None:
         snapshot = self._input_snapshot
@@ -158,199 +353,392 @@ class LowLevelKeyboardHook(QObject):
         )
 
     def start(self, timeout: float = 2.0) -> None:
-        if sys.platform != "win32":
-            raise OSError("low-level keyboard hooks are available only on Windows")
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        if sys.platform != "win32" and self._backend_factory is _WindowsKeyboardBackend:
+            raise OSError("low-level keyboard hooks are available only on Windows")
 
-        with self._lifecycle_lock:
-            if self._thread is not None and self._thread.is_alive():
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while self._state is HookLifecycleState.STOPPING:
+                self._wait_locked(deadline, "keyboard hook stop did not finish")
+
+            if self._state is HookLifecycleState.RUNNING:
                 return
-            self._ready.clear()
-            self._startup_error = None
-            self._thread = threading.Thread(
-                target=self._run_hook_loop,
-                name="ShiyiKeyboardHook",
-                daemon=False,
-            )
-            thread = self._thread
-            thread.start()
+            if self._state is HookLifecycleState.FAILED:
+                raise self._last_error or KeyboardHookError("keyboard hook failed")
 
-        if not self._ready.wait(timeout):
-            self.stop(timeout=timeout)
-            raise TimeoutError("keyboard hook thread did not start in time")
-        if self._startup_error is not None:
-            thread.join(timeout)
-            error = self._startup_error
-            with self._lifecycle_lock:
-                if self._thread is thread:
-                    self._thread = None
-            raise RuntimeError("could not install keyboard hook") from error
+            if self._state is HookLifecycleState.STOPPED:
+                self._engine = KeyboardDecisionEngine()
+                self._stop_requested = False
+                self._control_error = None
+                self._last_error = None
+                self._backend = None
+                self._thread_id = None
+                self._callback = None
+                self._hook_handle = None
+                self._state = HookLifecycleState.STARTING
+                self._thread = threading.Thread(
+                    target=self._run_hook_worker,
+                    name="ShiyiKeyboardHook",
+                    daemon=False,
+                )
+                self._thread.start()
+
+            installation_thread = self._thread
+            try:
+                while (
+                    self._thread is installation_thread
+                    and self._state
+                    in (HookLifecycleState.STARTING, HookLifecycleState.STOPPING)
+                ):
+                    self._wait_locked(deadline, "keyboard hook start timed out")
+            except TimeoutError:
+                if (
+                    self._thread is installation_thread
+                    and self._state is HookLifecycleState.STARTING
+                ):
+                    self._stop_requested = True
+                    self._state = HookLifecycleState.STOPPING
+                    self._condition.notify_all()
+                raise
+
+            if (
+                self._thread is installation_thread
+                and self._state is HookLifecycleState.RUNNING
+            ):
+                return
+            if self._state is HookLifecycleState.FAILED:
+                raise self._last_error or KeyboardHookError("keyboard hook start failed")
+            raise KeyboardHookError("keyboard hook start was cancelled")
 
     def stop(self, timeout: float = 2.0) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        deadline = time.monotonic() + timeout
 
-        with self._lifecycle_lock:
-            thread = self._thread
-            thread_id = self._thread_id
-        if thread is None:
+        with self._condition:
+            waited_for_existing_stop = False
+            while self._state is HookLifecycleState.STOPPING:
+                waited_for_existing_stop = True
+                self._wait_locked(deadline, "keyboard hook shutdown timed out")
+
+            if self._state is HookLifecycleState.STOPPED:
+                return
+            if self._state is HookLifecycleState.FAILED:
+                if waited_for_existing_stop:
+                    raise self._last_error or KeyboardHookError(
+                        "keyboard hook shutdown failed"
+                    )
+                retry = self._take_failed_cleanup_locked()
+                if retry is None:
+                    self._reset_stopped_locked()
+                    return
+                self._state = HookLifecycleState.STOPPING
+                self._condition.notify_all()
+            else:
+                retry = None
+
+            if retry is None and self._state in (
+                HookLifecycleState.STARTING,
+                HookLifecycleState.RUNNING,
+            ):
+                self._stop_requested = True
+                self._state = HookLifecycleState.STOPPING
+                self._condition.notify_all()
+
+            if retry is None:
+                while (
+                    self._state is HookLifecycleState.STOPPING
+                    and self._backend is None
+                    and self._thread is not None
+                    and self._thread.is_alive()
+                ):
+                    self._wait_locked(deadline, "keyboard hook shutdown timed out")
+                backend = self._backend
+                thread_id = self._thread_id
+                thread = self._thread
+
+        if retry is not None:
+            backend, handle = retry
+            self._retry_failed_unhook(backend, handle)
             return
 
-        if thread.is_alive() and thread_id is not None:
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            post_thread_message = user32.PostThreadMessageW
-            post_thread_message.argtypes = (
-                ctypes.c_ulong,
-                ctypes.c_uint,
-                ctypes.c_size_t,
-                ctypes.c_ssize_t,
-            )
-            post_thread_message.restype = ctypes.c_int
-            post_thread_message(thread_id, WM_QUIT, 0, 0)
+        post_error = None
+        if (
+            backend is not None
+            and thread_id is not None
+            and thread is not None
+            and thread.is_alive()
+        ):
+            try:
+                posted = bool(backend.post_quit(thread_id))
+            except BaseException:
+                posted = False
+            if not posted:
+                post_error = KeyboardHookError("keyboard hook shutdown request failed")
+                with self._condition:
+                    self._control_error = post_error
 
-        thread.join(timeout)
-        if thread.is_alive():
-            raise TimeoutError("keyboard hook thread did not stop in time")
-        with self._lifecycle_lock:
-            if self._thread is thread:
-                self._thread = None
+        if thread is not None:
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(remaining)
+            if thread.is_alive():
+                if post_error is not None:
+                    raise post_error
+                raise TimeoutError("keyboard hook shutdown timed out")
+
+        with self._condition:
+            if self._state is HookLifecycleState.FAILED:
+                raise self._last_error or KeyboardHookError("keyboard hook shutdown failed")
+            if self._state is not HookLifecycleState.STOPPED:
+                raise KeyboardHookError("keyboard hook shutdown did not complete")
+
+    def _wait_locked(self, deadline: float, message: str) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(message)
+        self._condition.wait(remaining)
+
+    def _take_failed_cleanup_locked(
+        self,
+    ) -> tuple[_KeyboardBackend, object] | None:
+        if self._backend is None or self._hook_handle is None:
+            return None
+        return self._backend, self._hook_handle
+
+    def _retry_failed_unhook(
+        self,
+        backend: _KeyboardBackend,
+        handle: object,
+    ) -> None:
+        try:
+            removed = bool(backend.unhook(handle))
+        except BaseException:
+            removed = False
+        if not removed:
+            error = KeyboardHookError("keyboard hook unhook failed")
+            with self._condition:
+                self._last_error = error
+                self._state = HookLifecycleState.FAILED
+                self._condition.notify_all()
+            self._publish_failure(str(error))
+            raise error
+
+        with self._condition:
+            if self._hook_handle is handle:
+                self._hook_handle = None
+                self._callback = None
+                self._backend = None
+                self._thread_id = None
+            self._reset_stopped_locked()
+
+    def _reset_stopped_locked(self) -> None:
+        self._engine = KeyboardDecisionEngine()
+        self._stop_requested = False
+        self._control_error = None
+        self._state = HookLifecycleState.STOPPED
+        self._condition.notify_all()
+
+    def _run_hook_worker(self) -> None:
+        backend: _KeyboardBackend | None = None
+        callback: object | None = None
+        hook_handle: object | None = None
+        public_error: KeyboardHookError | None = None
+        phase = "start"
+        unhook_confirmed = True
+
+        try:
+            backend = self._backend_factory()
+            thread_id = backend.prepare()
+            with self._condition:
+                self._backend = backend
+                self._thread_id = thread_id
+                self._condition.notify_all()
+                if self._stop_requested:
+                    return
+
+            callback = backend.make_callback(self._native_callback_no_throw)
+            with self._condition:
+                self._callback = callback
+
+            hook_handle = backend.install(callback)
+            if not hook_handle:
+                raise _WorkerFailure(
+                    "keyboard hook start failed",
+                    backend.error("SetWindowsHookExW"),
+                )
+
+            with self._condition:
+                self._hook_handle = hook_handle
+                if self._stop_requested:
+                    self._state = HookLifecycleState.STOPPING
+                else:
+                    self._state = HookLifecycleState.RUNNING
+                self._condition.notify_all()
+                should_stop = self._stop_requested
+
+            if should_stop:
+                return
+
+            phase = "message loop"
+            while True:
+                result = backend.get_message()
+                if result == 0:
+                    with self._condition:
+                        expected_stop = self._stop_requested
+                    if expected_stop:
+                        break
+                    raise _WorkerFailure(
+                        "keyboard hook message loop stopped unexpectedly"
+                    )
+                if result == -1:
+                    raise _WorkerFailure(
+                        "keyboard hook message loop failed",
+                        backend.error("GetMessageW"),
+                    )
+        except _WorkerFailure as error:
+            public_error = KeyboardHookError(error.public_message)
+        except BaseException:
+            if phase == "start":
+                public_error = KeyboardHookError("keyboard hook start failed")
+            else:
+                public_error = KeyboardHookError("keyboard hook message loop failed")
+        finally:
+            if hook_handle is not None and backend is not None:
+                try:
+                    unhook_confirmed = bool(backend.unhook(hook_handle))
+                except BaseException:
+                    unhook_confirmed = False
+                if not unhook_confirmed:
+                    public_error = KeyboardHookError("keyboard hook unhook failed")
+
+            with self._condition:
+                if public_error is None and self._control_error is not None:
+                    public_error = self._control_error
+
+                self._engine = KeyboardDecisionEngine()
+                self._stop_requested = False
+                self._control_error = None
+                self._thread_id = None
+
+                if unhook_confirmed:
+                    self._hook_handle = None
+                    self._callback = None
+                    self._backend = None
+                else:
+                    self._hook_handle = hook_handle
+                    self._callback = callback
+                    self._backend = backend
+
+                if public_error is not None:
+                    self._last_error = public_error
+                    self._state = HookLifecycleState.FAILED
+                else:
+                    self._state = HookLifecycleState.STOPPED
+                self._condition.notify_all()
+
+            if public_error is not None:
+                self._publish_failure(str(public_error))
+
+    def _native_callback_no_throw(
+        self,
+        n_code: int,
+        w_param: int,
+        l_param: int,
+    ) -> int:
+        try:
+            return int(self._process_hook_event(n_code, w_param, l_param))
+        except BaseException:
+            self._record_callback_failure("keyboard hook callback failed")
+            return self._call_next_no_throw(n_code, w_param, l_param)
+
+    def _process_hook_event(self, n_code: int, w_param: int, l_param: int) -> int:
+        if n_code < 0:
+            return self._call_next_no_throw(n_code, w_param, l_param)
+
+        message = int(w_param)
+        if message not in _KEYDOWN_MESSAGES and message not in _KEYUP_MESSAGES:
+            return self._call_next_no_throw(n_code, w_param, l_param)
+
+        backend = self._backend
+        if backend is None:
+            raise RuntimeError("keyboard hook backend unavailable")
+        vk_code = backend.decode_vk(l_param)
+        digit = _digit_for_virtual_key(vk_code)
+        if digit is None or digit not in KEY_TO_ACTION:
+            return self._call_next_no_throw(n_code, w_param, l_param)
+
+        is_down = message in _KEYDOWN_MESSAGES
+        snapshot = self._input_snapshot
+        hovered = False
+        if is_down and not self._engine.is_down(vk_code) and snapshot.enabled:
+            try:
+                hovered = bool(snapshot.hover_hit_test())
+            except BaseException:
+                self._engine.handle(vk_code, True, False, False)
+                self._record_callback_failure("keyboard hook hit test failed")
+                return self._call_next_no_throw(n_code, w_param, l_param)
+
+        decision = self._engine.handle(
+            vk_code,
+            is_down=is_down,
+            enabled=snapshot.enabled,
+            hovered=hovered,
+        )
+        if decision.digit is not None:
+            try:
+                self._queue_digit(decision.digit)
+            except BaseException:
+                try:
+                    self._engine.mark_press_passed_through(vk_code)
+                except BaseException:
+                    pass
+                self._record_callback_failure("keyboard hook queued delivery failed")
+                return self._call_next_no_throw(n_code, w_param, l_param)
+        if decision.consume:
+            return 1
+        return self._call_next_no_throw(n_code, w_param, l_param)
+
+    def _queue_digit(self, digit: int) -> None:
+        self._digit_detected.emit(digit)
+
+    def _call_next_no_throw(self, n_code: int, w_param: int, l_param: int) -> int:
+        try:
+            backend = self._backend
+            if backend is None:
+                return 0
+            return int(
+                backend.call_next(
+                    self._hook_handle,
+                    n_code,
+                    w_param,
+                    l_param,
+                )
+            )
+        except BaseException:
+            self._record_callback_failure("keyboard hook chaining failed")
+            return 0
+
+    def _record_callback_failure(self, message: str) -> None:
+        try:
+            error = KeyboardHookError(message)
+            with self._condition:
+                self._last_error = error
+            self._publish_failure(message)
+        except BaseException:
+            pass
+
+    def _publish_failure(self, message: str) -> None:
+        try:
+            self._failure_detected.emit(message)
+        except BaseException:
+            pass
 
     @Slot(int)
     def _deliver_digit(self, digit: int) -> None:
         self.digit_pressed.emit(digit)
 
-    def _run_hook_loop(self) -> None:
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-        set_windows_hook = user32.SetWindowsHookExW
-        set_windows_hook.argtypes = (
-            ctypes.c_int,
-            _LowLevelKeyboardProc,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-        )
-        set_windows_hook.restype = ctypes.c_void_p
-
-        unhook_windows_hook = user32.UnhookWindowsHookEx
-        unhook_windows_hook.argtypes = (ctypes.c_void_p,)
-        unhook_windows_hook.restype = ctypes.c_int
-
-        call_next_hook = user32.CallNextHookEx
-        call_next_hook.argtypes = (
-            ctypes.c_void_p,
-            ctypes.c_int,
-            WPARAM,
-            LPARAM,
-        )
-        call_next_hook.restype = LRESULT
-        self._call_next_hook = call_next_hook
-
-        get_message = user32.GetMessageW
-        get_message.argtypes = (
-            ctypes.POINTER(wintypes.MSG),
-            ctypes.c_void_p,
-            ctypes.c_uint,
-            ctypes.c_uint,
-        )
-        get_message.restype = ctypes.c_int
-
-        peek_message = user32.PeekMessageW
-        peek_message.argtypes = (
-            ctypes.POINTER(wintypes.MSG),
-            ctypes.c_void_p,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-        )
-        peek_message.restype = ctypes.c_int
-
-        get_current_thread_id = kernel32.GetCurrentThreadId
-        get_current_thread_id.restype = ctypes.c_ulong
-        get_module_handle = kernel32.GetModuleHandleW
-        get_module_handle.argtypes = (wintypes.LPCWSTR,)
-        get_module_handle.restype = ctypes.c_void_p
-
-        hook_handle = None
-        try:
-            message = wintypes.MSG()
-            self._thread_id = int(get_current_thread_id())
-            peek_message(ctypes.byref(message), None, 0, 0, PM_NOREMOVE)
-
-            callback = _LowLevelKeyboardProc(self._hook_callback)
-            self._callback = callback
-            hook_handle = set_windows_hook(
-                WH_KEYBOARD_LL,
-                callback,
-                get_module_handle(None),
-                0,
-            )
-            if not hook_handle:
-                raise ctypes.WinError(ctypes.get_last_error())
-            self._hook_handle = hook_handle
-            self._ready.set()
-
-            while True:
-                result = get_message(ctypes.byref(message), None, 0, 0)
-                if result == 0:
-                    break
-                if result == -1:
-                    raise ctypes.WinError(ctypes.get_last_error())
-        except BaseException as error:
-            self._startup_error = error
-        finally:
-            if hook_handle:
-                unhook_windows_hook(hook_handle)
-            self._hook_handle = None
-            self._callback = None
-            self._thread_id = None
-            self._ready.set()
-
-    def _hook_callback(self, n_code: int, w_param: int, l_param: int) -> int:
-        if n_code < 0:
-            return self._pass_to_next(n_code, w_param, l_param)
-
-        message = int(w_param)
-        if message not in _KEYDOWN_MESSAGES and message not in _KEYUP_MESSAGES:
-            return self._pass_to_next(n_code, w_param, l_param)
-
-        try:
-            vk_code = int(
-                ctypes.cast(
-                    l_param,
-                    ctypes.POINTER(_KBDLLHOOKSTRUCT),
-                ).contents.vkCode
-            )
-            is_down = message in _KEYDOWN_MESSAGES
-            snapshot = self._input_snapshot
-            decision = self._engine.handle(
-                vk_code,
-                is_down=is_down,
-                enabled=snapshot.enabled,
-                hovered=False,
-            )
-            if (
-                is_down
-                and not decision.consume
-                and snapshot.enabled
-                and _digit_for_virtual_key(vk_code) is not None
-                and snapshot.hover_hit_test()
-            ):
-                decision = self._engine.handle(
-                    vk_code,
-                    is_down=True,
-                    enabled=True,
-                    hovered=True,
-                )
-        except BaseException:
-            return self._pass_to_next(n_code, w_param, l_param)
-
-        if decision.digit is not None:
-            self._digit_detected.emit(decision.digit)
-        if decision.consume:
-            return 1
-        return self._pass_to_next(n_code, w_param, l_param)
-
-    def _pass_to_next(self, n_code: int, w_param: int, l_param: int) -> int:
-        return int(self._call_next_hook(self._hook_handle, n_code, w_param, l_param))
+    @Slot(str)
+    def _deliver_failure(self, message: str) -> None:
+        self.hook_failed.emit(message)
