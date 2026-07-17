@@ -9,13 +9,93 @@ $artifactsDir = Join-Path $repoRoot 'artifacts'
 $expectedInstaller = Join-Path $artifactsDir '十一桌面宠物安装程序.exe'
 $expectedLanguageHash = '869E43E7C7B8D20C7E4397C8E98F7D1B7CF0528803ACDF019AD350143EC85469'
 
-function Find-InnoCompiler {
-    $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    $candidates = @()
-    if ($null -ne $command) {
-        $candidates += $command.Source
+function Get-InnoInstallRecords {
+    $records = [System.Collections.Generic.List[object]]::new()
+    foreach ($hive in @('HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE')) {
+        foreach ($key in @('Inno Setup 7_is1', 'Inno Setup 6_is1')) {
+            $path = "Registry::$hive\Software\Microsoft\Windows\CurrentVersion\Uninstall\$key"
+            if (-not (Test-Path -LiteralPath $path)) {
+                continue
+            }
+            $properties = Get-ItemProperty -LiteralPath $path
+            if ($properties.InstallLocation -and $properties.DisplayVersion) {
+                $records.Add([pscustomobject]@{
+                    RegistryPath = $path
+                    InstallLocation = [System.IO.Path]::GetFullPath([string]$properties.InstallLocation).TrimEnd('\', '/')
+                    DisplayVersion = [version]([string]$properties.DisplayVersion)
+                })
+            }
+        }
     }
-    $candidates += @(
+    return $records.ToArray()
+}
+
+function Assert-OfficialInnoSignature {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $signature = Get-AuthenticodeSignature -FilePath $Path
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+        throw "Inno file does not have a valid Authenticode signature: $Path ($($signature.Status))"
+    }
+    $subject = $signature.SignerCertificate.Subject
+    if ($subject -notmatch '(^|,\s*)O=Pyrsys B\.V\.(,|$)') {
+        throw "Unexpected Inno Authenticode publisher for $Path`: $subject"
+    }
+    return $signature
+}
+
+function Get-InnoCompilerEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Compiler,
+        [Parameter(Mandatory = $true)][object[]]$InstallRecords
+    )
+
+    $compilerPath = (Resolve-Path -LiteralPath $Compiler).Path
+    $compilerDirectory = [System.IO.Path]::GetFullPath((Split-Path -Parent $compilerPath)).TrimEnd('\', '/')
+    $compilerSignature = Assert-OfficialInnoSignature -Path $compilerPath
+
+    $banner = (& $compilerPath /? 2>&1 | Out-String)
+    $bannerExitCode = $LASTEXITCODE
+    if ($bannerExitCode -notin @(0, 1) -or $banner -notmatch 'Inno Setup [67] Command-Line Compiler' -or $banner -notmatch 'https://www\.innosetup\.com') {
+        throw "Selected compiler did not produce the official Inno banner: $compilerPath"
+    }
+
+    $adjacentUninstaller = Join-Path $compilerDirectory 'unins000.exe'
+    if (-not (Test-Path -LiteralPath $adjacentUninstaller -PathType Leaf)) {
+        throw "Selected compiler has no adjacent signed version evidence: $compilerPath"
+    }
+    $uninstallerSignature = Assert-OfficialInnoSignature -Path $adjacentUninstaller
+    if ($uninstallerSignature.SignerCertificate.Subject -cne $compilerSignature.SignerCertificate.Subject) {
+        throw "Compiler and adjacent uninstaller publishers differ: $compilerPath"
+    }
+    $versionText = (Get-Item -LiteralPath $adjacentUninstaller).VersionInfo.ProductVersion
+    $versionMatch = [regex]::Match($versionText, '\d+(?:\.\d+){1,3}')
+    if (-not $versionMatch.Success) {
+        throw "Adjacent signed file has no version evidence: $adjacentUninstaller"
+    }
+    $version = [version]$versionMatch.Value
+
+    $matchingRecords = @($InstallRecords | Where-Object {
+        $_.InstallLocation.Equals($compilerDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($matchingRecords.Count -ne 1) {
+        throw "Expected exactly one uninstall record bound to selected compiler directory, found $($matchingRecords.Count): $compilerDirectory"
+    }
+    if ($matchingRecords[0].DisplayVersion -ne $version) {
+        throw "Registry/file version evidence differs for $compilerPath`: registry=$($matchingRecords[0].DisplayVersion), file=$version"
+    }
+
+    return [pscustomobject]@{
+        Compiler = $compilerPath
+        Version = $version
+        Publisher = $compilerSignature.SignerCertificate.Subject
+        RegistryPath = $matchingRecords[0].RegistryPath
+    }
+}
+
+function Find-InnoCompiler {
+    $records = @(Get-InnoInstallRecords)
+    $candidates = @(
         (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 7\ISCC.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
         (Join-Path $env:ProgramFiles 'Inno Setup 7\ISCC.exe'),
@@ -27,42 +107,25 @@ function Find-InnoCompiler {
             (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe')
         )
     }
+    $candidates += @($records | ForEach-Object { Join-Path $_.InstallLocation 'ISCC.exe' })
+    $trustedCandidates = @(
+        $candidates |
+            Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+            ForEach-Object { (Resolve-Path -LiteralPath $_).Path } |
+            Select-Object -Unique
+    )
 
-    foreach ($candidate in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return (Resolve-Path -LiteralPath $candidate).Path
+    $pathCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $pathCommand) {
+        $pathCompiler = (Resolve-Path -LiteralPath $pathCommand.Source).Path
+        if ($pathCompiler -notin $trustedCandidates) {
+            throw "Refusing unbound ISCC.exe from PATH: $pathCompiler"
         }
     }
-    throw 'ISCC.exe was not found. Install Inno Setup 7.0.2 or a signed version >=6.7.3,<8.'
-}
-
-function Get-InnoVersion {
-    param([Parameter(Mandatory = $true)][string]$Compiler)
-
-    # ISCC.exe itself intentionally has 0.0.0.0 version resources in recent
-    # distributions. The co-installed signed uninstaller carries the product
-    # version; the HKCU uninstall record is a fallback for layout variations.
-    $versionTexts = [System.Collections.Generic.List[string]]::new()
-    foreach ($file in @($Compiler, (Join-Path (Split-Path -Parent $Compiler) 'unins000.exe'))) {
-        if (Test-Path -LiteralPath $file -PathType Leaf) {
-            $info = (Get-Item -LiteralPath $file).VersionInfo
-            $versionTexts.Add([string]$info.ProductVersion)
-            $versionTexts.Add([string]$info.FileVersion)
-        }
+    if ($trustedCandidates.Count -ne 1) {
+        throw "Expected exactly one trusted Inno compiler, found $($trustedCandidates.Count): $($trustedCandidates -join ', ')"
     }
-    foreach ($key in @('Inno Setup 7_is1', 'Inno Setup 6_is1')) {
-        $path = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\$key"
-        if (Test-Path -LiteralPath $path) {
-            $versionTexts.Add([string](Get-ItemPropertyValue -LiteralPath $path -Name DisplayVersion -ErrorAction SilentlyContinue))
-        }
-    }
-    foreach ($text in $versionTexts) {
-        $match = [regex]::Match($text, '\d+(?:\.\d+){1,3}')
-        if ($match.Success -and [version]$match.Value -ne [version]'0.0.0.0') {
-            return [version]$match.Value
-        }
-    }
-    throw "Could not determine Inno Setup version for: $Compiler"
+    return Get-InnoCompilerEvidence -Compiler $trustedCandidates[0] -InstallRecords $records
 }
 
 if (-not (Test-Path -LiteralPath $languageFile -PathType Leaf)) {
@@ -83,12 +146,13 @@ if ($languageHash -ne $expectedLanguageHash) {
     throw "Unexpected Simplified Chinese messages hash: $languageHash"
 }
 
-$iscc = Find-InnoCompiler
-$version = Get-InnoVersion -Compiler $iscc
+$inno = Find-InnoCompiler
+$iscc = $inno.Compiler
+$version = $inno.Version
 if ($version -lt [version]'6.7.3' -or $version -ge [version]'8.0') {
     throw "Unsupported Inno Setup version $version; expected >=6.7.3,<8"
 }
-Write-Output "Inno Setup compiler: $iscc ($version)"
+Write-Output "Inno Setup compiler: $iscc ($version); publisher=$($inno.Publisher); registry=$($inno.RegistryPath)"
 Write-Output "Simplified Chinese messages: $languageFile ($languageHash)"
 
 Push-Location $repoRoot

@@ -80,3 +80,13 @@ function ShouldWriteStartup(): Boolean;
 begin
   Result := (not WasUpgrade) and WizardIsTaskSelected('startup');
 end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RegDeleteValue(
+      HKCU,
+      'Software\Microsoft\Windows\CurrentVersion\Run',
+      'ShiyiDesktopPet'
+    );
+end;

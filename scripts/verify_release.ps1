@@ -4,7 +4,14 @@ param(
     [string]$Installer,
 
     [Parameter(Mandatory = $true)]
-    [string]$TestDir
+    [string]$TestDir,
+
+    [switch]$PreflightOnly,
+
+    [switch]$SimulateUnresolvedShiyiProcess,
+
+    [ValidateRange(1, 3600)]
+    [int]$UninstallTimeoutSeconds = 180
 )
 
 Set-StrictMode -Version Latest
@@ -26,6 +33,7 @@ $runValueName = 'ShiyiDesktopPet'
 $uninstallKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{5F4B3AD9-7C91-4E2D-A4C4-70C5C4F5A211}_is1'
 $roamingPath = [System.IO.Path]::GetFullPath((Join-Path $env:APPDATA 'ShiyiDesktopPet'))
 $localPath = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ShiyiDesktopPet'))
+$ownedProcesses = [System.Collections.Generic.List[object]]::new()
 
 function Test-DescendantPath {
     param(
@@ -45,19 +53,81 @@ function Test-DescendantPath {
     )
 }
 
+function Test-PathsOverlap {
+    param(
+        [Parameter(Mandatory = $true)][string]$First,
+        [Parameter(Mandatory = $true)][string]$Second
+    )
+
+    $firstPath = [System.IO.Path]::GetFullPath($First).TrimEnd('\', '/')
+    $secondPath = [System.IO.Path]::GetFullPath($Second).TrimEnd('\', '/')
+    return (
+        $firstPath.Equals($secondPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+        (Test-DescendantPath -Path $firstPath -Root $secondPath) -or
+        (Test-DescendantPath -Path $secondPath -Root $firstPath)
+    )
+}
+
+function Assert-NoReparseComponents {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Purpose
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    $current = $volumeRoot
+    $relative = $fullPath.Substring($volumeRoot.Length)
+    foreach ($component in $relative.Split(
+        [char[]]@('\', '/'),
+        [System.StringSplitOptions]::RemoveEmptyEntries
+    )) {
+        $current = Join-Path $current $component
+        if (-not (Test-Path -LiteralPath $current)) {
+            break
+        }
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing $Purpose through reparse component: $current"
+        }
+    }
+    return $fullPath
+}
+
+function Get-NoFollowTreeItems {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = Assert-NoReparseComponents -Path $Path -Purpose 'recursive user-data traversal'
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $items = [System.Collections.Generic.List[object]]::new()
+    $pending.Enqueue($root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing nested reparse point in user data: $($item.FullName)"
+            }
+            $items.Add($item)
+            if ($item.PSIsContainer) {
+                $pending.Enqueue($item.FullName)
+            }
+        }
+    }
+    return $items.ToArray()
+}
+
 function Assert-SafeRecursiveTarget {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string[]]$AllowedRoots,
-        [Parameter(Mandatory = $true)][string]$Purpose,
-        [switch]$AllowEqual
+        [Parameter(Mandatory = $true)][string]$Purpose
     )
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     $safeRoot = $null
     foreach ($candidate in $AllowedRoots) {
         $fullCandidate = [System.IO.Path]::GetFullPath($candidate)
-        if (Test-DescendantPath -Path $fullPath -Root $fullCandidate -AllowEqual:$AllowEqual) {
+        if (Test-DescendantPath -Path $fullPath -Root $fullCandidate) {
             $safeRoot = $fullCandidate
             break
         }
@@ -65,10 +135,12 @@ function Assert-SafeRecursiveTarget {
     if ($null -eq $safeRoot) {
         throw "Refusing recursive $Purpose outside allowed roots: $fullPath"
     }
+    [void](Assert-NoReparseComponents -Path $fullPath -Purpose "recursive $Purpose")
     if (Test-Path -LiteralPath $fullPath) {
-        $item = Get-Item -LiteralPath $fullPath -Force
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Refusing recursive $Purpose through a reparse point: $fullPath"
+        foreach ($item in @(Get-NoFollowTreeItems -Path $fullPath)) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing recursive $Purpose containing a reparse point: $($item.FullName)"
+            }
         }
     }
     Write-Host "SAFE PATH CHECK [$Purpose]: $fullPath <= $safeRoot"
@@ -79,30 +151,34 @@ function Remove-SafeTree {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string[]]$AllowedRoots,
-        [Parameter(Mandatory = $true)][string]$Purpose,
-        [switch]$AllowEqual
+        [Parameter(Mandatory = $true)][string]$Purpose
     )
 
-    $fullPath = Assert-SafeRecursiveTarget -Path $Path -AllowedRoots $AllowedRoots -Purpose $Purpose -AllowEqual:$AllowEqual
+    $fullPath = Assert-SafeRecursiveTarget -Path $Path -AllowedRoots $AllowedRoots -Purpose $Purpose
     if (Test-Path -LiteralPath $fullPath) {
         Remove-Item -LiteralPath $fullPath -Recurse -Force
     }
 }
 
 function Assert-TestRoot {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$ProtectedPaths
+    )
 
     $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
-    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd('\', '/')
-    if ($fullPath.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Test directory cannot be a volume root: $fullPath"
+    if (-not (Test-DescendantPath -Path $fullPath -Root $workRoot)) {
+        throw "Test directory must be a strict child of verifier-owned work root: $fullPath"
     }
-    foreach ($protected in @($repoRoot, $workRoot, $env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA)) {
-        if ($protected -and $fullPath.Equals(
-            [System.IO.Path]::GetFullPath($protected).TrimEnd('\', '/'),
-            [System.StringComparison]::OrdinalIgnoreCase
-        )) {
-            throw "Test directory cannot be a protected root: $fullPath"
+    [void](Assert-NoReparseComponents -Path $fullPath -Purpose 'test-root preflight')
+    foreach ($protected in $ProtectedPaths) {
+        if ($protected -and (Test-PathsOverlap -First $fullPath -Second $protected)) {
+            throw "Test directory overlaps protected path: $fullPath <-> $protected"
+        }
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        if (@(Get-NoFollowTreeItems -Path $fullPath).Count -ne 0) {
+            throw "Existing test directory is not empty and is not verifier-owned: $fullPath"
         }
     }
     Write-Output "SAFE TEST ROOT: $fullPath"
@@ -113,7 +189,7 @@ function Get-DirectoryFingerprint {
 
     $root = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
     $lines = [System.Collections.Generic.List[string]]::new()
-    foreach ($item in @(Get-ChildItem -LiteralPath $root -Force -Recurse | Sort-Object FullName)) {
+    foreach ($item in @(Get-NoFollowTreeItems -Path $root | Sort-Object FullName)) {
         $relative = $item.FullName.Substring($root.Length).TrimStart('\', '/')
         if ($item.PSIsContainer) {
             $lines.Add("D|$relative")
@@ -137,7 +213,7 @@ function Read-RegistryNode {
     param([Parameter(Mandatory = $true)][Microsoft.Win32.RegistryKey]$Key)
 
     $values = @(
-        foreach ($name in $Key.GetValueNames()) {
+        foreach ($name in @($Key.GetValueNames() | Sort-Object)) {
             [pscustomobject]@{
                 Name = $name
                 Kind = $Key.GetValueKind($name).ToString()
@@ -150,7 +226,7 @@ function Read-RegistryNode {
         }
     )
     $children = @(
-        foreach ($name in $Key.GetSubKeyNames()) {
+        foreach ($name in @($Key.GetSubKeyNames() | Sort-Object)) {
             $child = $Key.OpenSubKey($name, $false)
             try {
                 [pscustomobject]@{
@@ -226,6 +302,41 @@ function Get-RegistryValueSnapshot {
     finally {
         $base.Dispose()
     }
+}
+
+function Convert-RegistrySnapshotToCanonicalJson {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+
+    return ($Snapshot | ConvertTo-Json -Depth 100 -Compress)
+}
+
+function Assert-RegistrySnapshotEqual {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $expectedJson = Convert-RegistrySnapshotToCanonicalJson -Snapshot $Expected
+    $actualJson = Convert-RegistrySnapshotToCanonicalJson -Snapshot $Actual
+    if ($actualJson -cne $expectedJson) {
+        throw "$Description restore mismatch. expected=$expectedJson actual=$actualJson"
+    }
+}
+
+function Get-RecordedInstallLocations {
+    $snapshot = Get-RegistryTreeSnapshot -SubKey $uninstallKeyPath
+    if (-not $snapshot.Exists) {
+        return @()
+    }
+    $locations = @(
+        foreach ($value in $snapshot.Node.Values) {
+            if ($value.Name -eq 'InstallLocation' -and $value.Value) {
+                [System.IO.Path]::GetFullPath([string]$value.Value)
+            }
+        }
+    )
+    return $locations
 }
 
 function Remove-RegistryTree {
@@ -379,11 +490,27 @@ function Invoke-CapturedProcess {
     $process.StartInfo = $startInfo
     try {
         [void]$process.Start()
+        $startedAt = $process.StartTime.ToUniversalTime()
+        $resolvedFile = [System.IO.Path]::GetFullPath($FilePath)
+        if (
+            [System.IO.Path]::GetFileName($resolvedFile) -ieq 'ShiyiDesktopPet.exe' -and
+            ((Test-DescendantPath -Path $resolvedFile -Root $testDirPath) -or
+             (Test-DescendantPath -Path $resolvedFile -Root $upgradeDirPath))
+        ) {
+            $ownedProcesses.Add([pscustomobject]@{
+                ProcessId = $process.Id
+                StartedAtUtc = $startedAt
+                ExecutablePath = $resolvedFile
+            })
+        }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill($true)
-            throw "Process timed out after $TimeoutSeconds seconds: $FilePath"
+            if (-not $process.WaitForExit(10000)) {
+                throw "Timed-out process tree did not terminate: $FilePath (PID $($process.Id))"
+            }
+            throw "Process timed out after $TimeoutSeconds seconds: $FilePath; process-tree kill requested and root exit confirmed"
         }
         return [pscustomobject]@{
             ExitCode = $process.ExitCode
@@ -435,18 +562,38 @@ function Invoke-Uninstall {
     $uninstaller = Join-Path $Directory 'unins000.exe'
     if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
         $logPath = Join-Path $backupRoot "uninstall-$([System.IO.Path]::GetFileName($Directory))-$([guid]::NewGuid().ToString('N')).log"
-        # Inno runs the real uninstall in a temporary clone. Start-Process
-        # -Wait waits for the local process tree; Process.WaitForExit only
-        # observes the first-phase stub and can race cleanup/log closure.
-        $arguments = @(
-            '/VERYSILENT',
-            '/SUPPRESSMSGBOXES',
-            '/NORESTART',
-            ('/LOG="{0}"' -f $logPath)
-        )
-        $process = Start-Process -FilePath $uninstaller -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-        $exitCode = $process.ExitCode
-        $process.Dispose()
+        # Inno runs the real uninstall in a temporary clone. A bounded helper
+        # uses Start-Process -Wait so the local process tree is observed. If it
+        # times out, Invoke-CapturedProcess kills and confirms only that helper
+        # tree before finally is allowed to clean test paths.
+        $helperPath = Join-Path $backupRoot "wait-uninstall-$([guid]::NewGuid().ToString('N')).ps1"
+        $helperText = @'
+param([string]$Uninstaller, [string]$LogPath)
+$arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="{0}"' -f $LogPath))
+$process = Start-Process -FilePath $Uninstaller -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+$exitCode = $process.ExitCode
+$process.Dispose()
+exit $exitCode
+'@
+        [System.IO.File]::WriteAllText($helperPath, $helperText, [System.Text.UTF8Encoding]::new($false))
+        $powerShell = (Get-Process -Id $PID).Path
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $result = Invoke-CapturedProcess -FilePath $powerShell -Arguments @(
+                '-NoProfile',
+                '-NonInteractive',
+                '-File',
+                $helperPath,
+                '-Uninstaller',
+                $uninstaller,
+                '-LogPath',
+                $logPath
+            ) -TimeoutSeconds $UninstallTimeoutSeconds
+        }
+        finally {
+            $stopwatch.Stop()
+        }
+        $exitCode = $result.ExitCode
         if ($exitCode -ne 0) {
             $logTail = if (Test-Path -LiteralPath $logPath -PathType Leaf) {
                 (Get-Content -LiteralPath $logPath -Tail 60) -join "`n"
@@ -456,30 +603,45 @@ function Invoke-Uninstall {
             }
             throw "silent uninstall failed with exit code $exitCode. log=$logTail"
         }
+        Write-Output "BOUNDED UNINSTALL WAIT: directory=$Directory; timeout=$UninstallTimeoutSeconds seconds; elapsed=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds; exit=$exitCode"
     }
 }
 
 function Get-TestProcesses {
-    $roots = @($testDirPath, $upgradeDirPath)
-    return @(
-        foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'ShiyiDesktopPet.exe'" -ErrorAction SilentlyContinue)) {
-            if (-not $process.ExecutablePath) {
-                continue
-            }
-            foreach ($root in $roots) {
-                if (Test-DescendantPath -Path $process.ExecutablePath -Root $root -AllowEqual) {
-                    $process
-                    break
-                }
-            }
-        }
-    )
+    return @(Get-CimInstance Win32_Process -Filter "Name = 'ShiyiDesktopPet.exe'" -ErrorAction Stop)
 }
 
 function Assert-NoTestProcesses {
     $processes = @(Get-TestProcesses)
     if ($processes.Count -ne 0) {
-        throw "Test ShiyiDesktopPet process remains: $($processes.ProcessId -join ', ')"
+        $details = @($processes | ForEach-Object {
+            "PID=$($_.ProcessId), path=$(if ($_.ExecutablePath) { $_.ExecutablePath } else { '<unavailable>' })"
+        }) -join '; '
+        throw "ShiyiDesktopPet process remains or appeared during verification: $details"
+    }
+}
+
+function Stop-OwnedProcesses {
+    foreach ($record in $ownedProcesses) {
+        $process = Get-Process -Id $record.ProcessId -ErrorAction SilentlyContinue
+        if ($null -eq $process) {
+            continue
+        }
+        $startedAt = $process.StartTime.ToUniversalTime()
+        if ($startedAt -ne $record.StartedAtUtc) {
+            throw "Refusing to stop reused PID $($record.ProcessId)"
+        }
+        $processPath = [System.IO.Path]::GetFullPath($process.Path)
+        if (
+            $processPath -ine $record.ExecutablePath -or
+            (-not (Test-DescendantPath -Path $processPath -Root $workRoot))
+        ) {
+            throw "Refusing to stop unowned process PID $($record.ProcessId): $processPath"
+        }
+        $process.Kill($true)
+        if (-not $process.WaitForExit(10000)) {
+            throw "Owned process did not terminate: PID $($record.ProcessId)"
+        }
     }
 }
 
@@ -487,6 +649,37 @@ function Assert-RegistryValueAbsent {
     $snapshot = Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName
     if ($snapshot.Exists) {
         throw "Unexpected HKCU Run value: $($snapshot.Value)"
+    }
+}
+
+function Assert-RegistryValueExact {
+    param([Parameter(Mandatory = $true)][string]$Expected)
+
+    $snapshot = Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName
+    if (-not $snapshot.Exists -or $snapshot.Kind -ne 'String' -or $snapshot.Value -cne $Expected) {
+        throw "HKCU Run value mismatch. expected String '$Expected'; actual=$($snapshot | ConvertTo-Json -Compress)"
+    }
+}
+
+function Set-StartupViaManager {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][bool]$Enabled
+    )
+
+    $startupCode = 'from pathlib import Path; import sys; from shiyi_desktop_pet.startup import StartupManager, WinRegRunKey; StartupManager(WinRegRunKey(), Path(sys.argv[1])).set_enabled(sys.argv[2] == "true")'
+    $oldPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = Join-Path $repoRoot 'src'
+        [void](Invoke-CheckedProcess -FilePath $python -Arguments @(
+            '-c',
+            $startupCode,
+            (Join-Path $Directory 'ShiyiDesktopPet.exe'),
+            $Enabled.ToString().ToLowerInvariant()
+        ) -TimeoutSeconds 30 -Description "StartupManager set_enabled($Enabled)")
+    }
+    finally {
+        $env:PYTHONPATH = $oldPythonPath
     }
 }
 
@@ -527,72 +720,140 @@ function Invoke-FrozenSelfTest {
     Write-Output "SELF-TEST: $($result.Stdout)"
 }
 
-function Ensure-IsolatedDataLinks {
+function Ensure-IsolatedDataRoots {
     param([Parameter(Mandatory = $true)][object[]]$States)
 
     foreach ($state in $States) {
-        if (-not (Test-Path -LiteralPath $state.Target -PathType Container)) {
-            [void](New-Item -ItemType Directory -Path $state.Target -Force)
-        }
         if (Test-Path -LiteralPath $state.RealPath) {
-            $item = Get-Item -LiteralPath $state.RealPath -Force
-            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-                throw "Isolation path became a real directory: $($state.RealPath)"
-            }
-            $targets = @($item.Target | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
-            if ($state.Target -notin $targets) {
-                throw "Unexpected junction target for $($state.RealPath): $($targets -join ', ')"
-            }
-            continue
+            throw "Verifier-owned data root must start absent ($($state.Name)): $($state.RealPath)"
         }
-        [void](New-Item -ItemType Junction -Path $state.RealPath -Target $state.Target)
-        Write-Output "STATE ISOLATION: $($state.RealPath) -> $($state.Target)"
+        [void](Assert-NoReparseComponents -Path (Split-Path -Parent $state.RealPath) -Purpose 'verifier data-root creation')
+        [void](New-Item -ItemType Directory -Path $state.RealPath)
+        [System.IO.File]::WriteAllText(
+            $state.OwnershipMarker,
+            $verificationId,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [void](Assert-NoReparseComponents -Path $state.RealPath -Purpose 'verifier data-root creation')
+        Write-Output "STATE ISOLATION: verifier-owned ordinary root $($state.RealPath), marker=$($state.OwnershipMarker)"
     }
 }
 
-function Remove-IsolatedDataLinks {
+function Assert-DirectSentinel {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedText
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Missing direct isolated sentinel: $Path"
+    }
+    $actual = [System.IO.File]::ReadAllText($Path)
+    if ($actual -cne $ExpectedText) {
+        throw "Direct isolated sentinel content mismatch: $Path"
+    }
+}
+
+function Assert-IsolatedTargetsClean {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$States,
+        [Parameter(Mandatory = $true)][string]$Phase
+    )
+
+    foreach ($state in $States) {
+        if (Test-Path -LiteralPath $state.Target) {
+            $items = @(Get-NoFollowTreeItems -Path $state.Target)
+            throw "$Phase left direct verifier-owned data root ($($state.Name)): root=$($state.Target); items=$($items.FullName -join ', ')"
+        }
+    }
+    Write-Output "DIRECT TARGET VERIFY [$Phase]: roots-absent=true"
+}
+
+function Remove-VerifierDataRoots {
     param([Parameter(Mandatory = $true)][object[]]$States)
 
     foreach ($state in $States) {
         if (-not (Test-Path -LiteralPath $state.RealPath)) {
             continue
         }
-        $item = Get-Item -LiteralPath $state.RealPath -Force
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-            throw "Refusing to remove non-junction user data path: $($state.RealPath)"
+        [void](Assert-NoReparseComponents -Path $state.RealPath -Purpose 'verifier data-root cleanup')
+        [void](Get-NoFollowTreeItems -Path $state.RealPath)
+        if (-not (Test-Path -LiteralPath $state.OwnershipMarker -PathType Leaf)) {
+            throw "Refusing to remove data root without verifier ownership marker: $($state.RealPath)"
         }
-        $targets = @($item.Target | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
-        if ($state.Target -notin $targets) {
-            throw "Refusing to remove unexpected junction: $($state.RealPath) -> $($targets -join ', ')"
+        $markerValue = [System.IO.File]::ReadAllText($state.OwnershipMarker)
+        if ($markerValue -cne $verificationId) {
+            throw "Refusing data-root cleanup with mismatched ownership marker: $($state.OwnershipMarker)"
         }
-        Remove-Item -LiteralPath $state.RealPath -Force
+        Remove-Item -LiteralPath $state.RealPath -Recurse -Force
+        Write-Output "OWNED DATA CLEANUP: $($state.RealPath)"
     }
 }
 
-Assert-TestRoot -Path $testDirPath
-Assert-TestRoot -Path $upgradeDirPath
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "Installer is not a file: $installerPath"
 }
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Missing verification interpreter: $python"
 }
-if (-not (Test-Path -LiteralPath $workRoot -PathType Container)) {
+if (-not (Test-Path -LiteralPath $workRoot)) {
+    [void](Assert-NoReparseComponents -Path $repoRoot -Purpose 'repository preflight')
     [void](New-Item -ItemType Directory -Path $workRoot)
 }
+if (-not (Test-Path -LiteralPath $workRoot -PathType Container)) {
+    throw "Verifier work root is not a directory: $workRoot"
+}
+[void](Assert-NoReparseComponents -Path $workRoot -Purpose 'verifier work-root preflight')
 
-# A real running installation could recreate settings/logs while they are held.
-# Refuse the test rather than disturb a user's active process.
-$foreignProcesses = @(
-    Get-CimInstance Win32_Process -Filter "Name = 'ShiyiDesktopPet.exe'" -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.ExecutablePath -and
-            -not (Test-DescendantPath -Path $_.ExecutablePath -Root $testDirPath -AllowEqual) -and
-            -not (Test-DescendantPath -Path $_.ExecutablePath -Root $upgradeDirPath -AllowEqual)
-        }
-)
-if ($foreignProcesses.Count -ne 0) {
-    throw "Refusing release verification while another ShiyiDesktopPet is running: $($foreignProcesses.ProcessId -join ', ')"
+$recordedInstallLocations = @(Get-RecordedInstallLocations)
+$protectedPaths = @(
+    $installerPath,
+    $env:USERPROFILE,
+    $env:APPDATA,
+    $env:LOCALAPPDATA,
+    $roamingPath,
+    $localPath,
+    (Join-Path $env:LOCALAPPDATA 'Programs\ShiyiDesktopPet'),
+    (Join-Path $repoRoot '.git'),
+    (Join-Path $repoRoot '.superpowers'),
+    (Join-Path $repoRoot 'approved-input'),
+    (Join-Path $repoRoot 'artifacts'),
+    (Join-Path $repoRoot 'build'),
+    (Join-Path $repoRoot 'dist'),
+    (Join-Path $repoRoot 'packaging'),
+    (Join-Path $repoRoot 'scripts'),
+    (Join-Path $repoRoot 'src'),
+    (Join-Path $repoRoot 'tests')
+) + $recordedInstallLocations
+Assert-TestRoot -Path $testDirPath -ProtectedPaths $protectedPaths
+Assert-TestRoot -Path $upgradeDirPath -ProtectedPaths $protectedPaths
+if (Test-PathsOverlap -First $testDirPath -Second $upgradeDirPath) {
+    throw "Ordinary and upgrade test roots overlap: $testDirPath <-> $upgradeDirPath"
+}
+
+foreach ($dataPath in @($roamingPath, $localPath)) {
+    if (Test-Path -LiteralPath $dataPath) {
+        [void](Get-NoFollowTreeItems -Path $dataPath)
+    }
+}
+
+$existingProcesses = @(Get-TestProcesses)
+if ($SimulateUnresolvedShiyiProcess) {
+    if (-not $PreflightOnly) {
+        throw '-SimulateUnresolvedShiyiProcess is permitted only with -PreflightOnly'
+    }
+    $existingProcesses += [pscustomobject]@{ ProcessId = 0; ExecutablePath = $null }
+}
+if ($existingProcesses.Count -ne 0) {
+    $details = @($existingProcesses | ForEach-Object {
+        "PID=$($_.ProcessId), path=$(if ($_.ExecutablePath) { $_.ExecutablePath } else { '<unavailable>' })"
+    }) -join '; '
+    throw "Refusing release verification while any ShiyiDesktopPet process exists: $details"
+}
+
+Write-Output "PREFLIGHT PASSED: test roots are canonical strict work children; protected/reparse/process checks passed"
+if ($PreflightOnly) {
+    return
 }
 
 [void](New-Item -ItemType Directory -Path $backupRoot)
@@ -602,7 +863,8 @@ $dataStates = @(
         RealPath = $roamingPath
         HoldPath = "$roamingPath.sdd-hold-$verificationId"
         BackupPath = Join-Path $backupRoot 'original-data\roaming'
-        Target = Join-Path $backupRoot 'isolated-state\roaming'
+        Target = $roamingPath
+        OwnershipMarker = Join-Path $roamingPath ".sdd-verifier-owned-$verificationId"
         Existed = $false
         Fingerprint = $null
     },
@@ -611,11 +873,14 @@ $dataStates = @(
         RealPath = $localPath
         HoldPath = "$localPath.sdd-hold-$verificationId"
         BackupPath = Join-Path $backupRoot 'original-data\local'
-        Target = Join-Path $backupRoot 'isolated-state\local'
+        Target = $localPath
+        OwnershipMarker = Join-Path $localPath ".sdd-verifier-owned-$verificationId"
         Existed = $false
         Fingerprint = $null
     }
 )
+$roamingState = $dataStates | Where-Object Name -eq 'roaming'
+$localState = $dataStates | Where-Object Name -eq 'local'
 $registryState = $null
 $stateCaptured = $false
 $verificationSucceeded = $false
@@ -657,9 +922,9 @@ try {
     Remove-RegistryValue -SubKey $runKeyPath -Name $runValueName
     Remove-RegistryTree -SubKey $uninstallKeyPath
 
-    Ensure-IsolatedDataLinks -States $dataStates
+    Ensure-IsolatedDataRoots -States $dataStates
     foreach ($directory in @($testDirPath, $upgradeDirPath)) {
-        Remove-SafeTree -Path $directory -AllowedRoots @($directory, $workRoot) -Purpose 'pre-test cleanup' -AllowEqual
+        Remove-SafeTree -Path $directory -AllowedRoots @($workRoot) -Purpose 'pre-test cleanup'
     }
 
     Write-Output '--- ordinary install/self-test/uninstall ---'
@@ -672,10 +937,20 @@ try {
 
     $ordinarySettings = Join-Path $roamingPath 'settings.ini'
     $ordinaryLog = Join-Path $localPath 'logs\verification.log'
+    $ordinaryTargetSettings = Join-Path $roamingState.Target 'settings.ini'
+    $ordinaryTargetLog = Join-Path $localState.Target 'logs\verification.log'
+    $ordinarySettingsText = "[verification]`nid=$verificationId`n"
+    $ordinaryLogText = "verification=$verificationId`n"
     [void](New-Item -ItemType Directory -Path (Split-Path -Parent $ordinarySettings) -Force)
     [void](New-Item -ItemType Directory -Path (Split-Path -Parent $ordinaryLog) -Force)
-    [System.IO.File]::WriteAllText($ordinarySettings, "[verification]`nid=$verificationId`n", [System.Text.UTF8Encoding]::new($false))
-    [System.IO.File]::WriteAllText($ordinaryLog, "verification=$verificationId`n", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($ordinarySettings, $ordinarySettingsText, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($ordinaryLog, $ordinaryLogText, [System.Text.UTF8Encoding]::new($false))
+    Assert-DirectSentinel -Path $ordinaryTargetSettings -ExpectedText $ordinarySettingsText
+    Assert-DirectSentinel -Path $ordinaryTargetLog -ExpectedText $ordinaryLogText
+
+    $ordinaryExpectedRun = '"' + (Join-Path $testDirPath 'ShiyiDesktopPet.exe') + '" --startup'
+    Set-StartupViaManager -Directory $testDirPath -Enabled $true
+    Assert-RegistryValueExact -Expected $ordinaryExpectedRun
 
     Invoke-Uninstall -Directory $testDirPath
     Assert-NoTestProcesses
@@ -684,56 +959,61 @@ try {
     if (Test-Path -LiteralPath $testDirPath) {
         throw "Ordinary uninstall left test install directory: $testDirPath"
     }
-    if ((Test-Path -LiteralPath $ordinarySettings) -or (Test-Path -LiteralPath $ordinaryLog)) {
-        throw 'Ordinary uninstall left verification settings or logs'
+    if (
+        (Test-Path -LiteralPath $ordinarySettings) -or
+        (Test-Path -LiteralPath $ordinaryLog) -or
+        (Test-Path -LiteralPath $ordinaryTargetSettings) -or
+        (Test-Path -LiteralPath $ordinaryTargetLog) -or
+        (Test-Path -LiteralPath (Split-Path -Parent $ordinaryTargetLog))
+    ) {
+        throw 'Ordinary uninstall left direct verifier-owned settings/logs'
     }
     foreach ($state in $dataStates) {
         if (Test-Path -LiteralPath $state.RealPath) {
             throw "Ordinary uninstall left product data path: $($state.RealPath)"
         }
     }
-    Write-Output 'ORDINARY VERIFY: install=0 self-test=0 startup-absent=true uninstall=0 cleanup=true'
+    Assert-IsolatedTargetsClean -States $dataStates -Phase 'ordinary uninstall'
+    Write-Output 'ORDINARY VERIFY: install=0 self-test=0 startup-initially-absent=true startup-enabled-before-uninstall=true uninstall-removed-run=true direct-target-cleanup=true'
 
     Write-Output '--- upgrade preservation ---'
-    Ensure-IsolatedDataLinks -States $dataStates
+    Ensure-IsolatedDataRoots -States $dataStates
     Invoke-Install -Directory $upgradeDirPath -Startup enable
     Assert-InstalledLayout -Directory $upgradeDirPath
     Assert-UninstallEntry -Expected $true
     $expectedRun = '"' + (Join-Path $upgradeDirPath 'ShiyiDesktopPet.exe') + '" --startup'
-    $runAfterFirstInstall = Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName
-    if (-not $runAfterFirstInstall.Exists -or $runAfterFirstInstall.Value -ne $expectedRun) {
-        throw "First install did not create the expected startup value: $($runAfterFirstInstall.Value)"
-    }
+    Assert-RegistryValueExact -Expected $expectedRun
 
     $settingsPath = Join-Path $roamingPath 'settings.ini'
+    $targetSettingsPath = Join-Path $roamingState.Target 'settings.ini'
+    $upgradeLogPath = Join-Path $localPath 'logs\upgrade-verification.log'
+    $targetUpgradeLogPath = Join-Path $localState.Target 'logs\upgrade-verification.log'
     $settingsText = "[settings]`nschema_version = 1`nwander_enabled = true`nverification_sentinel = $verificationId`n"
+    $upgradeLogText = "upgrade-verification=$verificationId`n"
     [System.IO.File]::WriteAllText($settingsPath, $settingsText, [System.Text.UTF8Encoding]::new($false))
-    $settingsHash = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $upgradeLogPath) -Force)
+    [System.IO.File]::WriteAllText($upgradeLogPath, $upgradeLogText, [System.Text.UTF8Encoding]::new($false))
+    Assert-DirectSentinel -Path $targetSettingsPath -ExpectedText $settingsText
+    Assert-DirectSentinel -Path $targetUpgradeLogPath -ExpectedText $upgradeLogText
+    $settingsHash = (Get-FileHash -LiteralPath $targetSettingsPath -Algorithm SHA256).Hash
 
-    $startupCode = 'from pathlib import Path; import sys; from shiyi_desktop_pet.startup import StartupManager, WinRegRunKey; StartupManager(WinRegRunKey(), Path(sys.argv[1])).set_enabled(False)'
-    $oldPythonPath = $env:PYTHONPATH
-    try {
-        $env:PYTHONPATH = Join-Path $repoRoot 'src'
-        [void](Invoke-CheckedProcess -FilePath $python -Arguments @('-c', $startupCode, (Join-Path $upgradeDirPath 'ShiyiDesktopPet.exe')) -TimeoutSeconds 30 -Description 'StartupManager disable')
-    }
-    finally {
-        $env:PYTHONPATH = $oldPythonPath
-    }
+    Set-StartupViaManager -Directory $upgradeDirPath -Enabled $false
     Assert-RegistryValueAbsent
 
     Invoke-Install -Directory $upgradeDirPath -Startup enable
     Assert-InstalledLayout -Directory $upgradeDirPath
     Assert-UninstallEntry -Expected $true
     Assert-RegistryValueAbsent
-    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $targetSettingsPath -PathType Leaf)) {
         throw 'Upgrade removed the settings sentinel'
     }
-    if ((Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -ne $settingsHash) {
+    if ((Get-FileHash -LiteralPath $targetSettingsPath -Algorithm SHA256).Hash -ne $settingsHash) {
         throw 'Upgrade changed the settings sentinel'
     }
-    if ((Get-Content -LiteralPath $settingsPath -Raw) -notmatch '(?m)^wander_enabled\s*=\s*true\s*$') {
+    if ((Get-Content -LiteralPath $targetSettingsPath -Raw) -notmatch '(?m)^wander_enabled\s*=\s*true\s*$') {
         throw 'Upgrade did not preserve wander_enabled=true'
     }
+    Assert-DirectSentinel -Path $targetUpgradeLogPath -ExpectedText $upgradeLogText
     Write-Output "UPGRADE VERIFY: settings-preserved=true ($settingsHash), startup-disabled-preserved=true"
 
     Invoke-Uninstall -Directory $upgradeDirPath
@@ -743,11 +1023,19 @@ try {
     if (Test-Path -LiteralPath $upgradeDirPath) {
         throw "Upgrade uninstall left test install directory: $upgradeDirPath"
     }
+    if (
+        (Test-Path -LiteralPath $targetSettingsPath) -or
+        (Test-Path -LiteralPath $targetUpgradeLogPath) -or
+        (Test-Path -LiteralPath (Split-Path -Parent $targetUpgradeLogPath))
+    ) {
+        throw 'Upgrade uninstall left direct isolated settings/logs'
+    }
     foreach ($state in $dataStates) {
         if (Test-Path -LiteralPath $state.RealPath) {
             throw "Upgrade uninstall left product data path: $($state.RealPath)"
         }
     }
+    Assert-IsolatedTargetsClean -States $dataStates -Phase 'upgrade uninstall'
     Write-Output 'UPGRADE UNINSTALL VERIFY: process/run/uninstall/install/settings/log cleanup=true'
     $verificationSucceeded = $true
 }
@@ -762,20 +1050,23 @@ finally {
             Write-Warning "Fallback uninstall failed for ${directory}; safe test cleanup will continue: $($_.Exception.Message)"
         }
     }
-    foreach ($process in @(Get-TestProcesses)) {
-        try {
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
-        }
-        catch {
-            $restoreErrors.Add("stop test process $($process.ProcessId): $($_.Exception.Message)")
-        }
+    $canCleanTestRoots = $true
+    try {
+        Stop-OwnedProcesses
+        Assert-NoTestProcesses
     }
-    foreach ($directory in @($testDirPath, $upgradeDirPath)) {
-        try {
-            Remove-SafeTree -Path $directory -AllowedRoots @($directory, $workRoot) -Purpose 'final test cleanup' -AllowEqual
-        }
-        catch {
-            $restoreErrors.Add("cleanup ${directory}: $($_.Exception.Message)")
+    catch {
+        $restoreErrors.Add("owned/test process cleanup: $($_.Exception.Message)")
+        $canCleanTestRoots = $false
+    }
+    if ($canCleanTestRoots) {
+        foreach ($directory in @($testDirPath, $upgradeDirPath)) {
+            try {
+                Remove-SafeTree -Path $directory -AllowedRoots @($workRoot) -Purpose 'final test cleanup'
+            }
+            catch {
+                $restoreErrors.Add("cleanup ${directory}: $($_.Exception.Message)")
+            }
         }
     }
 
@@ -792,12 +1083,26 @@ finally {
         catch {
             $restoreErrors.Add("uninstall registry restore: $($_.Exception.Message)")
         }
+        try {
+            $actualRun = Get-RegistryValueSnapshot -SubKey $runKeyPath -Name $runValueName
+            Assert-RegistrySnapshotEqual -Expected $registryState.Run -Actual $actualRun -Description 'Run registry'
+        }
+        catch {
+            $restoreErrors.Add("Run registry post-restore verification: $($_.Exception.Message)")
+        }
+        try {
+            $actualUninstall = Get-RegistryTreeSnapshot -SubKey $uninstallKeyPath
+            Assert-RegistrySnapshotEqual -Expected $registryState.Uninstall -Actual $actualUninstall -Description 'uninstall registry tree'
+        }
+        catch {
+            $restoreErrors.Add("uninstall registry post-restore verification: $($_.Exception.Message)")
+        }
         Write-Output "REGISTRY RESTORE: Run=$($registryState.Run.Exists), Uninstall=$($registryState.Uninstall.Exists)"
     }
 
     foreach ($state in $dataStates) {
         try {
-            Remove-IsolatedDataLinks -States @($state)
+            Remove-VerifierDataRoots -States @($state)
             if ($state.Existed) {
                 if (-not (Test-Path -LiteralPath $state.HoldPath -PathType Container)) {
                     throw "Missing held user data: $($state.HoldPath)"
@@ -818,7 +1123,7 @@ finally {
         }
     }
 
-    if ($restoreErrors.Count -eq 0) {
+    if ($restoreErrors.Count -eq 0 -and $verificationSucceeded) {
         try {
             Remove-SafeTree -Path $backupRoot -AllowedRoots @($workRoot) -Purpose 'verified backup cleanup'
         }
@@ -826,8 +1131,35 @@ finally {
             $restoreErrors.Add("backup cleanup: $($_.Exception.Message)")
         }
     }
-    else {
+
+    if ($restoreErrors.Count -ne 0 -or -not $verificationSucceeded) {
         Write-Warning "Backup retained for recovery: $backupRoot"
+        foreach ($state in $dataStates) {
+            $holdExists = Test-Path -LiteralPath $state.HoldPath
+            $holdFingerprint = '<unavailable>'
+            if ($holdExists) {
+                try {
+                    $holdFingerprint = Get-DirectoryFingerprint -Path $state.HoldPath
+                }
+                catch {
+                    $holdFingerprint = "ERROR: $($_.Exception.Message)"
+                }
+            }
+            Write-Warning "RECOVERY HOLD [$($state.Name)]: path=$($state.HoldPath), exists=$holdExists, fingerprint=$holdFingerprint"
+            $backupExists = Test-Path -LiteralPath $state.BackupPath
+            $backupFingerprint = '<unavailable>'
+            if ($backupExists) {
+                try {
+                    $backupFingerprint = Get-DirectoryFingerprint -Path $state.BackupPath
+                }
+                catch {
+                    $backupFingerprint = "ERROR: $($_.Exception.Message)"
+                }
+            }
+            Write-Warning "RECOVERY BACKUP [$($state.Name)]: path=$($state.BackupPath), exists=$backupExists, fingerprint=$backupFingerprint"
+        }
+        Write-Warning "RECOVERY REGISTRY SNAPSHOT: $registryBackupPath (exists=$(Test-Path -LiteralPath $registryBackupPath))"
+        Write-Warning "NON-DESTRUCTIVE RECOVERY OUTLINE: inspect listed hold/backup paths with Get-ChildItem -LiteralPath '<Path>' -Force; copy one to a new recovery directory with Copy-Item -LiteralPath '<Path>' -Destination '<NewPath>' -Recurse; inspect Import-Clixml -LiteralPath '$registryBackupPath'. Do not delete or overwrite current user data until contents are compared."
     }
 
     if ($restoreErrors.Count -ne 0) {
