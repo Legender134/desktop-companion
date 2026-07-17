@@ -1,0 +1,19 @@
+{
+  "id": "my_pet",
+  "displayName": "我的宠物",
+  "description": "这是一个桌面灵伴 v2 宠物包模板。",
+  "spriteVersionNumber": 2,
+  "spritesheetPath": "spritesheet.webp",
+  "iconFrame": {"row": 0, "column": 0},
+  "actions": {
+    "idle": {"label": "安静陪伴", "autoplayWeight": 0},
+    "moveRight": {"label": "向右移动", "autoplayWeight": 0},
+    "moveLeft": {"label": "向左移动", "autoplayWeight": 0},
+    "greet": {"label": "打个招呼", "autoplayWeight": 3},
+    "jump": {"label": "开心跃起", "autoplayWeight": 1},
+    "special": {"label": "特别动作", "autoplayWeight": 2},
+    "wait": {"label": "安静等待", "autoplayWeight": 3},
+    "observe": {"label": "看看四周", "autoplayWeight": 2},
+    "curious": {"label": "好奇观察", "autoplayWeight": 3}
+  }
+}

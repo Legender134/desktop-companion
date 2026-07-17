@@ -2,6 +2,10 @@
 
 桌面灵伴 2.2 支持从 `%APPDATA%\DesktopCompanion\pets` 动态发现数据型宠物包。宠物包不能包含或执行 Python、JavaScript、DLL、EXE 等代码；程序只读取清单和固定格式的透明 WebP 图集。
 
+这是供制作者查阅的精确技术规范。第一次制作宠物时，建议先按[添加新宠物指南](添加新宠物指南.md)逐步操作，再回来核对本页。可直接复制的文件位于 [`examples/pet-pack-template`](../examples/pet-pack-template)，支持 JSON Schema 的编辑器可加载 [`schemas/pet-pack-v2.schema.json`](../schemas/pet-pack-v2.schema.json)。
+
+兼容性判断以桌面灵伴运行时校验为准。JSON Schema 只能检查清单字段，不能检查目录名是否匹配，也不能检查 WebP 的尺寸、透明通道和每格占用情况。
+
 ## 目录和清单
 
 目录名必须与 `pet.json` 中的小写 `id` 相同：
