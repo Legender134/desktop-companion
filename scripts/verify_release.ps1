@@ -10,6 +10,10 @@ param(
 
     [switch]$SimulateUnresolvedShiyiProcess,
 
+    [switch]$ProcessContainmentProbe,
+
+    [switch]$FallbackForeignProcessProbe,
+
     [ValidateRange(1, 3600)]
     [int]$UninstallTimeoutSeconds = 180
 )
@@ -34,6 +38,159 @@ $uninstallKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{5F4B3A
 $roamingPath = [System.IO.Path]::GetFullPath((Join-Path $env:APPDATA 'ShiyiDesktopPet'))
 $localPath = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ShiyiDesktopPet'))
 $ownedProcesses = [System.Collections.Generic.List[object]]::new()
+$retainedJobHandles = [System.Collections.Generic.List[object]]::new()
+$allJobTreesQuiescent = $true
+$uninstallLaunchCount = 0
+
+if ($null -eq ('ShiyiVerifier.JobObject' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace ShiyiVerifier
+{
+    public sealed class JobObject : IDisposable
+    {
+        private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        private SafeFileHandle handle;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr securityAttributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(
+            IntPtr job,
+            int infoClass,
+            IntPtr information,
+            uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(
+            IntPtr job,
+            int infoClass,
+            out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information,
+            uint informationLength,
+            IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+        public JobObject()
+        {
+            IntPtr raw = CreateJobObject(IntPtr.Zero, null);
+            if (raw == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject failed");
+
+            handle = new SafeFileHandle(raw, true);
+            var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            int size = Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(limits, buffer, false);
+                if (!SetInformationJobObject(raw, 9, buffer, (uint)size))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "SetInformationJobObject failed");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public void Assign(Process process)
+        {
+            if (process == null) throw new ArgumentNullException(nameof(process));
+            if (!AssignProcessToJobObject(handle.DangerousGetHandle(), process.Handle))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject failed");
+        }
+
+        public uint ActiveProcessCount
+        {
+            get
+            {
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+                int size = Marshal.SizeOf<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>();
+                if (!QueryInformationJobObject(
+                    handle.DangerousGetHandle(), 1, out accounting, (uint)size, IntPtr.Zero))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "QueryInformationJobObject failed");
+                return accounting.ActiveProcesses;
+            }
+        }
+
+        public void Terminate(uint exitCode)
+        {
+            if (!TerminateJobObject(handle.DangerousGetHandle(), exitCode))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "TerminateJobObject failed");
+        }
+
+        public void Dispose()
+        {
+            if (handle != null)
+            {
+                handle.Dispose();
+                handle = null;
+            }
+        }
+    }
+}
+'@
+}
 
 function Test-DescendantPath {
     param(
@@ -556,19 +713,192 @@ function Invoke-Install {
     ) -TimeoutSeconds 300 -Description "silent install ($Startup startup)")
 }
 
+function Wait-JobTreeQuiescent {
+    param(
+        [Parameter(Mandatory = $true)][ShiyiVerifier.JobObject]$Job,
+        [Parameter(Mandatory = $true)][int]$TimeoutMilliseconds
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $lastActive = $null
+    do {
+        try {
+            $lastActive = $Job.ActiveProcessCount
+        }
+        catch {
+            return [pscustomobject]@{
+                Zero = $false
+                LastActive = $lastActive
+                QueryError = $_.Exception.Message
+            }
+        }
+        if ($lastActive -eq 0) {
+            return [pscustomobject]@{ Zero = $true; LastActive = 0; QueryError = $null }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    return [pscustomobject]@{ Zero = $false; LastActive = $lastActive; QueryError = $null }
+}
+
+function Invoke-GatedJobProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$HelperPath,
+        [string[]]$HelperArguments = @(),
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $gateName = "Local\ShiyiVerifier-$([guid]::NewGuid().ToString('N'))"
+    $gate = [System.Threading.EventWaitHandle]::new(
+        $false,
+        [System.Threading.EventResetMode]::ManualReset,
+        $gateName
+    )
+    $job = [ShiyiVerifier.JobObject]::new()
+    $jobRetained = $false
+    $jobAssigned = $false
+    $treeQuiescent = $false
+    $processStarted = $false
+    $process = [System.Diagnostics.Process]::new()
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = (Get-Process -Id $PID).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+    foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $HelperPath, '-GateName', $gateName) + $HelperArguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $process.StartInfo = $startInfo
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void]$process.Start()
+        $processStarted = $true
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+
+        try {
+            $job.Assign($process)
+            $jobAssigned = $true
+        }
+        catch {
+            # The helper is still blocked on the unsignaled gate, so no child
+            # or uninstaller can exist when assignment fails.
+            $process.Kill($true)
+            if (-not $process.WaitForExit(10000)) {
+                $script:allJobTreesQuiescent = $false
+                throw "Startup-gated helper could not be assigned and its root exit was not confirmed: $Description"
+            }
+            throw "Startup-gated helper was not assigned to the kill-on-close job; uninstaller was not launched: $Description; $($_.Exception.Message)"
+        }
+
+        if (-not $gate.Set()) {
+            throw "Failed to release startup gate after job assignment: $Description"
+        }
+
+        $poll = Wait-JobTreeQuiescent -Job $job -TimeoutMilliseconds ($TimeoutSeconds * 1000)
+        if (-not $poll.Zero) {
+            try {
+                $job.Terminate(1460)
+            }
+            catch {
+                throw "Timed-out job termination failed: $Description; $($_.Exception.Message)"
+            }
+            $terminationPoll = Wait-JobTreeQuiescent -Job $job -TimeoutMilliseconds 10000
+            if (-not $terminationPoll.Zero) {
+                $script:allJobTreesQuiescent = $false
+                $script:retainedJobHandles.Add($job)
+                $jobRetained = $true
+                throw "JOB QUIESCENCE FAILURE: $Description; active=$($terminationPoll.LastActive); queryError=$($terminationPoll.QueryError)"
+            }
+            $treeQuiescent = $true
+            if (-not $process.WaitForExit(5000)) {
+                $script:allJobTreesQuiescent = $false
+                throw "Job reported active=0 but helper root did not signal exit: $Description"
+            }
+            throw "JOB TIMEOUT: $Description; timeout=$TimeoutSeconds seconds; terminated=true; job-active=0; helper-exit-confirmed=true"
+        }
+
+        $treeQuiescent = $true
+        if (-not $process.WaitForExit(5000)) {
+            $script:allJobTreesQuiescent = $false
+            throw "Job reported active=0 but helper root did not signal exit: $Description"
+        }
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Stdout = $stdoutTask.GetAwaiter().GetResult().Trim()
+            Stderr = $stderrTask.GetAwaiter().GetResult().Trim()
+            ElapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
+            JobActive = 0
+        }
+    }
+    catch {
+        if ($jobAssigned -and -not $treeQuiescent -and -not $jobRetained) {
+            try {
+                $job.Terminate(1460)
+                $failurePoll = Wait-JobTreeQuiescent -Job $job -TimeoutMilliseconds 10000
+                if ($failurePoll.Zero) {
+                    $treeQuiescent = $true
+                    [void]$process.WaitForExit(5000)
+                }
+                else {
+                    $script:allJobTreesQuiescent = $false
+                    $script:retainedJobHandles.Add($job)
+                    $jobRetained = $true
+                    throw "JOB QUIESCENCE FAILURE after error: $Description; active=$($failurePoll.LastActive); queryError=$($failurePoll.QueryError)"
+                }
+            }
+            catch {
+                if (-not $jobRetained) {
+                    $script:allJobTreesQuiescent = $false
+                    $script:retainedJobHandles.Add($job)
+                    $jobRetained = $true
+                }
+                throw "JOB QUIESCENCE FAILURE after error: $Description; $($_.Exception.Message)"
+            }
+        }
+        throw
+    }
+    finally {
+        $stopwatch.Stop()
+        $gate.Dispose()
+        if ($processStarted) {
+            $process.Dispose()
+        }
+        if (-not $jobRetained) {
+            $job.Dispose()
+        }
+    }
+}
+
+function Assert-UninstallOwnershipGate {
+    param([Parameter(Mandatory = $true)][string]$Context)
+
+    Stop-OwnedProcesses
+    Assert-NoTestProcesses
+    Write-Output "UNINSTALL OWNERSHIP GATE [$Context]: global-shiyi=0; owned-processes-reconciled=true"
+}
+
 function Invoke-Uninstall {
     param([Parameter(Mandatory = $true)][string]$Directory)
 
     $uninstaller = Join-Path $Directory 'unins000.exe'
     if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+        Assert-UninstallOwnershipGate -Context $Directory
         $logPath = Join-Path $backupRoot "uninstall-$([System.IO.Path]::GetFileName($Directory))-$([guid]::NewGuid().ToString('N')).log"
-        # Inno runs the real uninstall in a temporary clone. A bounded helper
-        # uses Start-Process -Wait so the local process tree is observed. If it
-        # times out, Invoke-CapturedProcess kills and confirms only that helper
-        # tree before finally is allowed to clean test paths.
         $helperPath = Join-Path $backupRoot "wait-uninstall-$([guid]::NewGuid().ToString('N')).ps1"
         $helperText = @'
-param([string]$Uninstaller, [string]$LogPath)
+param([string]$GateName, [string]$Uninstaller, [string]$LogPath)
+$gate = [System.Threading.EventWaitHandle]::OpenExisting($GateName)
+try {
+    if (-not $gate.WaitOne(30000)) {
+        exit 1460
+    }
+}
+finally {
+    $gate.Dispose()
+}
 $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="{0}"' -f $LogPath))
 $process = Start-Process -FilePath $Uninstaller -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
 $exitCode = $process.ExitCode
@@ -576,23 +906,13 @@ $process.Dispose()
 exit $exitCode
 '@
         [System.IO.File]::WriteAllText($helperPath, $helperText, [System.Text.UTF8Encoding]::new($false))
-        $powerShell = (Get-Process -Id $PID).Path
-        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        try {
-            $result = Invoke-CapturedProcess -FilePath $powerShell -Arguments @(
-                '-NoProfile',
-                '-NonInteractive',
-                '-File',
-                $helperPath,
-                '-Uninstaller',
-                $uninstaller,
-                '-LogPath',
-                $logPath
-            ) -TimeoutSeconds $UninstallTimeoutSeconds
-        }
-        finally {
-            $stopwatch.Stop()
-        }
+        $script:uninstallLaunchCount++
+        $result = Invoke-GatedJobProcess -HelperPath $helperPath -HelperArguments @(
+            '-Uninstaller',
+            $uninstaller,
+            '-LogPath',
+            $logPath
+        ) -TimeoutSeconds $UninstallTimeoutSeconds -Description "Inno uninstall $Directory"
         $exitCode = $result.ExitCode
         if ($exitCode -ne 0) {
             $logTail = if (Test-Path -LiteralPath $logPath -PathType Leaf) {
@@ -603,7 +923,7 @@ exit $exitCode
             }
             throw "silent uninstall failed with exit code $exitCode. log=$logTail"
         }
-        Write-Output "BOUNDED UNINSTALL WAIT: directory=$Directory; timeout=$UninstallTimeoutSeconds seconds; elapsed=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds; exit=$exitCode"
+        Write-Output "JOB-CONTAINED UNINSTALL: directory=$Directory; timeout=$UninstallTimeoutSeconds seconds; elapsed=$($result.ElapsedSeconds) seconds; exit=$exitCode; job-active=$($result.JobActive)"
     }
 }
 
@@ -790,6 +1110,175 @@ function Remove-VerifierDataRoots {
     }
 }
 
+function Invoke-ProcessContainmentProbe {
+    $probeRoot = Join-Path $workRoot "job-timeout-probe-$([guid]::NewGuid().ToString('N'))"
+    if (-not (Test-DescendantPath -Path $probeRoot -Root $workRoot)) {
+        throw "Unsafe containment probe root: $probeRoot"
+    }
+    [void](Assert-NoReparseComponents -Path $workRoot -Purpose 'job-timeout probe')
+    [void](New-Item -ItemType Directory -Path $probeRoot)
+    $childPath = Join-Path $probeRoot 'long-child.ps1'
+    $helperPath = Join-Path $probeRoot 'gated-helper.ps1'
+    $pidPath = Join-Path $probeRoot 'child.pid'
+    $heartbeatPath = Join-Path $probeRoot 'heartbeat.log'
+    $childText = @'
+param([string]$PidPath, [string]$HeartbeatPath)
+$current = [System.Diagnostics.Process]::GetCurrentProcess()
+[System.IO.File]::WriteAllText($PidPath, ("{0}|{1}" -f $PID, $current.StartTime.ToUniversalTime().Ticks))
+while ($true) {
+    [System.IO.File]::AppendAllText($HeartbeatPath, ("{0:o}`n" -f [DateTime]::UtcNow))
+    Start-Sleep -Milliseconds 100
+}
+'@
+    $helperText = @'
+param([string]$GateName, [string]$ChildPath, [string]$PidPath, [string]$HeartbeatPath)
+$gate = [System.Threading.EventWaitHandle]::OpenExisting($GateName)
+try {
+    if (-not $gate.WaitOne(30000)) { exit 1460 }
+}
+finally {
+    $gate.Dispose()
+}
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = (Get-Process -Id $PID).Path
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $ChildPath, '-PidPath', $PidPath, '-HeartbeatPath', $HeartbeatPath)) {
+    $startInfo.ArgumentList.Add($argument)
+}
+$child = [System.Diagnostics.Process]::new()
+$child.StartInfo = $startInfo
+[void]$child.Start()
+$child.WaitForExit()
+$exitCode = $child.ExitCode
+$child.Dispose()
+exit $exitCode
+'@
+    [System.IO.File]::WriteAllText($childPath, $childText, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($helperPath, $helperText, [System.Text.UTF8Encoding]::new($false))
+
+    $probePassed = $false
+    try {
+        try {
+            [void](Invoke-GatedJobProcess -HelperPath $helperPath -HelperArguments @(
+                '-ChildPath', $childPath,
+                '-PidPath', $pidPath,
+                '-HeartbeatPath', $heartbeatPath
+            ) -TimeoutSeconds 3 -Description 'deterministic long-child containment probe')
+            throw 'Containment probe unexpectedly completed without timeout'
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'JOB TIMEOUT:.*job-active=0.*helper-exit-confirmed=true') {
+                throw
+            }
+        }
+        if (-not $allJobTreesQuiescent) {
+            throw 'Containment probe did not preserve the global job-quiescence proof'
+        }
+        if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf) -or -not (Test-Path -LiteralPath $heartbeatPath -PathType Leaf)) {
+            throw 'Containment probe child did not create PID/heartbeat evidence before timeout'
+        }
+        $identity = [System.IO.File]::ReadAllText($pidPath).Split('|')
+        $childPid = [int]$identity[0]
+        $childStartTicks = [long]$identity[1]
+        $live = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+        if ($null -ne $live -and $live.StartTime.ToUniversalTime().Ticks -eq $childStartTicks) {
+            throw "Containment probe child is still alive after job active=0: PID $childPid"
+        }
+        $firstLength = (Get-Item -LiteralPath $heartbeatPath).Length
+        Start-Sleep -Milliseconds 500
+        $secondLength = (Get-Item -LiteralPath $heartbeatPath).Length
+        if ($firstLength -ne $secondLength) {
+            throw 'Containment probe heartbeat continued after job active=0'
+        }
+        $probePassed = $true
+        Write-Output "JOB TIMEOUT PROBE PASSED: job-active=0; child-pid=$childPid terminated=true; heartbeat-stable=true; product-state-mutated=false"
+    }
+    finally {
+        if ($probePassed -and (Test-Path -LiteralPath $probeRoot)) {
+            Remove-SafeTree -Path $probeRoot -AllowedRoots @($workRoot) -Purpose 'job-timeout probe cleanup'
+        }
+        elseif (Test-Path -LiteralPath $probeRoot) {
+            Write-Warning "Containment probe evidence retained after failure: $probeRoot"
+        }
+    }
+}
+
+function Invoke-FallbackForeignProcessProbe {
+    $probeRoot = Join-Path $workRoot "fallback-foreign-probe-$([guid]::NewGuid().ToString('N'))"
+    $dummyInstall = Join-Path $probeRoot 'dummy-install'
+    if (-not (Test-DescendantPath -Path $probeRoot -Root $workRoot)) {
+        throw "Unsafe foreign-process probe root: $probeRoot"
+    }
+    [void](Assert-NoReparseComponents -Path $workRoot -Purpose 'foreign-process probe')
+    [void](New-Item -ItemType Directory -Path $dummyInstall -Force)
+    $foreignExe = Join-Path $probeRoot 'ShiyiDesktopPet.exe'
+    $dummyUninstaller = Join-Path $dummyInstall 'unins000.exe'
+    Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination $foreignExe
+    Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination $dummyUninstaller
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $foreignExe
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in @('127.0.0.1', '-n', '60', '-w', '1000')) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $foreign = [System.Diagnostics.Process]::new()
+    $foreign.StartInfo = $startInfo
+    $probePassed = $false
+    try {
+        [void]$foreign.Start()
+        $foreignStart = $foreign.StartTime.ToUniversalTime()
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $observed = @(Get-TestProcesses | Where-Object ProcessId -eq $foreign.Id)
+            if ($observed.Count -eq 1) { break }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if ($observed.Count -ne 1) {
+            throw "Foreign-process probe was not visible to fail-closed WMI enumeration: PID $($foreign.Id)"
+        }
+
+        $launchesBefore = $uninstallLaunchCount
+        try {
+            Invoke-Uninstall -Directory $dummyInstall
+            throw 'Foreign-process probe unexpectedly allowed fallback uninstall'
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'ShiyiDesktopPet process remains or appeared during verification') {
+                throw
+            }
+        }
+        if ($uninstallLaunchCount -ne $launchesBefore) {
+            throw 'Foreign-process probe incremented uninstall launch count before refusal'
+        }
+        $stillLive = Get-Process -Id $foreign.Id -ErrorAction SilentlyContinue
+        if ($null -eq $stillLive -or $stillLive.StartTime.ToUniversalTime() -ne $foreignStart) {
+            throw 'Foreign-process probe process was stopped or replaced by the ownership gate'
+        }
+        $probePassed = $true
+        Write-Output "FALLBACK FOREIGN PROBE PASSED: foreign-pid=$($foreign.Id) preserved=true; uninstall-launch-delta=0; product-state-mutated=false"
+    }
+    finally {
+        if (-not $foreign.HasExited) {
+            $foreign.Kill($true)
+            if (-not $foreign.WaitForExit(10000)) {
+                throw "Controlled foreign-process probe did not terminate: PID $($foreign.Id)"
+            }
+        }
+        $foreign.Dispose()
+        if ($probePassed -and (Test-Path -LiteralPath $probeRoot)) {
+            Remove-SafeTree -Path $probeRoot -AllowedRoots @($workRoot) -Purpose 'foreign-process probe cleanup'
+        }
+        elseif (Test-Path -LiteralPath $probeRoot) {
+            Write-Warning "Foreign-process probe evidence retained after failure: $probeRoot"
+        }
+    }
+}
+
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "Installer is not a file: $installerPath"
 }
@@ -838,6 +1327,9 @@ foreach ($dataPath in @($roamingPath, $localPath)) {
 }
 
 $existingProcesses = @(Get-TestProcesses)
+if (($ProcessContainmentProbe -or $FallbackForeignProcessProbe) -and -not $PreflightOnly) {
+    throw 'Process safety probes are permitted only with -PreflightOnly'
+}
 if ($SimulateUnresolvedShiyiProcess) {
     if (-not $PreflightOnly) {
         throw '-SimulateUnresolvedShiyiProcess is permitted only with -PreflightOnly'
@@ -852,6 +1344,12 @@ if ($existingProcesses.Count -ne 0) {
 }
 
 Write-Output "PREFLIGHT PASSED: test roots are canonical strict work children; protected/reparse/process checks passed"
+if ($ProcessContainmentProbe) {
+    Invoke-ProcessContainmentProbe
+}
+if ($FallbackForeignProcessProbe) {
+    Invoke-FallbackForeignProcessProbe
+}
 if ($PreflightOnly) {
     return
 }
@@ -1041,25 +1539,43 @@ try {
 }
 finally {
     $restoreErrors = [System.Collections.Generic.List[string]]::new()
+    $rollbackAllowed = $allJobTreesQuiescent
+    if (-not $rollbackAllowed) {
+        $restoreErrors.Add('rollback prohibited: a helper/uninstaller job tree was not proven quiescent')
+    }
 
-    foreach ($directory in @($testDirPath, $upgradeDirPath)) {
+    if ($rollbackAllowed) {
+        foreach ($directory in @($testDirPath, $upgradeDirPath)) {
+            try {
+                Invoke-Uninstall -Directory $directory
+                if (-not $allJobTreesQuiescent) {
+                    throw 'fallback uninstall did not prove its complete job tree quiescent'
+                }
+            }
+            catch {
+                $restoreErrors.Add("fallback uninstall blocked/failed (${directory}): $($_.Exception.Message)")
+                $rollbackAllowed = $false
+                break
+            }
+        }
+    }
+
+    if ($rollbackAllowed) {
         try {
-            Invoke-Uninstall -Directory $directory
+            Assert-UninstallOwnershipGate -Context 'pre-rollback global check'
         }
         catch {
-            Write-Warning "Fallback uninstall failed for ${directory}; safe test cleanup will continue: $($_.Exception.Message)"
+            $restoreErrors.Add("rollback process-ownership gate: $($_.Exception.Message)")
+            $rollbackAllowed = $false
         }
     }
-    $canCleanTestRoots = $true
-    try {
-        Stop-OwnedProcesses
-        Assert-NoTestProcesses
+
+    if (-not $allJobTreesQuiescent) {
+        $restoreErrors.Add('rollback prohibited after fallback: complete job-tree quiescence is unproven')
+        $rollbackAllowed = $false
     }
-    catch {
-        $restoreErrors.Add("owned/test process cleanup: $($_.Exception.Message)")
-        $canCleanTestRoots = $false
-    }
-    if ($canCleanTestRoots) {
+
+    if ($rollbackAllowed) {
         foreach ($directory in @($testDirPath, $upgradeDirPath)) {
             try {
                 Remove-SafeTree -Path $directory -AllowedRoots @($workRoot) -Purpose 'final test cleanup'
@@ -1070,7 +1586,7 @@ finally {
         }
     }
 
-    if ($stateCaptured) {
+    if ($rollbackAllowed -and $stateCaptured) {
         try {
             Restore-RegistryValue -SubKey $runKeyPath -Name $runValueName -Snapshot $registryState.Run
         }
@@ -1100,30 +1616,35 @@ finally {
         Write-Output "REGISTRY RESTORE: Run=$($registryState.Run.Exists), Uninstall=$($registryState.Uninstall.Exists)"
     }
 
-    foreach ($state in $dataStates) {
-        try {
-            Remove-VerifierDataRoots -States @($state)
-            if ($state.Existed) {
-                if (-not (Test-Path -LiteralPath $state.HoldPath -PathType Container)) {
-                    throw "Missing held user data: $($state.HoldPath)"
+    if ($rollbackAllowed) {
+        foreach ($state in $dataStates) {
+            try {
+                Remove-VerifierDataRoots -States @($state)
+                if ($state.Existed) {
+                    if (-not (Test-Path -LiteralPath $state.HoldPath -PathType Container)) {
+                        throw "Missing held user data: $($state.HoldPath)"
+                    }
+                    Move-Item -LiteralPath $state.HoldPath -Destination $state.RealPath
+                    $restoredFingerprint = Get-DirectoryFingerprint -Path $state.RealPath
+                    if ($restoredFingerprint -ne $state.Fingerprint) {
+                        throw "Restored user data fingerprint mismatch: $($state.RealPath)"
+                    }
+                    Write-Output "USER DATA RESTORE: $($state.RealPath), fingerprint=$restoredFingerprint"
                 }
-                Move-Item -LiteralPath $state.HoldPath -Destination $state.RealPath
-                $restoredFingerprint = Get-DirectoryFingerprint -Path $state.RealPath
-                if ($restoredFingerprint -ne $state.Fingerprint) {
-                    throw "Restored user data fingerprint mismatch: $($state.RealPath)"
+                elseif (Test-Path -LiteralPath $state.RealPath) {
+                    throw "Test left a user data path that did not exist before: $($state.RealPath)"
                 }
-                Write-Output "USER DATA RESTORE: $($state.RealPath), fingerprint=$restoredFingerprint"
             }
-            elseif (Test-Path -LiteralPath $state.RealPath) {
-                throw "Test left a user data path that did not exist before: $($state.RealPath)"
+            catch {
+                $restoreErrors.Add("user data restore ($($state.Name)): $($_.Exception.Message)")
             }
-        }
-        catch {
-            $restoreErrors.Add("user data restore ($($state.Name)): $($_.Exception.Message)")
         }
     }
+    else {
+        Write-Warning 'ROLLBACK REFUSED: test roots, verifier data roots, registry test state, holds, backup, and CLIXML are retained because process ownership/job quiescence was not proven.'
+    }
 
-    if ($restoreErrors.Count -eq 0 -and $verificationSucceeded) {
+    if ($rollbackAllowed -and $restoreErrors.Count -eq 0 -and $verificationSucceeded) {
         try {
             Remove-SafeTree -Path $backupRoot -AllowedRoots @($workRoot) -Purpose 'verified backup cleanup'
         }

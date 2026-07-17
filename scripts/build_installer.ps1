@@ -11,19 +11,54 @@ $expectedLanguageHash = '869E43E7C7B8D20C7E4397C8E98F7D1B7CF0528803ACDF019AD3501
 
 function Get-InnoInstallRecords {
     $records = [System.Collections.Generic.List[object]]::new()
-    foreach ($hive in @('HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE')) {
-        foreach ($key in @('Inno Setup 7_is1', 'Inno Setup 6_is1')) {
-            $path = "Registry::$hive\Software\Microsoft\Windows\CurrentVersion\Uninstall\$key"
-            if (-not (Test-Path -LiteralPath $path)) {
-                continue
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $subKeyPrefix = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+    $hives = @(
+        [pscustomobject]@{ Name = 'HKEY_CURRENT_USER'; Value = [Microsoft.Win32.RegistryHive]::CurrentUser },
+        [pscustomobject]@{ Name = 'HKEY_LOCAL_MACHINE'; Value = [Microsoft.Win32.RegistryHive]::LocalMachine }
+    )
+    foreach ($hive in $hives) {
+        foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive.Value, $view)
+            try {
+                foreach ($keyName in @('Inno Setup 7_is1', 'Inno Setup 6_is1')) {
+                    $subKey = "$subKeyPrefix\$keyName"
+                    $key = $base.OpenSubKey($subKey, $false)
+                    if ($null -eq $key) {
+                        continue
+                    }
+                    try {
+                        $installLocationText = [string]$key.GetValue(
+                            'InstallLocation',
+                            $null,
+                            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+                        )
+                        $displayVersionText = [string]$key.GetValue(
+                            'DisplayVersion',
+                            $null,
+                            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+                        )
+                    }
+                    finally {
+                        $key.Dispose()
+                    }
+                    if (-not $installLocationText -or -not $displayVersionText) {
+                        continue
+                    }
+                    $installLocation = [System.IO.Path]::GetFullPath($installLocationText).TrimEnd('\', '/')
+                    $displayVersion = [version]$displayVersionText
+                    $canonicalIdentity = "$installLocation|$displayVersion"
+                    if ($seen.Add($canonicalIdentity)) {
+                        $records.Add([pscustomobject]@{
+                            RegistryPath = "$($hive.Name)[$view]\$subKey"
+                            InstallLocation = $installLocation
+                            DisplayVersion = $displayVersion
+                        })
+                    }
+                }
             }
-            $properties = Get-ItemProperty -LiteralPath $path
-            if ($properties.InstallLocation -and $properties.DisplayVersion) {
-                $records.Add([pscustomobject]@{
-                    RegistryPath = $path
-                    InstallLocation = [System.IO.Path]::GetFullPath([string]$properties.InstallLocation).TrimEnd('\', '/')
-                    DisplayVersion = [version]([string]$properties.DisplayVersion)
-                })
+            finally {
+                $base.Dispose()
             }
         }
     }
