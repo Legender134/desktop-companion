@@ -276,8 +276,16 @@ class DesktopPetApplication:
             return
         self._started = True
         self.tray.show()
-        self.window.show()
-        if not startup:
+        if startup:
+            attribute = Qt.WidgetAttribute.WA_ShowWithoutActivating
+            previous = self.window.testAttribute(attribute)
+            self.window.setAttribute(attribute, True)
+            try:
+                self.window.show()
+            finally:
+                self.window.setAttribute(attribute, previous)
+        else:
+            self.window.show()
             self.window.raise_()
         self._refresh_hover_snapshot()
         self.animation_timer.start()
@@ -335,9 +343,7 @@ class DesktopPetApplication:
         if action not in ACTION_SPECS:
             raise ValueError(f"unsupported action: {action}")
         self._fixed_look_degrees = None
-        self._wander_target = None
-        self._wander_direction = 0
-        self.wander_timer.stop()
+        self._interrupt_wander(reschedule=False)
         self.behavior.trigger_manual(action)
         self.timeline.start(action, self._now_ms())
         self._last_frame_index = None
@@ -354,7 +360,7 @@ class DesktopPetApplication:
         if target.direction == 0:
             self._wander_target = None
             self._wander_direction = 0
-            self._wander_area = area
+            self._wander_area = None
             self.timeline.start(ActionId.IDLE, self._now_ms())
             self._show_frame(self.catalog.frames(ActionId.IDLE)[0])
             self._schedule_wander()
@@ -367,6 +373,13 @@ class DesktopPetApplication:
         self._last_frame_index = None
 
     def dispatch_menu(self, command: MenuCommand) -> None:
+        self._interrupt_wander(reschedule=False)
+        try:
+            self._dispatch_menu_command(command)
+        finally:
+            self._schedule_wander()
+
+    def _dispatch_menu_command(self, command: MenuCommand) -> None:
         kind = command.kind
         if kind == "action":
             self.trigger_action(ActionId(command.value))
@@ -375,6 +388,7 @@ class DesktopPetApplication:
             degrees = float(command.value)
             self._wander_target = None
             self._wander_direction = 0
+            self._wander_area = None
             self.wander_timer.stop()
             self._fixed_look_degrees = degrees
             self.behavior.request_gaze(degrees)
@@ -438,6 +452,7 @@ class DesktopPetApplication:
             self.behavior.set_wander_enabled(enabled)
             self._wander_target = None
             self._wander_direction = 0
+            self._wander_area = None
             if enabled:
                 self._schedule_wander()
             else:
@@ -567,9 +582,7 @@ class DesktopPetApplication:
         target = self._wander_target
         area = self._wander_area
         if target is None or area is None or self._wander_direction == 0:
-            self._wander_target = None
-            self._wander_direction = 0
-            self._resume_base_mode()
+            self._interrupt_wander(reschedule=True)
             return
         action = ActionId.RUN_RIGHT if self._wander_direction > 0 else ActionId.RUN_LEFT
         spec = ACTION_SPECS[action]
@@ -590,6 +603,7 @@ class DesktopPetApplication:
         if next_position == target or next_position == current:
             self._wander_target = None
             self._wander_direction = 0
+            self._wander_area = None
             self.timeline.start(ActionId.IDLE, now_ms)
             if self._rng.random() < 0.35:
                 self.trigger_action(self._rng.choice(_RANDOM_ACTIONS))
@@ -657,14 +671,28 @@ class DesktopPetApplication:
             self._settings.wander_enabled
             and self.behavior.mode is BehaviorMode.WANDER
             and self._wander_target is None
+            and self._fixed_look_degrees is None
             and not self._shut_down
         ):
             self.wander_timer.start(self._rng.randint(2_000, 6_000))
 
-    def _begin_drag(self) -> None:
+    def _interrupt_wander(self, *, reschedule: bool) -> bool:
+        was_active = self._wander_target is not None or self._wander_direction != 0
+        self.wander_timer.stop()
         self._wander_target = None
         self._wander_direction = 0
-        self.wander_timer.stop()
+        self._wander_area = None
+        if was_active and self.behavior.mode is BehaviorMode.WANDER:
+            now_ms = self._now_ms()
+            self.timeline.start(ActionId.IDLE, now_ms)
+            self._last_frame_index = None
+            self._show_frame(self.catalog.frames(ActionId.IDLE)[0])
+        if reschedule:
+            self._schedule_wander()
+        return was_active
+
+    def _begin_drag(self) -> None:
+        self._interrupt_wander(reschedule=False)
         self.behavior.begin_drag()
 
     def _drag_to(self, target: QPoint) -> None:
@@ -757,6 +785,7 @@ class DesktopPetApplication:
 
     def _screen_removed(self, screen: object) -> None:
         del screen
+        self._interrupt_wander(reschedule=False)
         QTimer.singleShot(0, self._recover_window_visibility)
 
     def _connect_screen(self, screen: object) -> None:
@@ -764,6 +793,7 @@ class DesktopPetApplication:
 
     def _recover_window_visibility(self, *args: object) -> None:
         del args
+        self._interrupt_wander(reschedule=False)
         try:
             area = self._current_screen_area()
         except RuntimeError:
@@ -774,6 +804,7 @@ class DesktopPetApplication:
             area,
         )
         self._move_window(position)
+        self._schedule_wander()
 
     def _move_window(self, position: Point) -> None:
         self.window.move(round(position.x), round(position.y))
@@ -900,15 +931,21 @@ def main(
             guard.close()
         return 1
 
-    cleaned_up = False
+    controller_shutdown_attempted = False
+    guard_closed = False
 
     def cleanup() -> None:
-        nonlocal cleaned_up
-        if cleaned_up:
+        nonlocal controller_shutdown_attempted, guard_closed
+        if controller_shutdown_attempted and guard_closed:
             return
-        cleaned_up = True
-        controller.shutdown()
-        guard.close()
+        try:
+            if not controller_shutdown_attempted:
+                controller_shutdown_attempted = True
+                controller.shutdown()
+        finally:
+            if not guard_closed:
+                guard.close()
+                guard_closed = True
 
     try:
         guard.command_received.connect(controller.handle_ipc_command)

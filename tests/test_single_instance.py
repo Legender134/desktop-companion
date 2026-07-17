@@ -1,5 +1,7 @@
 from uuid import uuid4
 
+from PySide6.QtCore import QTimer
+
 from shiyi_desktop_pet.single_instance import SingleInstanceGuard
 
 
@@ -76,3 +78,38 @@ def test_guard_validation_owner_properties_and_missing_peer():
     assert not peer.acquire()
     assert peer.last_delivery_succeeded is False
     assert missing.closed
+
+
+def test_existing_mutex_retries_until_delayed_server_listens(qtbot):
+    instance_name = f"ShiyiDesktopPet.Test.{uuid4().hex}"
+
+    class Mutex:
+        def __init__(self, already_exists):
+            self.already_exists = already_exists
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    owner_mutex = Mutex(False)
+    sender_mutex = Mutex(True)
+    owner = SingleInstanceGuard(
+        instance_name,
+        mutex_factory=lambda name: owner_mutex,
+    )
+    sender = SingleInstanceGuard(
+        instance_name,
+        timeout_ms=1_000,
+        mutex_factory=lambda name: sender_mutex,
+    )
+
+    QTimer.singleShot(50, owner.acquire)
+    try:
+        with qtbot.waitSignal(owner.command_received, timeout=2_000) as signal:
+            assert not sender.acquire(command="activate")
+        assert signal.args == ["activate"]
+        assert sender.last_delivery_succeeded is True
+        assert sender_mutex.closed
+    finally:
+        sender.close()
+        owner.close()

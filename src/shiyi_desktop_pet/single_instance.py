@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import QCoreApplication, QObject, Signal
+from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QTimer, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
@@ -121,13 +121,30 @@ class SingleInstanceGuard(QObject):
         return True
 
     def _send(self, command: str) -> bool:
-        socket = QLocalSocket()
-        delivered = False
-        try:
-            socket.connectToServer(self.server_name)
-            if not socket.waitForConnected(self.timeout_ms):
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        while True:
+            remaining_ms = self._remaining_ms(deadline)
+            if remaining_ms <= 0:
                 _LOGGER.warning("Could not connect to the running desktop-pet instance")
                 return False
+
+            socket = QLocalSocket()
+            socket.connectToServer(self.server_name)
+            if socket.waitForConnected(min(50, remaining_ms)):
+                return self._send_connected(socket, command, deadline)
+            socket.abort()
+            remaining_ms = self._remaining_ms(deadline)
+            if remaining_ms > 0:
+                self._wait_with_events(min(10, remaining_ms))
+
+    def _send_connected(
+        self,
+        socket: QLocalSocket,
+        command: str,
+        deadline: float,
+    ) -> bool:
+        delivered = False
+        try:
             if socket.write(f"{command}\n".encode("utf-8")) < 0:
                 _LOGGER.warning("Could not deliver command to the desktop-pet instance")
                 return False
@@ -135,10 +152,13 @@ class SingleInstanceGuard(QObject):
             # This also makes two guards deterministic when exercised in one
             # process: the owner can accept and drain its local socket before
             # this short-lived sender is destroyed.
-            deadline = time.monotonic() + self.timeout_ms / 1000.0
-            while socket.bytesToWrite() and time.monotonic() < deadline:
+            while socket.bytesToWrite() and self._remaining_ms(deadline) > 0:
                 QCoreApplication.processEvents()
                 socket.flush()
+                if socket.bytesToWrite():
+                    self._wait_with_events(
+                        min(5, self._remaining_ms(deadline))
+                    )
             if socket.bytesToWrite():
                 _LOGGER.warning("Could not flush command to the desktop-pet instance")
                 return False
@@ -148,6 +168,21 @@ class SingleInstanceGuard(QObject):
         finally:
             if not delivered:
                 socket.abort()
+
+    @staticmethod
+    def _remaining_ms(deadline: float) -> int:
+        return max(0, int((deadline - time.monotonic()) * 1_000))
+
+    @staticmethod
+    def _wait_with_events(milliseconds: int) -> None:
+        if milliseconds <= 0:
+            return
+        if QCoreApplication.instance() is None:
+            time.sleep(milliseconds / 1_000.0)
+            return
+        loop = QEventLoop()
+        QTimer.singleShot(milliseconds, loop.quit)
+        loop.exec()
 
     def _accept_connections(self) -> None:
         server = self._server

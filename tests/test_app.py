@@ -6,7 +6,7 @@ from random import Random
 import sys
 
 import pytest
-from PySide6.QtCore import QObject, QPoint, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtGui import QImage
 
 from shiyi_desktop_pet.app import (
@@ -25,6 +25,7 @@ from shiyi_desktop_pet.geometry import Point, Rect, Size
 from shiyi_desktop_pet.logging_setup import configure_logging, install_exception_hook
 from shiyi_desktop_pet.menu_controller import MenuCommand
 from shiyi_desktop_pet.models import ActionId
+from shiyi_desktop_pet.pet_window import PetWindow
 from shiyi_desktop_pet.settings import AppSettings
 from shiyi_desktop_pet.wander import WanderTarget
 
@@ -87,6 +88,28 @@ class FakeTray:
         return self.available
 
 
+class SpyPetWindow(PetWindow):
+    def __init__(self, catalog):
+        super().__init__(catalog)
+        self.show_without_activation = []
+        self.raise_calls = 0
+        self.activate_calls = 0
+
+    def show(self):
+        self.show_without_activation.append(
+            self.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        )
+        super().show()
+
+    def raise_(self):
+        self.raise_calls += 1
+        super().raise_()
+
+    def activateWindow(self):
+        self.activate_calls += 1
+        super().activateWindow()
+
+
 class FakeStartup:
     def __init__(self):
         self.enabled = False
@@ -103,6 +126,7 @@ class GuardSpy:
         self.acquired = acquired
         self.commands = []
         self.closed = False
+        self.close_calls = 0
         self._signals = _SignalBox()
         self.command_received = self._signals.command_received
 
@@ -111,6 +135,7 @@ class GuardSpy:
         return self.acquired
 
     def close(self):
+        self.close_calls += 1
         self.closed = True
 
 
@@ -122,7 +147,14 @@ def _catalog():
     return AnimationCatalog.load_default()
 
 
-def _controller(qapp, *, settings=AppSettings(), hook_factory=None, tray_factory=None):
+def _controller(
+    qapp,
+    *,
+    settings=AppSettings(),
+    hook_factory=None,
+    tray_factory=None,
+    window_factory=PetWindow,
+):
     store = MemorySettingsStore(settings)
     startup = FakeStartup()
     hooks = []
@@ -148,6 +180,7 @@ def _controller(qapp, *, settings=AppSettings(), hook_factory=None, tray_factory
         hook_factory=hook_factory,
         tray_factory=tray_factory,
         random=Random(0),
+        window_factory=window_factory,
     )
     return controller, store, startup, hooks, trays
 
@@ -273,6 +306,33 @@ def test_hook_start_failure_keeps_pet_running_and_disables_session_shortcut(qapp
     assert store.saved[-1].hover_digits_enabled is True
 
 
+def test_startup_show_suppresses_activation_but_later_activation_is_explicit(qapp):
+    startup, _, _, _, _ = _controller(qapp, window_factory=SpyPetWindow)
+    try:
+        startup.start(startup=True)
+
+        assert startup.window.show_without_activation == [True]
+        assert not startup.window.testAttribute(
+            Qt.WidgetAttribute.WA_ShowWithoutActivating
+        )
+        assert startup.window.raise_calls == 0
+
+        startup.activate()
+        assert startup.window.show_without_activation[-1] is False
+        assert startup.window.raise_calls == 1
+        assert startup.window.activate_calls == 1
+    finally:
+        startup.shutdown()
+
+    normal, _, _, _, _ = _controller(qapp, window_factory=SpyPetWindow)
+    try:
+        normal.start(startup=False)
+        assert normal.window.show_without_activation == [False]
+        assert normal.window.raise_calls == 1
+    finally:
+        normal.shutdown()
+
+
 def test_runtime_hook_failure_uses_last_error_and_notifies_only_once(qapp):
     controller, _, _, hooks, trays = _controller(qapp)
     controller.start(startup=True)
@@ -379,6 +439,69 @@ def test_controller_advances_manual_run_wander_gaze_and_drag(qapp, monkeypatch):
     assert controller.window.x() < 10_000
     assert isinstance(controller.hover_snapshot.hit_test(), bool)
     controller.shutdown()
+    controller.shutdown()
+
+
+def test_screen_recovery_cancels_stale_negative_monitor_wander(qapp):
+    settings = replace(AppSettings(), wander_enabled=True)
+    controller, _, _, _, _ = _controller(qapp, settings=settings)
+    controller.start(startup=True)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.wander_timer.stop()
+
+    def seed_stale_wander():
+        controller._wander_target = Point(-1_100, -50)
+        controller._wander_direction = -1
+        controller._wander_area = Rect(-1_280, -100, 1_280, 984)
+        controller.timeline.start(ActionId.RUN_LEFT, controller._now_ms())
+
+    seed_stale_wander()
+    controller._recover_window_visibility()
+    assert controller.wander_target is None
+    assert controller._wander_direction == 0
+    assert controller._wander_area is None
+
+    seed_stale_wander()
+    controller._screen_removed(object())
+    qapp.processEvents()
+    assert controller.wander_target is None
+    before = QPoint(controller.window.pos())
+    controller._animation_tick()
+    assert controller.window.pos() == before
+
+    area = controller._current_screen_area()
+    assert area.x <= controller.window.x() <= area.x + area.width - controller.window.width()
+    assert area.y <= controller.window.y() <= area.y + area.height - controller.window.height()
+    controller.shutdown()
+
+
+def test_each_menu_operation_interrupts_active_wander_before_dispatch(qapp):
+    settings = replace(AppSettings(), wander_enabled=True)
+    controller, _, _, _, _ = _controller(qapp, settings=settings)
+    controller.start(startup=True)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+
+    def assert_interrupts(command):
+        controller.wander_timer.stop()
+        controller._wander_target = Point(-1_100, -50)
+        controller._wander_direction = -1
+        controller._wander_area = Rect(-1_280, -100, 1_280, 984)
+        controller.timeline.start(ActionId.RUN_LEFT, controller._now_ms())
+        controller.dispatch_menu(command)
+        assert controller.wander_target is None
+        assert controller._wander_direction == 0
+        assert controller._wander_area is None
+        after_command = QPoint(controller.window.pos())
+        controller._animation_tick()
+        assert controller.window.pos() == after_command
+
+    assert_interrupts(MenuCommand("center"))
+    assert_interrupts(MenuCommand("scale", 125))
+    assert_interrupts(MenuCommand("toggle", False, "gaze_enabled"))
+    assert controller.settings.wander_enabled is True
+    assert controller.wander_timer.isActive()
     controller.shutdown()
 
 
@@ -491,6 +614,48 @@ def test_main_successful_composition_cleans_runtime(qapp, tmp_path, monkeypatch)
     assert hooks[0].started and hooks[0].stopped
     assert trays[0].shown and trays[0].hidden
     assert store.saved
+
+
+def test_main_closes_guard_even_when_controller_shutdown_raises(
+    qapp, tmp_path, monkeypatch
+):
+    guard = GuardSpy()
+
+    class FailingController:
+        def __init__(self, *args, **kwargs):
+            self.hook = FakeHook(lambda: False)
+            self.tray = FakeTray(None, None)
+            self.shutdown_calls = 0
+
+        def handle_ipc_command(self, command):
+            pass
+
+        def start(self, *, startup=False):
+            pass
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+            raise RuntimeError("shutdown failed")
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(
+        "shiyi_desktop_pet.app.DesktopPetApplication", FailingController
+    )
+    previous = sys.excepthook
+    try:
+        with pytest.raises(RuntimeError, match="shutdown failed"):
+            main(
+                [],
+                qapp=qapp,
+                guard_factory=lambda: guard,
+                settings_store_factory=MemorySettingsStore,
+                startup_manager_factory=FakeStartup,
+                run_event_loop=False,
+            )
+    finally:
+        sys.excepthook = previous
+
+    assert guard.close_calls == 1
 
 
 def test_self_test_failure_and_owner_quit_cli_paths(qapp):
