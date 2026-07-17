@@ -55,7 +55,7 @@ class AnimationCatalog:
         return FrameAsset(self._cell(row, column), row, column)
 
     def hit_test(self, frame: FrameAsset, x: float, y: float, scale: float) -> bool:
-        if scale <= 0:
+        if scale <= 0 or x < 0 or y < 0:
             return False
         source_x, source_y = int(x / scale), int(y / scale)
         if not 0 <= source_x < CELL_WIDTH or not 0 <= source_y < CELL_HEIGHT:
