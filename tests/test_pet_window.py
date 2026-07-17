@@ -1,5 +1,5 @@
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QGuiApplication, QMouseEvent
 
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.models import ActionId
@@ -170,6 +170,122 @@ def test_realistic_double_click_emits_only_jump_and_no_drag_transaction(qtbot):
     )
 
     assert events == [("action", ActionId.JUMP)]
+
+
+def test_sub_threshold_jitter_double_click_emits_only_jump(qtbot):
+    catalog = AnimationCatalog.load_default()
+    window = PetWindow(catalog)
+    qtbot.addWidget(window)
+    window.set_frame(catalog.frames(ActionId.IDLE)[0], scale_percent=100)
+    events = []
+    window.drag_started.connect(lambda: events.append("drag_started"))
+    window.drag_moved.connect(lambda target: events.append(("drag_moved", target)))
+    window.drag_finished.connect(lambda target: events.append(("drag_finished", target)))
+    window.action_requested.connect(lambda action: events.append(("action", action)))
+    threshold = QGuiApplication.styleHints().startDragDistance()
+    assert threshold > 0
+    jitter = max(0.5, threshold - 1.0)
+    press_local = QPointF(96.0, 150.0)
+    press_global = QPointF(416.0, 390.0)
+    jitter_local = press_local + QPointF(jitter, 0.0)
+    jitter_global = press_global + QPointF(jitter, 0.0)
+
+    window.mousePressEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonPress,
+            press_local,
+            press_global,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseMoveEvent(
+        _mouse_event(
+            QEvent.Type.MouseMove,
+            jitter_local,
+            jitter_global,
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseReleaseEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonRelease,
+            jitter_local,
+            jitter_global,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+        )
+    )
+    window.mouseDoubleClickEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonDblClick,
+            jitter_local,
+            jitter_global,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseReleaseEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonRelease,
+            jitter_local,
+            jitter_global,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+        )
+    )
+
+    assert jitter < threshold
+    assert events == [("action", ActionId.JUMP)]
+
+
+def test_movement_reaching_platform_threshold_starts_one_drag(qtbot):
+    catalog = AnimationCatalog.load_default()
+    window = PetWindow(catalog)
+    qtbot.addWidget(window)
+    window.set_frame(catalog.frames(ActionId.IDLE)[0], scale_percent=100)
+    events = []
+    window.drag_started.connect(lambda: events.append(("started", None)))
+    window.drag_moved.connect(lambda target: events.append(("moved", target)))
+    window.drag_finished.connect(lambda target: events.append(("finished", target)))
+    threshold = QGuiApplication.styleHints().startDragDistance()
+    assert threshold > 0
+    press_local = QPointF(40.25, 60.25)
+    press_global = QPointF(340.25, 260.25)
+    move_local = press_local + QPointF(float(threshold), 0.0)
+    move_global = press_global + QPointF(float(threshold), 0.0)
+    target = (move_global - press_local).toPoint()
+
+    window.mousePressEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonPress,
+            press_local,
+            press_global,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseMoveEvent(
+        _mouse_event(
+            QEvent.Type.MouseMove,
+            move_local,
+            move_global,
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseReleaseEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonRelease,
+            move_local,
+            move_global,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+        )
+    )
+
+    assert events == [("started", None), ("moved", target), ("finished", target)]
 
 
 def test_fractional_drag_subtracts_before_rounding(qtbot):

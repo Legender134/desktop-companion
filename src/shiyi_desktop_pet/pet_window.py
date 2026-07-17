@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QBitmap, QMouseEvent, QPaintEvent, QPainter
+from PySide6.QtGui import QBitmap, QGuiApplication, QMouseEvent, QPaintEvent, QPainter
 from PySide6.QtWidgets import QWidget
 
 from .animation_catalog import AnimationCatalog
@@ -97,7 +97,9 @@ class PetWindow(QWidget):
         offset = self._pending_press_offset
         if offset is not None:
             if not self._drag_active:
-                if event.position() == offset:
+                movement = event.position() - offset
+                threshold = QGuiApplication.styleHints().startDragDistance()
+                if movement.manhattanLength() < threshold:
                     event.accept()
                     return
                 self._drag_active = True
