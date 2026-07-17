@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shiyi-desktop-pet"
+version = "1.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["PySide6==6.11.1"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+shiyi_desktop_pet = ["resources/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+qt_api = "pyside6"
+testpaths = ["tests"]

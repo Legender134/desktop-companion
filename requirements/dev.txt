@@ -1,0 +1,6 @@
+-r runtime.txt
+PyInstaller==6.21.0
+pytest==9.1.1
+pytest-qt==4.5.0
+coverage==7.15.1
+Pillow==12.3.0
