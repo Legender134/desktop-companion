@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Legender134/desktop-companion/main/schemas/pet-pack-v2.schema.json",
+  "title": "桌面灵伴 v2 宠物包清单",
+  "description": "pet.json 的基础字段约束；图集尺寸、透明度、格子占用和目录名一致性仍由桌面灵伴运行时校验。",
+  "type": "object",
+  "required": [
+    "id",
+    "displayName",
+    "spriteVersionNumber",
+    "spritesheetPath"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "\\S"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "spriteVersionNumber": {
+      "const": 2
+    },
+    "spritesheetPath": {
+      "const": "spritesheet.webp"
+    },
+    "iconFrame": {
+      "type": "object",
+      "required": ["row", "column"],
+      "additionalProperties": false,
+      "properties": {
+        "row": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      }
+    },
+    "actions": {
+      "type": "object",
+      "required": [
+        "idle",
+        "moveRight",
+        "moveLeft",
+        "greet",
+        "jump",
+        "special",
+        "wait",
+        "observe",
+        "curious"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "idle": {
+          "allOf": [
+            {"$ref": "#/$defs/action"},
+            {"properties": {"autoplayWeight": {"const": 0}}}
+          ]
+        },
+        "moveRight": {
+          "allOf": [
+            {"$ref": "#/$defs/action"},
+            {"properties": {"autoplayWeight": {"const": 0}}}
+          ]
+        },
+        "moveLeft": {
+          "allOf": [
+            {"$ref": "#/$defs/action"},
+            {"properties": {"autoplayWeight": {"const": 0}}}
+          ]
+        },
+        "greet": {"$ref": "#/$defs/action"},
+        "jump": {"$ref": "#/$defs/action"},
+        "special": {"$ref": "#/$defs/action"},
+        "wait": {"$ref": "#/$defs/action"},
+        "observe": {"$ref": "#/$defs/action"},
+        "curious": {"$ref": "#/$defs/action"}
+      },
+      "anyOf": [
+        {"properties": {"greet": {"properties": {"autoplayWeight": {"minimum": 1}}}}},
+        {"properties": {"jump": {"properties": {"autoplayWeight": {"minimum": 1}}}}},
+        {"properties": {"special": {"properties": {"autoplayWeight": {"minimum": 1}}}}},
+        {"properties": {"wait": {"properties": {"autoplayWeight": {"minimum": 1}}}}},
+        {"properties": {"observe": {"properties": {"autoplayWeight": {"minimum": 1}}}}},
+        {"properties": {"curious": {"properties": {"autoplayWeight": {"minimum": 1}}}}}
+      ]
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": ["label", "autoplayWeight"],
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "\\S"
+        },
+        "autoplayWeight": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
+      }
+    }
+  }
+}
