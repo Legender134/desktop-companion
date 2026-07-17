@@ -1,0 +1,223 @@
+"""One declarative command hierarchy shared by pet and tray menus."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Callable
+
+from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtWidgets import QMenu, QWidget
+
+from .models import ActionId
+from .settings import AppSettings
+
+
+@dataclass(frozen=True)
+class MenuCommand:
+    """A controller intent emitted by a menu item."""
+
+    kind: str
+    value: object | None = None
+    target: str | None = None
+
+
+@dataclass(frozen=True)
+class MenuItem:
+    label: str
+    command: MenuCommand | None = None
+    children: tuple["MenuItem", ...] = ()
+    checked_from: str | None = None
+    checked_value: object | None = None
+    radio_group: str | None = None
+
+
+@dataclass(frozen=True)
+class _ActionBinding:
+    action: QAction
+    item: MenuItem
+
+
+_ACTION_LABELS = (
+    ("休息", ActionId.IDLE),
+    ("向右奔跑", ActionId.RUN_RIGHT),
+    ("向左奔跑", ActionId.RUN_LEFT),
+    ("招手", ActionId.WAVE),
+    ("跳跃", ActionId.JUMP),
+    ("撒娇翻肚", ActionId.BELLY_FLOP),
+    ("期待", ActionId.EXPECT),
+    ("原地巡视", ActionId.PATROL),
+    ("好奇观察", ActionId.CURIOUS),
+    ("随机动作", ActionId.RANDOM),
+)
+
+
+def _direction_label(degrees: float) -> str:
+    number = f"{degrees:05.1f}" if not degrees.is_integer() else f"{int(degrees):03d}"
+    return f"观察 {number}°"
+
+
+def _toggle(label: str, setting_name: str) -> MenuItem:
+    return MenuItem(
+        label,
+        MenuCommand("toggle", target=setting_name),
+        checked_from=setting_name,
+    )
+
+
+def _choice(
+    label: str, kind: str, value: object, setting_name: str, radio_group: str
+) -> MenuItem:
+    return MenuItem(
+        label,
+        MenuCommand(kind, value),
+        checked_from=setting_name,
+        checked_value=value,
+        radio_group=radio_group,
+    )
+
+
+MENU_ITEMS = (
+    MenuItem(
+        "动作",
+        children=(
+            *(MenuItem(label, MenuCommand("action", action)) for label, action in _ACTION_LABELS),
+            MenuItem(
+                "观察方向",
+                children=tuple(
+                    MenuItem(_direction_label(index * 22.5), MenuCommand("look", index * 22.5))
+                    for index in range(16)
+                ),
+            ),
+        ),
+    ),
+    _toggle("自动闲逛", "wander_enabled"),
+    _toggle("看向鼠标", "gaze_enabled"),
+    _toggle("悬停数字快捷键", "hover_digits_enabled"),
+    _toggle("始终置顶", "always_on_top"),
+    MenuItem(
+        "开机启动",
+        MenuCommand("toggle", target="startup_enabled"),
+        checked_from="startup_enabled",
+    ),
+    MenuItem(
+        "大小",
+        children=tuple(
+            _choice(f"{scale}%", "scale", scale, "scale_percent", "scale")
+            for scale in (75, 100, 125, 150)
+        ),
+    ),
+    MenuItem(
+        "动画速度",
+        children=tuple(
+            _choice(label, "animation_speed", speed, "animation_speed", "animation_speed")
+            for label, speed in (("慢速", "slow"), ("正常", "normal"), ("快速", "fast"))
+        ),
+    ),
+    MenuItem(
+        "移动速度",
+        children=tuple(
+            _choice(label, "movement_speed", speed, "movement_speed", "movement_speed")
+            for label, speed in (("慢速", "slow"), ("正常", "normal"), ("快速", "fast"))
+        ),
+    ),
+    MenuItem("回到屏幕中央", MenuCommand("center")),
+    MenuItem("关于十一", MenuCommand("about")),
+    MenuItem("退出", MenuCommand("quit")),
+)
+
+
+class MenuController:
+    """Materialize the shared command model as refreshable Qt menus."""
+
+    def __init__(
+        self,
+        settings_supplier: Callable[[], AppSettings],
+        startup_supplier: Callable[[], bool],
+        dispatch: Callable[[MenuCommand], None],
+    ) -> None:
+        self._settings_supplier = settings_supplier
+        self._startup_supplier = startup_supplier
+        self._dispatch = dispatch
+        self._menus: list[QMenu] = []
+
+    @property
+    def items(self) -> tuple[MenuItem, ...]:
+        return MENU_ITEMS
+
+    def flattened_labels(self) -> tuple[str, ...]:
+        def flatten(items: tuple[MenuItem, ...]):
+            for item in items:
+                yield item.label
+                yield from flatten(item.children)
+
+        return tuple(flatten(self.items))
+
+    def create_menu(self, parent: QWidget | None = None) -> QMenu:
+        menu = QMenu(parent)
+        bindings: list[_ActionBinding] = []
+        groups: dict[str, QActionGroup] = {}
+        retained: list[object] = []
+        self._populate(menu, self.items, bindings, groups, retained)
+        menu._shiyi_bindings = bindings
+        menu._shiyi_retained = retained
+        menu.aboutToShow.connect(lambda current=menu: self.refresh(current))
+        self._menus.append(menu)
+        return menu
+
+    def refresh(self, menu: QMenu) -> None:
+        settings = self._settings_supplier()
+        startup_enabled = bool(self._startup_supplier())
+        bindings = menu._shiyi_bindings
+        for binding in bindings:
+            source = binding.item.checked_from
+            if source is None:
+                continue
+            actual = (
+                startup_enabled
+                if source == "startup_enabled"
+                else getattr(settings, source)
+            )
+            expected = binding.item.checked_value
+            binding.action.setChecked(bool(actual) if expected is None else actual == expected)
+
+    def _populate(
+        self,
+        menu: QMenu,
+        items: tuple[MenuItem, ...],
+        bindings: list[_ActionBinding],
+        groups: dict[str, QActionGroup],
+        retained: list[object],
+    ) -> None:
+        for item in items:
+            if item.children:
+                submenu = QMenu(item.label, menu)
+                menu.addMenu(submenu)
+                retained.append(submenu)
+                self._populate(submenu, item.children, bindings, groups, retained)
+                continue
+
+            action = menu.addAction(item.label)
+            retained.append(action)
+            if item.checked_from is not None:
+                action.setCheckable(True)
+            if item.radio_group is not None:
+                group = groups.get(item.radio_group)
+                if group is None:
+                    group = QActionGroup(menu)
+                    group.setExclusive(True)
+                    groups[item.radio_group] = group
+                    retained.append(group)
+                group.addAction(action)
+            if item.command is not None:
+                action.triggered.connect(
+                    lambda checked=False, current=item: self._trigger(current, checked)
+                )
+            bindings.append(_ActionBinding(action, item))
+
+    def _trigger(self, item: MenuItem, checked: bool) -> None:
+        command = item.command
+        if command is None:
+            return
+        if command.kind == "toggle":
+            command = replace(command, value=bool(checked))
+        self._dispatch(command)
