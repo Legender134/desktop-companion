@@ -86,6 +86,8 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 - 托盘图标右键：打开与宠物右键相同的完整菜单。
 - 托盘图标双击：显示并激活宠物窗口。
 
+托盘使用打包的紫灵图标并显示“桌面灵伴”提示。Windows 11 可能把首次出现的通知图标放入右下角 `^` 的隐藏图标区域；是否固定在任务栏主区域由 Windows 和用户偏好决定，应用不会擅自修改该系统设置。
+
 窗口只用当前帧的非透明像素作为输入区域，外接矩形中的透明部分不会阻挡后面的桌面或应用。
 
 ## 数字动作映射
@@ -142,7 +144,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 
 使用发布目录内的 `桌面灵伴安装程序.exe`，不要直接复制 `.venv`、`dist` 或源码目录：
 
-1. 双击安装程序并按向导安装。默认目标为 `%LOCALAPPDATA%\Programs\DesktopCompanion`，仅写当前用户，不请求管理员权限。
+1. 双击安装程序并按向导安装。默认目标为 `%LOCALAPPDATA%\Programs\DesktopCompanion`，仅写当前用户，不请求管理员权限；安装程序会在当前用户桌面创建“桌面灵伴”快捷方式。
 2. 首次安装默认勾选开机启动；向导末页可立即运行。覆盖安装会先请求现有实例安全退出，并保留已有设置和用户当前的开机启动选择。
 3. 卸载时打开 Windows“设置 > 应用 > 已安装的应用”，找到“桌面灵伴”并选择卸载。卸载程序会请求现有实例退出，并清除应用文件、该应用的 HKCU 启动项、设置和日志。
 

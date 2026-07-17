@@ -5,7 +5,7 @@
 ## 自动门禁
 
 - `pip check`：通过，无损坏依赖。
-- 源码测试：`133 passed`。
+- 源码测试：`134 passed`。
 - 冻结版自检测试：`1 passed`。
 - 覆盖率：`90%`，高于 85% 门槛。
 - PyInstaller 冻结：通过；`DesktopCompanion.exe --self-test` 返回 `ok=true`、WebP 可用、每只宠物 74 帧。
@@ -29,6 +29,8 @@
 | 重启恢复 | 退出并重新启动后仍显示紫灵 |
 | 资源契约 | 十一、紫灵均为 v2、1536×2288、透明 WebP，动作与观察方向占用表一致 |
 | 图标 | 从紫灵休息帧重新生成，包含 16/32/48/256 像素图层，已不同于 1.0 图标 |
+| 托盘图标 | 控制器加载的图标非空，提示为“桌面灵伴”；真实安装运行后 Windows `NotifyIconSettings` 已登记 `DesktopCompanion.exe` |
+| 桌面快捷方式 | 覆盖安装后实际生成 `%USERPROFILE%\Desktop\桌面灵伴.lnk`，目标为已安装的 `DesktopCompanion.exe` |
 | 1.0 共存 | 2.0 使用独立 EXE、目录、设置、日志、自启动项、互斥量、IPC 名称和卸载 GUID，不覆盖 1.0 |
 
 ## 产品身份
@@ -43,4 +45,4 @@
 
 ## 说明
 
-原 1.0 的历史验收记录保存在 `docs/manual-qa-1.0.md`。本次没有删除或覆盖原项目、原安装包或原安装目录。安装包未做商业 Authenticode 签名，首次从其他电脑运行时可能出现 Windows SmartScreen 提示。
+原 1.0 的历史验收记录保存在 `docs/manual-qa-1.0.md`。本次没有删除或覆盖原项目、原安装包或原安装目录。Windows 11 可能把新通知图标放入右下角 `^` 的隐藏区域，应用不强制修改用户的任务栏固定偏好。安装包未做商业 Authenticode 签名，首次从其他电脑运行时可能出现 Windows SmartScreen 提示。

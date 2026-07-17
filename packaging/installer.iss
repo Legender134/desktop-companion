@@ -28,6 +28,7 @@ Source: ..\dist\DesktopCompanion\*; DestDir: {app}; Flags: ignoreversion recurse
 
 [Icons]
 Name: {group}\桌面灵伴; Filename: {app}\DesktopCompanion.exe
+Name: {autodesktop}\桌面灵伴; Filename: {app}\DesktopCompanion.exe
 
 [Registry]
 Root: HKCU; Subkey: Software\Microsoft\Windows\CurrentVersion\Run; ValueType: string; ValueName: DesktopCompanion; ValueData: """{app}\DesktopCompanion.exe"" --startup"; Tasks: startup; Flags: uninsdeletevalue; Check: ShouldWriteStartup

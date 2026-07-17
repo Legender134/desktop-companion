@@ -7,6 +7,8 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QSystemTrayIcon, QWidget
 
 from .menu_controller import MenuController
+from .product import PRODUCT_NAME
+from .resource_locator import resource_path
 
 
 class TrayController(QObject):
@@ -28,7 +30,11 @@ class TrayController(QObject):
         if not self.available:
             return
 
-        self.tray_icon = QSystemTrayIcon(icon or QIcon(), self)
+        tray_icon = icon
+        if tray_icon is None or tray_icon.isNull():
+            tray_icon = QIcon(str(resource_path("app.ico")))
+        self.tray_icon = QSystemTrayIcon(tray_icon, self)
+        self.tray_icon.setToolTip(PRODUCT_NAME)
         self.tray_icon.setContextMenu(self.menu)
         self.tray_icon.activated.connect(self._activated)
 

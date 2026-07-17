@@ -158,7 +158,7 @@ def test_available_tray_reuses_menu_and_double_click_recovers_pet(monkeypatch, q
             "activateWindow": lambda self: calls.append("activate"),
         },
     )()
-    tray = TrayController(pet, menu_controller, QIcon())
+    tray = TrayController(pet, menu_controller)
 
     _action(tray.menu, "回到屏幕中央").trigger()
     tray.tray_icon.activated.emit(QSystemTrayIcon.ActivationReason.DoubleClick)
@@ -166,6 +166,8 @@ def test_available_tray_reuses_menu_and_double_click_recovers_pet(monkeypatch, q
     assert dispatched == [MenuCommand("center")]
     assert calls == ["show", "raise", "activate"]
     assert tray.tray_icon.contextMenu() is tray.menu
+    assert not tray.tray_icon.icon().isNull()
+    assert tray.tray_icon.toolTip() == "桌面灵伴"
     tray.hide()
 
 
