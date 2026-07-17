@@ -132,6 +132,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     modes.add_argument("--self-test", action="store_true")
     modes.add_argument("--quit-existing", action="store_true")
     modes.add_argument("--startup", action="store_true")
+    modes.add_argument("--qa-window", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -167,6 +168,7 @@ class DesktopPetApplication:
         logger: logging.Logger | None = None,
         window_factory: Callable[[AnimationCatalog], PetWindow] = PetWindow,
         about_dialog: Callable[[object, str, str], object] = QMessageBox.about,
+        qa_window: bool = False,
     ) -> None:
         self.qapp = qapp
         self.logger = logger or _LOGGER
@@ -184,6 +186,11 @@ class DesktopPetApplication:
         self.wander_planner = WanderPlanner(self._rng)
         self.gaze_stabilizer = GazeStabilizer()
         self.window = window_factory(self.catalog)
+        if qa_window:
+            window_flags = self.window.windowFlags()
+            window_flags &= ~Qt.WindowType.WindowType_Mask
+            self.window.setWindowFlags(window_flags | Qt.WindowType.Window)
+            self.window.setWindowTitle("ShiyiDesktopPet QA")
         self.window.setWindowFlag(
             Qt.WindowType.WindowStaysOnTopHint, self._settings.always_on_top
         )
@@ -920,6 +927,7 @@ def main(
             hook_factory=hook_factory,
             tray_factory=tray_factory,
             logger=logger,
+            qa_window=args.qa_window,
         )
     except Exception as error:
         logger.exception("Desktop-pet atlas or runtime construction failed")

@@ -154,6 +154,7 @@ def _controller(
     hook_factory=None,
     tray_factory=None,
     window_factory=PetWindow,
+    qa_window=False,
 ):
     store = MemorySettingsStore(settings)
     startup = FakeStartup()
@@ -181,6 +182,7 @@ def _controller(
         tray_factory=tray_factory,
         random=Random(0),
         window_factory=window_factory,
+        qa_window=qa_window,
     )
     return controller, store, startup, hooks, trays
 
@@ -251,6 +253,35 @@ def test_cli_modes_are_mutually_exclusive():
     assert parse_args(["--quit-existing"]).quit_existing
     with pytest.raises(SystemExit):
         parse_args(["--self-test", "--quit-existing"])
+
+
+def test_internal_qa_window_cli_mode_is_hidden_and_exclusive(capsys):
+    args = parse_args(["--qa-window"])
+
+    assert args.qa_window is True
+    assert not args.startup
+    with pytest.raises(SystemExit):
+        parse_args(["--qa-window", "--startup"])
+    with pytest.raises(SystemExit):
+        parse_args(["--help"])
+    assert "--qa-window" not in capsys.readouterr().out
+
+
+def test_qa_window_is_enumerable_without_changing_default_window_type(qapp):
+    qa_controller, *_ = _controller(qapp, qa_window=True)
+    default_controller, *_ = _controller(qapp)
+    try:
+        assert (
+            qa_controller.window.windowFlags() & Qt.WindowType.WindowType_Mask
+        ) == Qt.WindowType.Window
+        assert qa_controller.window.windowTitle() == "ShiyiDesktopPet QA"
+        assert (
+            default_controller.window.windowFlags() & Qt.WindowType.WindowType_Mask
+        ) == Qt.WindowType.Tool
+        assert default_controller.window.windowTitle() != "ShiyiDesktopPet QA"
+    finally:
+        qa_controller.shutdown()
+        default_controller.shutdown()
 
 
 def test_hover_snapshot_is_immutable_and_alpha_aware():
@@ -614,6 +645,52 @@ def test_main_successful_composition_cleans_runtime(qapp, tmp_path, monkeypatch)
     assert hooks[0].started and hooks[0].stopped
     assert trays[0].shown and trays[0].hidden
     assert store.saved
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_qa_window"),
+    [([], False), (["--qa-window"], True)],
+)
+def test_main_passes_only_explicit_qa_window_mode_to_controller(
+    qapp, tmp_path, monkeypatch, argv, expected_qa_window
+):
+    captured = []
+
+    class CapturingController:
+        def __init__(self, *args, qa_window, **kwargs):
+            captured.append(qa_window)
+            self.hook = FakeHook(lambda: False)
+            self.tray = FakeTray(None, None)
+
+        def handle_ipc_command(self, command):
+            pass
+
+        def start(self, *, startup=False):
+            pass
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(
+        "shiyi_desktop_pet.app.DesktopPetApplication", CapturingController
+    )
+    previous = sys.excepthook
+    try:
+        result = main(
+            argv,
+            qapp=qapp,
+            guard_factory=GuardSpy,
+            settings_store_factory=MemorySettingsStore,
+            startup_manager_factory=FakeStartup,
+            critical_error=lambda title, message: None,
+            run_event_loop=False,
+        )
+    finally:
+        sys.excepthook = previous
+
+    assert result == 0
+    assert captured == [expected_qa_window]
 
 
 def test_main_closes_guard_even_when_controller_shutdown_raises(
