@@ -14,6 +14,8 @@ param(
 
     [switch]$FallbackForeignProcessProbe,
 
+    [switch]$SafeFunctionalFailureProbe,
+
     [ValidateRange(1, 3600)]
     [int]$UninstallTimeoutSeconds = 180
 )
@@ -40,6 +42,8 @@ $localPath = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ShiyiDe
 $ownedProcesses = [System.Collections.Generic.List[object]]::new()
 $retainedJobHandles = [System.Collections.Generic.List[object]]::new()
 $allJobTreesQuiescent = $true
+$rollbackSafetyUnknown = $false
+$rollbackSafetyReasons = [System.Collections.Generic.List[string]]::new()
 $uninstallLaunchCount = 0
 
 if ($null -eq ('ShiyiVerifier.JobObject' -as [type])) {
@@ -875,9 +879,20 @@ function Invoke-GatedJobProcess {
 function Assert-UninstallOwnershipGate {
     param([Parameter(Mandatory = $true)][string]$Context)
 
-    Stop-OwnedProcesses
-    Assert-NoTestProcesses
+    try {
+        Stop-OwnedProcesses
+        Assert-NoTestProcesses
+    }
+    catch {
+        $script:rollbackSafetyUnknown = $true
+        $script:rollbackSafetyReasons.Add("process ownership ($Context): $($_.Exception.Message)")
+        throw
+    }
     Write-Output "UNINSTALL OWNERSHIP GATE [$Context]: global-shiyi=0; owned-processes-reconciled=true"
+}
+
+function Test-RollbackSafetyKnown {
+    return ($allJobTreesQuiescent -and -not $rollbackSafetyUnknown)
 }
 
 function Invoke-Uninstall {
@@ -1205,6 +1220,8 @@ exit $exitCode
 }
 
 function Invoke-FallbackForeignProcessProbe {
+    $priorSafetyUnknown = $rollbackSafetyUnknown
+    $priorSafetyReasons = @($rollbackSafetyReasons)
     $probeRoot = Join-Path $workRoot "fallback-foreign-probe-$([guid]::NewGuid().ToString('N'))"
     $dummyInstall = Join-Path $probeRoot 'dummy-install'
     if (-not (Test-DescendantPath -Path $probeRoot -Root $workRoot)) {
@@ -1255,12 +1272,15 @@ function Invoke-FallbackForeignProcessProbe {
         if ($uninstallLaunchCount -ne $launchesBefore) {
             throw 'Foreign-process probe incremented uninstall launch count before refusal'
         }
+        if (-not $rollbackSafetyUnknown) {
+            throw 'Foreign-process probe was not classified as rollback-safety unknown'
+        }
         $stillLive = Get-Process -Id $foreign.Id -ErrorAction SilentlyContinue
         if ($null -eq $stillLive -or $stillLive.StartTime.ToUniversalTime() -ne $foreignStart) {
             throw 'Foreign-process probe process was stopped or replaced by the ownership gate'
         }
         $probePassed = $true
-        Write-Output "FALLBACK FOREIGN PROBE PASSED: foreign-pid=$($foreign.Id) preserved=true; uninstall-launch-delta=0; product-state-mutated=false"
+        Write-Output "FALLBACK FOREIGN PROBE PASSED: foreign-pid=$($foreign.Id) preserved=true; uninstall-launch-delta=0; rollback-safety-unknown=true; product-state-mutated=false"
     }
     finally {
         if (-not $foreign.HasExited) {
@@ -1275,6 +1295,93 @@ function Invoke-FallbackForeignProcessProbe {
         }
         elseif (Test-Path -LiteralPath $probeRoot) {
             Write-Warning "Foreign-process probe evidence retained after failure: $probeRoot"
+        }
+        $script:rollbackSafetyUnknown = $priorSafetyUnknown
+        $script:rollbackSafetyReasons.Clear()
+        foreach ($reason in $priorSafetyReasons) {
+            $script:rollbackSafetyReasons.Add($reason)
+        }
+    }
+}
+
+function Invoke-SafeFunctionalFailureProbe {
+    $probeRoot = Join-Path $workRoot "functional-failure-probe-$([guid]::NewGuid().ToString('N'))"
+    if (-not (Test-DescendantPath -Path $probeRoot -Root $workRoot)) {
+        throw "Unsafe functional-failure probe root: $probeRoot"
+    }
+    [void](Assert-NoReparseComponents -Path $workRoot -Purpose 'functional-failure probe')
+    [void](New-Item -ItemType Directory -Path $probeRoot)
+    $dummyPath = Join-Path $probeRoot 'dummy-uninstaller.ps1'
+    $helperPath = Join-Path $probeRoot 'gated-dummy-helper.ps1'
+    $restoreBranchMarker = Join-Path $probeRoot 'restore-branch-executed.marker'
+    [System.IO.File]::WriteAllText(
+        $dummyPath,
+        'exit 23',
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    $helperText = @'
+param([string]$GateName, [string]$DummyPath)
+$gate = [System.Threading.EventWaitHandle]::OpenExisting($GateName)
+try {
+    if (-not $gate.WaitOne(30000)) { exit 1460 }
+}
+finally {
+    $gate.Dispose()
+}
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = (Get-Process -Id $PID).Path
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $DummyPath)) {
+    $startInfo.ArgumentList.Add($argument)
+}
+$dummy = [System.Diagnostics.Process]::new()
+$dummy.StartInfo = $startInfo
+[void]$dummy.Start()
+$dummy.WaitForExit()
+$exitCode = $dummy.ExitCode
+$dummy.Dispose()
+exit $exitCode
+'@
+    [System.IO.File]::WriteAllText($helperPath, $helperText, [System.Text.UTF8Encoding]::new($false))
+
+    $probePassed = $false
+    try {
+        $result = Invoke-GatedJobProcess -HelperPath $helperPath -HelperArguments @(
+            '-DummyPath', $dummyPath
+        ) -TimeoutSeconds 30 -Description 'dummy nonzero uninstaller functional-failure probe'
+        $functionalErrors = [System.Collections.Generic.List[string]]::new()
+        if ($result.ExitCode -ne 0) {
+            $functionalErrors.Add("dummy uninstaller functional exit=$($result.ExitCode)")
+        }
+        if ($functionalErrors.Count -ne 1 -or $result.ExitCode -ne 23 -or $result.JobActive -ne 0) {
+            throw "Functional-failure probe did not capture the expected quiescent nonzero result: $($result | ConvertTo-Json -Compress)"
+        }
+        $rollbackAllowed = Test-RollbackSafetyKnown
+        if (-not $rollbackAllowed) {
+            throw "Quiescent functional failure incorrectly disabled rollback: $($rollbackSafetyReasons -join '; ')"
+        }
+        # This is the same safety decision used by the real finally. The marker
+        # proves the restore/cleanup branch executed despite the functional error.
+        if ($rollbackAllowed) {
+            [System.IO.File]::WriteAllText(
+                $restoreBranchMarker,
+                'executed',
+                [System.Text.UTF8Encoding]::new($false)
+            )
+        }
+        if ([System.IO.File]::ReadAllText($restoreBranchMarker) -cne 'executed') {
+            throw 'Functional-failure probe restore branch did not execute'
+        }
+        $probePassed = $true
+        Write-Output 'FUNCTIONAL FAILURE PROBE PASSED: dummy-exit=23; job-active=0; functional-error-captured=true; rollbackAllowed=true; restore-branch-executed=true; product-state-mutated=false'
+    }
+    finally {
+        if ($probePassed -and (Test-Path -LiteralPath $probeRoot)) {
+            Remove-SafeTree -Path $probeRoot -AllowedRoots @($workRoot) -Purpose 'functional-failure probe cleanup'
+        }
+        elseif (Test-Path -LiteralPath $probeRoot) {
+            Write-Warning "Functional-failure probe evidence retained after failure: $probeRoot"
         }
     }
 }
@@ -1327,7 +1434,7 @@ foreach ($dataPath in @($roamingPath, $localPath)) {
 }
 
 $existingProcesses = @(Get-TestProcesses)
-if (($ProcessContainmentProbe -or $FallbackForeignProcessProbe) -and -not $PreflightOnly) {
+if (($ProcessContainmentProbe -or $FallbackForeignProcessProbe -or $SafeFunctionalFailureProbe) -and -not $PreflightOnly) {
     throw 'Process safety probes are permitted only with -PreflightOnly'
 }
 if ($SimulateUnresolvedShiyiProcess) {
@@ -1349,6 +1456,9 @@ if ($ProcessContainmentProbe) {
 }
 if ($FallbackForeignProcessProbe) {
     Invoke-FallbackForeignProcessProbe
+}
+if ($SafeFunctionalFailureProbe) {
+    Invoke-SafeFunctionalFailureProbe
 }
 if ($PreflightOnly) {
     return
@@ -1539,9 +1649,10 @@ try {
 }
 finally {
     $restoreErrors = [System.Collections.Generic.List[string]]::new()
-    $rollbackAllowed = $allJobTreesQuiescent
+    $functionalErrors = [System.Collections.Generic.List[string]]::new()
+    $rollbackAllowed = Test-RollbackSafetyKnown
     if (-not $rollbackAllowed) {
-        $restoreErrors.Add('rollback prohibited: a helper/uninstaller job tree was not proven quiescent')
+        $restoreErrors.Add("rollback prohibited: process/job safety is unknown ($($rollbackSafetyReasons -join '; '))")
     }
 
     if ($rollbackAllowed) {
@@ -1553,9 +1664,12 @@ finally {
                 }
             }
             catch {
-                $restoreErrors.Add("fallback uninstall blocked/failed (${directory}): $($_.Exception.Message)")
-                $rollbackAllowed = $false
-                break
+                $functionalErrors.Add("fallback uninstall blocked/failed (${directory}): $($_.Exception.Message)")
+                if (-not (Test-RollbackSafetyKnown)) {
+                    $rollbackAllowed = $false
+                    break
+                }
+                Write-Warning "Fallback uninstall functional failure is quiescent; exact rollback will continue: $($_.Exception.Message)"
             }
         }
     }
@@ -1570,8 +1684,8 @@ finally {
         }
     }
 
-    if (-not $allJobTreesQuiescent) {
-        $restoreErrors.Add('rollback prohibited after fallback: complete job-tree quiescence is unproven')
+    if (-not (Test-RollbackSafetyKnown)) {
+        $restoreErrors.Add("rollback prohibited after fallback: process/job safety is unknown ($($rollbackSafetyReasons -join '; '))")
         $rollbackAllowed = $false
     }
 
@@ -1644,7 +1758,7 @@ finally {
         Write-Warning 'ROLLBACK REFUSED: test roots, verifier data roots, registry test state, holds, backup, and CLIXML are retained because process ownership/job quiescence was not proven.'
     }
 
-    if ($rollbackAllowed -and $restoreErrors.Count -eq 0 -and $verificationSucceeded) {
+    if ($rollbackAllowed -and $restoreErrors.Count -eq 0 -and $functionalErrors.Count -eq 0 -and $verificationSucceeded) {
         try {
             Remove-SafeTree -Path $backupRoot -AllowedRoots @($workRoot) -Purpose 'verified backup cleanup'
         }
@@ -1653,7 +1767,7 @@ finally {
         }
     }
 
-    if ($restoreErrors.Count -ne 0 -or -not $verificationSucceeded) {
+    if ($restoreErrors.Count -ne 0 -or $functionalErrors.Count -ne 0 -or -not $verificationSucceeded) {
         Write-Warning "Backup retained for recovery: $backupRoot"
         foreach ($state in $dataStates) {
             $holdExists = Test-Path -LiteralPath $state.HoldPath
@@ -1685,6 +1799,9 @@ finally {
 
     if ($restoreErrors.Count -ne 0) {
         throw "Release verification restore failed: $($restoreErrors -join ' | ')"
+    }
+    if ($functionalErrors.Count -ne 0) {
+        throw "Release verification functional failure after safe rollback: $($functionalErrors -join ' | ')"
     }
 }
 
