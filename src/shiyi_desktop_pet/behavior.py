@@ -17,28 +17,43 @@ class BehaviorMode(StrEnum):
 class BehaviorEngine:
     wander_enabled: bool = False
     gaze_degrees: float | None = None
-    mode: BehaviorMode = BehaviorMode.IDLE
-    current_action: ActionId | None = None
-    _mode_before_drag: BehaviorMode = field(default=BehaviorMode.IDLE, init=False)
+    mode: BehaviorMode = field(default=BehaviorMode.IDLE, init=False)
+    current_action: ActionId | None = field(default=None, init=False)
 
-    def trigger_manual(self, action: ActionId) -> None:
-        if action is ActionId.IDLE:
-            self.current_action = None
-            self.mode = BehaviorMode.IDLE
-            return
-        self.current_action = action
-        self.mode = BehaviorMode.MANUAL_ACTION
-
-    def manual_finished(self) -> None:
-        self.current_action = None
+    def __post_init__(self) -> None:
         self.mode = self._base_mode()
 
+    def trigger_manual(self, action: ActionId) -> None:
+        if self.mode is BehaviorMode.SHUTTING_DOWN:
+            return
+        if action is ActionId.IDLE:
+            self.current_action = None
+            if self.mode is not BehaviorMode.DRAGGING:
+                self.mode = BehaviorMode.IDLE
+            return
+        self.current_action = action
+        if self.mode is not BehaviorMode.DRAGGING:
+            self.mode = BehaviorMode.MANUAL_ACTION
+
+    def manual_finished(self) -> None:
+        if self.mode is BehaviorMode.SHUTTING_DOWN:
+            return
+        self.current_action = None
+        if self.mode is not BehaviorMode.DRAGGING:
+            self.mode = self._base_mode()
+
     def begin_drag(self) -> None:
-        self._mode_before_drag = self.mode
+        if self.mode in {BehaviorMode.DRAGGING, BehaviorMode.SHUTTING_DOWN}:
+            return
         self.mode = BehaviorMode.DRAGGING
 
     def end_drag(self) -> None:
-        self.mode = self._mode_before_drag
+        if self.mode is not BehaviorMode.DRAGGING:
+            return
+        if self.current_action is not None:
+            self.mode = BehaviorMode.MANUAL_ACTION
+            return
+        self.mode = self._base_mode()
 
     def set_wander_enabled(self, enabled: bool) -> None:
         self.wander_enabled = enabled
