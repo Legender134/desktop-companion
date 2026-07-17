@@ -9,6 +9,7 @@ from typing import Callable
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QMenu, QWidget
 
+from .constants import DEFAULT_PET_ACTIONS
 from .models import ActionId
 from .settings import AppSettings
 
@@ -42,17 +43,8 @@ class _ActionBinding:
     item: MenuItem
 
 
-_ACTION_LABELS = (
-    ("休息", ActionId.IDLE),
-    ("向右奔跑", ActionId.RUN_RIGHT),
-    ("向左奔跑", ActionId.RUN_LEFT),
-    ("招手", ActionId.WAVE),
-    ("跳跃", ActionId.JUMP),
-    ("撒娇翻肚", ActionId.BELLY_FLOP),
-    ("期待", ActionId.EXPECT),
-    ("原地巡视", ActionId.PATROL),
-    ("好奇观察", ActionId.CURIOUS),
-    ("随机动作", ActionId.RANDOM),
+_DEFAULT_ACTION_ITEMS = tuple(
+    (definition.label, definition.action_id) for definition in DEFAULT_PET_ACTIONS
 )
 
 
@@ -83,6 +75,7 @@ def _choice(
 
 def _menu_items(
     pet_choices: tuple[tuple[str, str], ...],
+    action_items: tuple[tuple[str, ActionId], ...],
 ) -> tuple[MenuItem, ...]:
     return (
         MenuItem(
@@ -90,8 +83,10 @@ def _menu_items(
             children=(
                 *(
                     MenuItem(label, MenuCommand("action", action))
-                    for label, action in _ACTION_LABELS
+                    for label, action in action_items
                 ),
+                MenuItem("随机动作", MenuCommand("action", ActionId.RANDOM)),
+                MenuItem("动作展示", MenuCommand("showcase")),
                 MenuItem(
                     "观察方向",
                     children=tuple(
@@ -106,6 +101,7 @@ def _menu_items(
         ),
         _toggle("自动闲逛", "wander_enabled"),
         _toggle("看向鼠标", "gaze_enabled"),
+        _toggle("自主小动作", "autonomous_actions_enabled"),
         _toggle("悬停数字快捷键", "hover_digits_enabled"),
         _toggle("始终置顶", "always_on_top"),
         MenuItem(
@@ -179,17 +175,21 @@ class MenuController:
         dispatch: Callable[[MenuCommand], None],
         error_reporter: ErrorReporter | None = None,
         pet_choices_supplier: Callable[[], tuple[tuple[str, str], ...]] | None = None,
+        action_items_supplier: Callable[[], tuple[tuple[str, ActionId], ...]] | None = None,
     ) -> None:
         self._settings_supplier = settings_supplier
         self._startup_supplier = startup_supplier
         self._dispatch = dispatch
         self._error_reporter = error_reporter if error_reporter is not None else _LOGGER
         self._pet_choices_supplier = pet_choices_supplier or (lambda: ())
+        self._action_items_supplier = action_items_supplier or (
+            lambda: _DEFAULT_ACTION_ITEMS
+        )
         self._menus: list[QMenu] = []
 
     @property
     def items(self) -> tuple[MenuItem, ...]:
-        return _menu_items(self._pet_choices())
+        return _menu_items(self._pet_choices(), self._action_items())
 
     def flattened_labels(self) -> tuple[str, ...]:
         def flatten(items: tuple[MenuItem, ...]):
@@ -263,6 +263,26 @@ class MenuController:
         except Exception as error:
             self._report_supplier_error("pet choices supplier", error)
             return ()
+
+    def _action_items(self) -> tuple[tuple[str, ActionId], ...]:
+        try:
+            items = tuple(self._action_items_supplier())
+            if (
+                len(items) != len(_DEFAULT_ACTION_ITEMS)
+                or {action for _, action in items}
+                != {action for _, action in _DEFAULT_ACTION_ITEMS}
+                or any(
+                    not isinstance(label, str)
+                    or not label
+                    or not isinstance(action, ActionId)
+                    for label, action in items
+                )
+            ):
+                raise TypeError("action items supplier returned invalid values")
+            return items
+        except Exception as error:
+            self._report_supplier_error("action items supplier", error)
+            return _DEFAULT_ACTION_ITEMS
 
     def _report_supplier_error(self, context: str, error: Exception) -> None:
         error_type = type(error).__name__

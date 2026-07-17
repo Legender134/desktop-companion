@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
+from shiyi_desktop_pet.models import ActionId
 from shiyi_desktop_pet.pet_registry import PetRegistry
 from shiyi_desktop_pet.resource_locator import resource_root
 
@@ -16,6 +17,7 @@ def _write_pack(
     spritesheet_path: str = "spritesheet.webp",
     sprite_bytes: bytes = b"fake-webp",
     icon_frame: object | None = None,
+    actions: object | None = None,
 ) -> Path:
     directory = root / pet_id
     directory.mkdir(parents=True)
@@ -28,6 +30,8 @@ def _write_pack(
     }
     if icon_frame is not None:
         manifest["iconFrame"] = icon_frame
+    if actions is not None:
+        manifest["actions"] = actions
     (directory / "pet.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
@@ -54,6 +58,10 @@ def test_registry_discovers_bundled_and_user_pets_and_creates_user_root(tmp_path
     )
     assert snapshot.by_id("new_pet").is_bundled is False
     assert snapshot.by_id("new_pet").icon_frame == (0, 0)
+    assert dict(
+        (definition.action_id, definition.label)
+        for definition in snapshot.by_id("new_pet").actions
+    )[ActionId.BELLY_FLOP] == "特别动作"
     assert snapshot.by_id("shiyi").is_bundled is True
     assert snapshot.issues == ()
 
@@ -117,6 +125,69 @@ def test_registry_accepts_valid_icon_frame_and_rejects_invalid_values(tmp_path: 
     assert snapshot.choices == (("shiyi", "Shiyi"),)
     assert len(snapshot.issues) == 3
     assert all("iconFrame" in issue.message for issue in snapshot.issues)
+
+
+def _valid_actions() -> dict[str, dict[str, object]]:
+    return {
+        "idle": {"label": "安静站立", "autoplayWeight": 0},
+        "moveRight": {"label": "向右轻行", "autoplayWeight": 0},
+        "moveLeft": {"label": "向左轻行", "autoplayWeight": 0},
+        "greet": {"label": "挥手问候", "autoplayWeight": 3},
+        "jump": {"label": "翩然旋舞", "autoplayWeight": 1},
+        "special": {"label": "舒展衣袖", "autoplayWeight": 2},
+        "wait": {"label": "安静等候", "autoplayWeight": 3},
+        "observe": {"label": "凝神静气", "autoplayWeight": 2},
+        "curious": {"label": "若有所思", "autoplayWeight": 3},
+    }
+
+
+def test_registry_loads_complete_pet_specific_action_names_and_weights(tmp_path: Path):
+    bundled = tmp_path / "bundled"
+    _write_pack(bundled, "shiyi", actions=_valid_actions())
+
+    definition = PetRegistry(bundled, None).refresh().by_id("shiyi")
+    actions = {item.action_id: item for item in definition.actions}
+
+    assert actions[ActionId.WAVE].label == "挥手问候"
+    assert actions[ActionId.WAVE].autoplay_weight == 3
+    assert actions[ActionId.RUN_RIGHT].autoplay_weight == 0
+
+
+def test_registry_rejects_incomplete_or_unsafe_action_metadata(tmp_path: Path):
+    bundled = tmp_path / "bundled"
+    user = tmp_path / "user-pets"
+    _write_pack(bundled, "shiyi", actions=_valid_actions())
+
+    missing = _valid_actions()
+    del missing["curious"]
+    _write_pack(user, "missing_action", actions=missing)
+
+    moving = _valid_actions()
+    moving["moveRight"]["autoplayWeight"] = 1
+    _write_pack(user, "moving_action", actions=moving)
+
+    boolean = _valid_actions()
+    boolean["greet"]["autoplayWeight"] = True
+    _write_pack(user, "boolean_weight", actions=boolean)
+
+    control_character = _valid_actions()
+    control_character["greet"]["label"] = "挥手\n问候"
+    _write_pack(user, "control_label", actions=control_character)
+
+    disabled = _valid_actions()
+    for entry in disabled.values():
+        entry["autoplayWeight"] = 0
+    _write_pack(user, "no_autoplay", actions=disabled)
+
+    snapshot = PetRegistry(bundled, user).refresh()
+
+    assert snapshot.choices == (("shiyi", "Shiyi"),)
+    messages = "\n".join(issue.message for issue in snapshot.issues)
+    assert "every documented v2 action key" in messages
+    assert "moving or idle action" in messages
+    assert "integer from 0 through 10" in messages
+    assert "printable characters" in messages
+    assert "at least one in-place autoplay action" in messages
 
 
 def test_registry_validator_quarantines_bad_pack_without_hiding_good_pets(tmp_path: Path):

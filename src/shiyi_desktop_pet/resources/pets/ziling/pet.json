@@ -4,5 +4,16 @@
   "description": "\u300a\u51e1\u4eba\u4fee\u4ed9\u4f20\u300b\u52a8\u753b\u4e2d\u7684\u6210\u5e74\u7d2b\u7075\uff0c\u6e05\u51b7\u6e29\u67d4\u7684\u7cbe\u81f4Q\u7248\u7d2b\u767d\u4ed9\u88d9\u4eba\u7269\u5ba0\u7269\u3002",
   "spriteVersionNumber": 2,
   "spritesheetPath": "spritesheet.webp",
-  "iconFrame": {"row": 0, "column": 0}
+  "iconFrame": {"row": 0, "column": 0},
+  "actions": {
+    "idle": {"label": "静静相伴", "autoplayWeight": 0},
+    "moveRight": {"label": "向右轻行", "autoplayWeight": 0},
+    "moveLeft": {"label": "向左轻行", "autoplayWeight": 0},
+    "greet": {"label": "挥手问候", "autoplayWeight": 3},
+    "jump": {"label": "翩然旋舞", "autoplayWeight": 1},
+    "special": {"label": "舒展衣袖", "autoplayWeight": 2},
+    "wait": {"label": "安静等候", "autoplayWeight": 3},
+    "observe": {"label": "凝神静气", "autoplayWeight": 2},
+    "curious": {"label": "若有所思", "autoplayWeight": 3}
+  }
 }

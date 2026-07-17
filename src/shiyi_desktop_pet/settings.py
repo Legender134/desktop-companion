@@ -13,7 +13,7 @@ from .pet_registry import is_valid_pet_id
 from .product import DEFAULT_PET_ID
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 VALID_SCALES = frozenset({75, 100, 125, 150})
 VALID_SPEEDS = frozenset({"slow", "normal", "fast"})
 
@@ -28,6 +28,7 @@ class AppSettings:
     pet_id: str = DEFAULT_PET_ID
     wander_enabled: bool = False
     gaze_enabled: bool = True
+    autonomous_actions_enabled: bool = True
     hover_digits_enabled: bool = True
     always_on_top: bool = True
     scale_percent: int = 100
@@ -81,7 +82,7 @@ class SettingsStore:
                 temporary_path.unlink()
 
     def _load_known_schema(self, parser: configparser.ConfigParser) -> AppSettings:
-        """Overlay schema 0/1's known values on current defaults."""
+        """Overlay older schemas' known values on current defaults."""
         defaults = AppSettings()
         section = parser["settings"]
         values = asdict(defaults)
@@ -89,6 +90,11 @@ class SettingsStore:
         values["pet_id"] = pet_id if is_valid_pet_id(pet_id) else defaults.pet_id
         values["wander_enabled"] = self._read_bool(section, "wander_enabled", defaults.wander_enabled)
         values["gaze_enabled"] = self._read_bool(section, "gaze_enabled", defaults.gaze_enabled)
+        values["autonomous_actions_enabled"] = self._read_bool(
+            section,
+            "autonomous_actions_enabled",
+            defaults.autonomous_actions_enabled,
+        )
         values["hover_digits_enabled"] = self._read_bool(
             section, "hover_digits_enabled", defaults.hover_digits_enabled
         )
@@ -159,6 +165,7 @@ class SettingsStore:
             pet_id=SettingsStore._normalize_pet_id(settings.pet_id),
             wander_enabled=bool(settings.wander_enabled),
             gaze_enabled=bool(settings.gaze_enabled),
+            autonomous_actions_enabled=bool(settings.autonomous_actions_enabled),
             hover_digits_enabled=bool(settings.hover_digits_enabled),
             always_on_top=bool(settings.always_on_top),
             scale_percent=(

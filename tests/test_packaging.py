@@ -16,13 +16,13 @@ def test_installer_always_creates_desktop_shortcut():
     ) in installer
 
 
-def test_product_and_installer_versions_are_2_1():
+def test_product_and_installer_versions_are_2_2():
     root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     installer = (root / "packaging" / "installer.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "2.1.0"
-    assert PRODUCT_VERSION == "2.1"
-    assert project["project"]["version"] == "2.1.0"
-    assert "AppVersion=2.1.0" in installer
-    assert "VersionInfoVersion=2.1.0.0" in installer
+    assert __version__ == "2.2.0"
+    assert PRODUCT_VERSION == "2.2"
+    assert project["project"]["version"] == "2.2.0"
+    assert "AppVersion=2.2.0" in installer
+    assert "VersionInfoVersion=2.2.0.0" in installer

@@ -18,6 +18,16 @@ class ActionId(StrEnum):
 
 
 @dataclass(frozen=True)
+class PetActionDefinition:
+    """Pet-specific presentation for one stable v2 atlas action slot."""
+
+    key: str
+    action_id: ActionId
+    label: str
+    autoplay_weight: int
+
+
+@dataclass(frozen=True)
 class AnimationSpec:
     row: int
     frame_count: int

@@ -1,7 +1,14 @@
 from PySide6.QtGui import QImage
 
-from .constants import ACTION_SPECS, CELL_HEIGHT, CELL_WIDTH, LOOK_DEGREES
-from .models import ActionId, FrameAsset
+from .constants import (
+    ACTION_SPECS,
+    CELL_HEIGHT,
+    CELL_WIDTH,
+    DEFAULT_PET_ACTIONS,
+    IN_PLACE_ACTIONS,
+    LOOK_DEGREES,
+)
+from .models import ActionId, FrameAsset, PetActionDefinition
 from .pet_registry import PetDefinition, PetRegistry
 from .resource_locator import resource_root
 
@@ -22,6 +29,7 @@ class AnimationCatalog:
         pet_id: str = "custom",
         display_name: str = "",
         icon_frame: tuple[int, int] = (0, 0),
+        actions: tuple[PetActionDefinition, ...] = DEFAULT_PET_ACTIONS,
     ):
         if atlas.isNull():
             raise ValueError("spritesheet could not be decoded")
@@ -41,6 +49,11 @@ class AnimationCatalog:
         ):
             raise ValueError("iconFrame is outside the v2 atlas")
         self.icon_frame = icon_frame
+        action_map = {definition.action_id: definition for definition in actions}
+        if set(action_map) != set(ACTION_SPECS) or len(action_map) != len(actions):
+            raise ValueError("actions must define every v2 atlas action exactly once")
+        self._action_definitions = tuple(action_map[action] for action in ACTION_SPECS)
+        self._action_map = action_map
         self.look_degrees = LOOK_DEGREES
         used_counts = (7, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8)
         for row, used in enumerate(used_counts):
@@ -78,6 +91,7 @@ class AnimationCatalog:
             pet_id=definition.pet_id,
             display_name=definition.display_name,
             icon_frame=definition.icon_frame,
+            actions=definition.actions,
         )
 
     def _cell(self, row: int, column: int) -> QImage:
@@ -88,6 +102,27 @@ class AnimationCatalog:
 
     def icon_image(self) -> QImage:
         return self._icon_image.copy()
+
+    def action_menu_items(self) -> tuple[tuple[str, ActionId], ...]:
+        return tuple(
+            (definition.label, definition.action_id)
+            for definition in self._action_definitions
+        )
+
+    def autoplay_actions(self) -> tuple[tuple[ActionId, int], ...]:
+        return tuple(
+            (definition.action_id, definition.autoplay_weight)
+            for definition in self._action_definitions
+            if definition.action_id in IN_PLACE_ACTIONS
+            and definition.autoplay_weight > 0
+        )
+
+    def showcase_actions(self) -> tuple[ActionId, ...]:
+        return tuple(
+            definition.action_id
+            for definition in self._action_definitions
+            if definition.action_id in IN_PLACE_ACTIONS
+        )
 
     def look_frame(self, degrees: float) -> FrameAsset:
         index = round(degrees / 22.5)

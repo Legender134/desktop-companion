@@ -21,7 +21,13 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from .animation_catalog import AnimationCatalog
 from .animation_player import AnimationTimeline
 from .behavior import BehaviorEngine, BehaviorMode
-from .constants import ACTION_SPECS, CELL_HEIGHT, CELL_WIDTH, KEY_TO_ACTION
+from .constants import (
+    ACTION_SPECS,
+    CELL_HEIGHT,
+    CELL_WIDTH,
+    IN_PLACE_ACTIONS,
+    KEY_TO_ACTION,
+)
 from .gaze import GazeStabilizer, quantize_gaze
 from .geometry import Point, Rect, Size, clamp_position
 from .keyboard_hook import LowLevelKeyboardHook
@@ -56,6 +62,9 @@ _RANDOM_ACTIONS = (
 )
 _ANIMATION_SPEED = {"slow": 1.25, "normal": 1.0, "fast": 0.75}
 _MOVEMENT_SPEED = {"slow": 75.0, "normal": 120.0, "fast": 180.0}
+_CURSOR_STILL_MS = 8_000
+_AUTONOMOUS_MIN_DELAY_MS = 15_000
+_AUTONOMOUS_MAX_DELAY_MS = 35_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,9 +266,15 @@ class DesktopPetApplication:
         self._fixed_look_degrees: float | None = None
         self._last_frame_index: int | None = None
         self._last_tick_ms = 0
+        self._last_random_action: ActionId | None = None
+        self._showcase_active = False
+        self._showcase_queue: list[ActionId] = []
 
         self._clock = QElapsedTimer()
         self._clock.start()
+        self._last_cursor_position = QCursor.pos()
+        self._last_cursor_move_ms = self._now_ms()
+        self._autonomous_not_before_ms = 0
         self.timeline.start(ActionId.IDLE, self._now_ms())
 
         self.menu_controller = MenuController(
@@ -268,6 +283,7 @@ class DesktopPetApplication:
             self.dispatch_menu,
             self.logger,
             pet_choices_supplier=lambda: self.pet_choices,
+            action_items_supplier=lambda: self.catalog.action_menu_items(),
         )
         self.body_menu = self.menu_controller.create_menu(self.window)
         self.tray = tray_factory(self.window, self.menu_controller)
@@ -289,6 +305,9 @@ class DesktopPetApplication:
         self.wander_timer = QTimer(self.window)
         self.wander_timer.setSingleShot(True)
         self.wander_timer.timeout.connect(self.begin_wander)
+        self.autonomous_timer = QTimer(self.window)
+        self.autonomous_timer.setSingleShot(True)
+        self.autonomous_timer.timeout.connect(self._autonomous_timeout)
 
         self.window.action_requested.connect(self.trigger_action)
         self.window.menu_requested.connect(self.body_menu.popup)
@@ -363,6 +382,7 @@ class DesktopPetApplication:
         self.animation_timer.start()
         self.gaze_timer.start()
         self._schedule_wander()
+        self._schedule_autonomous()
         try:
             self.hook.start()
         except Exception as error:
@@ -377,6 +397,7 @@ class DesktopPetApplication:
         self.animation_timer.stop()
         self.gaze_timer.stop()
         self.wander_timer.stop()
+        self.autonomous_timer.stop()
         try:
             self.hook.stop()
         except Exception:
@@ -411,16 +432,44 @@ class DesktopPetApplication:
 
     def trigger_action(self, action: ActionId) -> None:
         if action is ActionId.RANDOM:
-            action = self._rng.choice(_RANDOM_ACTIONS)
+            action = self._choose_random_action()
+        self._cancel_showcase()
+        self._play_action(action, defer_autonomous=True)
+
+    def _play_action(self, action: ActionId, *, defer_autonomous: bool) -> None:
         if action not in ACTION_SPECS:
             raise ValueError(f"unsupported action: {action}")
+        self.autonomous_timer.stop()
+        if defer_autonomous:
+            self._defer_autonomous()
         self._fixed_look_degrees = None
         self._interrupt_wander(reschedule=False)
         self.behavior.trigger_manual(action)
         self.timeline.start(action, self._now_ms())
         self._last_frame_index = None
         if action is ActionId.IDLE:
+            self.behavior.manual_finished()
             self._resume_base_mode()
+
+    def start_showcase(self) -> None:
+        self._cancel_showcase()
+        self._showcase_active = True
+        self._showcase_queue = list(self.catalog.showcase_actions())
+        self._defer_autonomous()
+        self._play_next_showcase_action()
+
+    def _play_next_showcase_action(self) -> None:
+        if self._showcase_queue:
+            action = self._showcase_queue.pop(0)
+            self._play_action(action, defer_autonomous=False)
+            return
+        self._showcase_active = False
+        self.behavior.manual_finished()
+        self._resume_base_mode()
+
+    def _cancel_showcase(self) -> None:
+        self._showcase_active = False
+        self._showcase_queue.clear()
 
     def begin_wander(self) -> None:
         if self.behavior.mode is not BehaviorMode.WANDER or self._shut_down:
@@ -450,6 +499,7 @@ class DesktopPetApplication:
             self._dispatch_menu_command(command)
         finally:
             self._schedule_wander()
+            self._schedule_autonomous()
 
     def _dispatch_menu_command(self, command: MenuCommand) -> None:
         kind = command.kind
@@ -465,6 +515,9 @@ class DesktopPetApplication:
             self._fixed_look_degrees = degrees
             self.behavior.request_gaze(degrees)
             self._show_frame(self.catalog.look_frame(degrees))
+            return
+        if kind == "showcase":
+            self.start_showcase()
             return
         if kind == "toggle":
             self._dispatch_toggle(command.target, bool(command.value))
@@ -515,11 +568,15 @@ class DesktopPetApplication:
             return
         catalog = self._catalog_loader(definition)
         self.catalog = catalog
+        if self._showcase_active:
+            self._cancel_showcase()
+            self.behavior.manual_finished()
         self.window.set_catalog(catalog)
         self.tray.set_companion_icon(catalog.icon_image(), catalog.display_name)
         self._settings = replace(self._settings, pet_id=pet_id)
         self._alpha_cache.clear()
         self._displayed_frame = None
+        self._last_random_action = None
         self._render_current_frame()
         self._recover_window_visibility()
         self.settings_store.save(self._settings)
@@ -575,6 +632,7 @@ class DesktopPetApplication:
         if target not in {
             "wander_enabled",
             "gaze_enabled",
+            "autonomous_actions_enabled",
             "hover_digits_enabled",
             "always_on_top",
         }:
@@ -589,8 +647,13 @@ class DesktopPetApplication:
                 self._schedule_wander()
             else:
                 self.wander_timer.stop()
-        elif target == "gaze_enabled" and not enabled:
-            self.behavior.request_gaze(None)
+        elif target == "gaze_enabled":
+            self._last_cursor_position = QCursor.pos()
+            self._last_cursor_move_ms = self._now_ms()
+            if not enabled:
+                self.behavior.request_gaze(None)
+        elif target == "autonomous_actions_enabled" and not enabled:
+            self.autonomous_timer.stop()
         elif target == "hover_digits_enabled":
             effective = enabled and self._hook_available
             self._session_hover_digits_enabled = effective
@@ -601,9 +664,12 @@ class DesktopPetApplication:
             if visible:
                 self.window.show()
         self._render_current_frame()
+        self._schedule_autonomous()
 
     def _digit_pressed(self, digit: int) -> None:
-        self.trigger_action(resolve_digit_action(digit, self._rng))
+        if digit not in KEY_TO_ACTION:
+            raise ValueError(f"unsupported digit: {digit}")
+        self.trigger_action(KEY_TO_ACTION[digit])
 
     def _hook_failed(self, message: str) -> None:
         error = getattr(self.hook, "last_error", None) or message
@@ -696,6 +762,9 @@ class DesktopPetApplication:
             if movement:
                 self._manual_move(movement)
         if step.finished:
+            if self._showcase_active:
+                self._play_next_showcase_action()
+                return
             self.behavior.manual_finished()
             self._resume_base_mode()
 
@@ -738,13 +807,18 @@ class DesktopPetApplication:
             self._wander_area = None
             self.timeline.start(ActionId.IDLE, now_ms)
             if self._rng.random() < 0.35:
-                self.trigger_action(self._rng.choice(_RANDOM_ACTIONS))
+                self.trigger_action(ActionId.RANDOM)
             else:
                 self._schedule_wander()
 
     def _gaze_tick(self) -> None:
         cursor = QCursor.pos()
         self._refresh_hover_snapshot(cursor)
+        if cursor != self._last_cursor_position:
+            self._last_cursor_position = QPoint(cursor)
+            self._last_cursor_move_ms = self._now_ms()
+            if self._settings.gaze_enabled:
+                self._schedule_autonomous()
         if self._fixed_look_degrees is not None:
             return
         if not self._settings.gaze_enabled or self.behavior.mode not in {
@@ -790,6 +864,7 @@ class DesktopPetApplication:
         self._render_base(now)
         if self.behavior.mode is BehaviorMode.WANDER:
             self._schedule_wander()
+        self._schedule_autonomous()
 
     def _show_frame(self, frame: FrameAsset) -> None:
         identity = (frame.row, frame.column, self._settings.scale_percent)
@@ -808,6 +883,78 @@ class DesktopPetApplication:
         ):
             self.wander_timer.start(self._rng.randint(2_000, 6_000))
 
+    def _autonomous_eligible(self) -> bool:
+        return (
+            self._settings.autonomous_actions_enabled
+            and not self._settings.wander_enabled
+            and self.behavior.mode in {BehaviorMode.IDLE, BehaviorMode.GAZE}
+            and self.behavior.current_action is None
+            and self._fixed_look_degrees is None
+            and not self._showcase_active
+            and not self._shut_down
+        )
+
+    def _schedule_autonomous(self) -> None:
+        if not self._autonomous_eligible():
+            self.autonomous_timer.stop()
+            return
+        now_ms = self._now_ms()
+        if self._settings.gaze_enabled:
+            activity_delay = max(
+                0, _CURSOR_STILL_MS - (now_ms - self._last_cursor_move_ms)
+            )
+        else:
+            if self._autonomous_not_before_ms <= now_ms:
+                self._autonomous_not_before_ms = now_ms + self._rng.randint(
+                    _AUTONOMOUS_MIN_DELAY_MS, _AUTONOMOUS_MAX_DELAY_MS
+                )
+            activity_delay = 0
+        cooldown_delay = max(0, self._autonomous_not_before_ms - now_ms)
+        self.autonomous_timer.start(max(1, activity_delay, cooldown_delay))
+
+    def _autonomous_timeout(self) -> None:
+        if not self._autonomous_eligible():
+            return
+        now_ms = self._now_ms()
+        if now_ms < self._autonomous_not_before_ms:
+            self._schedule_autonomous()
+            return
+        if (
+            self._settings.gaze_enabled
+            and now_ms - self._last_cursor_move_ms < _CURSOR_STILL_MS
+        ):
+            self._schedule_autonomous()
+            return
+        self.trigger_action(ActionId.RANDOM)
+
+    def _defer_autonomous(self) -> None:
+        if (
+            not self._settings.autonomous_actions_enabled
+            or self._settings.wander_enabled
+        ):
+            return
+        self._autonomous_not_before_ms = self._now_ms() + self._rng.randint(
+            _AUTONOMOUS_MIN_DELAY_MS, _AUTONOMOUS_MAX_DELAY_MS
+        )
+
+    def _choose_random_action(self) -> ActionId:
+        weighted = list(self.catalog.autoplay_actions())
+        if len(weighted) > 1 and self._last_random_action is not None:
+            without_repeat = [
+                item for item in weighted if item[0] is not self._last_random_action
+            ]
+            if without_repeat:
+                weighted = without_repeat
+        if not weighted:
+            weighted = [(action, 1) for action in IN_PLACE_ACTIONS]
+        target = self._rng.randint(1, sum(weight for _, weight in weighted))
+        for action, weight in weighted:
+            target -= weight
+            if target <= 0:
+                self._last_random_action = action
+                return action
+        raise RuntimeError("could not choose a random action")
+
     def _interrupt_wander(self, *, reschedule: bool) -> bool:
         was_active = self._wander_target is not None or self._wander_direction != 0
         self.wander_timer.stop()
@@ -821,10 +968,16 @@ class DesktopPetApplication:
             self._show_frame(self.catalog.frames(ActionId.IDLE)[0])
         if reschedule:
             self._schedule_wander()
+            self._schedule_autonomous()
         return was_active
 
     def _begin_drag(self) -> None:
         self._interrupt_wander(reschedule=False)
+        self.autonomous_timer.stop()
+        self._cancel_showcase()
+        if self.behavior.current_action is not None:
+            self.behavior.manual_finished()
+            self.timeline.start(ActionId.IDLE, self._now_ms())
         self.behavior.begin_drag()
 
     def _drag_to(self, target: QPoint) -> None:
@@ -842,6 +995,8 @@ class DesktopPetApplication:
         self._move_window(clamped)
         self.behavior.end_drag()
         self._schedule_wander()
+        self._defer_autonomous()
+        self._schedule_autonomous()
 
     def _restore_position(self) -> None:
         screens, primary_name = self._screen_rectangles()

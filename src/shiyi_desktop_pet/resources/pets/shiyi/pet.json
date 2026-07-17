@@ -4,5 +4,16 @@
   "description": "一只好奇亲人、略带呆萌气质的银黑经典虎斑猫。",
   "spriteVersionNumber": 2,
   "spritesheetPath": "spritesheet.webp",
-  "iconFrame": {"row": 0, "column": 0}
+  "iconFrame": {"row": 0, "column": 0},
+  "actions": {
+    "idle": {"label": "休息", "autoplayWeight": 0},
+    "moveRight": {"label": "向右奔跑", "autoplayWeight": 0},
+    "moveLeft": {"label": "向左奔跑", "autoplayWeight": 0},
+    "greet": {"label": "抬爪招呼", "autoplayWeight": 3},
+    "jump": {"label": "开心扑跳", "autoplayWeight": 1},
+    "special": {"label": "撒娇翻肚", "autoplayWeight": 2},
+    "wait": {"label": "乖乖等候", "autoplayWeight": 3},
+    "observe": {"label": "四处巡视", "autoplayWeight": 2},
+    "curious": {"label": "好奇观察", "autoplayWeight": 3}
+  }
 }

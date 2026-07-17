@@ -14,7 +14,8 @@ class FakeLogger:
 def test_first_launch_defaults_match_approved_design(tmp_path: Path):
     settings = SettingsStore(tmp_path / "settings.ini").load()
     assert settings == AppSettings(
-        schema_version=2, pet_id="shiyi", wander_enabled=False, gaze_enabled=True,
+        schema_version=3, pet_id="shiyi", wander_enabled=False, gaze_enabled=True,
+        autonomous_actions_enabled=True,
         hover_digits_enabled=True, always_on_top=True,
         scale_percent=100, animation_speed="normal", movement_speed="normal",
         screen_name="", relative_x=0.85, relative_y=0.75,
@@ -35,7 +36,8 @@ def test_older_schema_is_migrated_with_new_defaults(tmp_path: Path):
     path = tmp_path / "settings.ini"
     path.write_text("[settings]\nschema_version=0\nwander_enabled=true\n", encoding="utf-8")
     loaded = SettingsStore(path).load()
-    assert loaded.schema_version == 2
+    assert loaded.schema_version == 3
+    assert loaded.autonomous_actions_enabled is True
     assert loaded.pet_id == "shiyi"
     assert loaded.wander_enabled is True
     assert loaded.gaze_enabled is True
@@ -61,7 +63,7 @@ def test_invalid_values_are_normalized_and_future_schema_falls_back(tmp_path: Pa
     assert settings.animation_speed == "normal"
     assert (settings.relative_x, settings.relative_y) == (1.0, 0.0)
 
-    path.write_text("[settings]\nschema_version=3\n", encoding="utf-8")
+    path.write_text("[settings]\nschema_version=4\n", encoding="utf-8")
     assert SettingsStore(path).load() == AppSettings()
 
 

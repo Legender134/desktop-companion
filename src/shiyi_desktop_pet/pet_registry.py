@@ -9,6 +9,9 @@ from pathlib import Path
 import re
 from typing import Callable
 
+from .constants import ACTION_MANIFEST_SLOTS, DEFAULT_PET_ACTIONS, IN_PLACE_ACTIONS
+from .models import PetActionDefinition
+
 
 _PET_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MANIFEST_NAME = "pet.json"
@@ -26,6 +29,7 @@ class PetDefinition:
     spritesheet_path: Path
     is_bundled: bool
     icon_frame: tuple[int, int]
+    actions: tuple[PetActionDefinition, ...]
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,8 @@ class PetRegistry:
                 "iconFrame row must be 0 through 10 and column must be 0 through 7"
             )
 
+        actions = PetRegistry._parse_actions(manifest.get("actions"))
+
         spritesheet_path = directory / _SPRITESHEET_NAME
         if not spritesheet_path.is_file():
             raise ValueError("spritesheet.webp is missing")
@@ -207,4 +213,51 @@ class PetRegistry:
             spritesheet_path=spritesheet_path,
             is_bundled=is_bundled,
             icon_frame=(icon_row, icon_column),
+            actions=actions,
         )
+
+    @staticmethod
+    def _parse_actions(value: object) -> tuple[PetActionDefinition, ...]:
+        if value is None:
+            return DEFAULT_PET_ACTIONS
+        expected_keys = {key for key, *_ in ACTION_MANIFEST_SLOTS}
+        if not isinstance(value, dict) or set(value) != expected_keys:
+            raise ValueError("actions must contain every documented v2 action key")
+
+        definitions: list[PetActionDefinition] = []
+        for key, action_id, _default_label, _default_weight in ACTION_MANIFEST_SLOTS:
+            entry = value[key]
+            if not isinstance(entry, dict) or set(entry) != {"label", "autoplayWeight"}:
+                raise ValueError(
+                    f"actions.{key} must contain label and autoplayWeight"
+                )
+            label = entry["label"]
+            if not isinstance(label, str):
+                raise ValueError(f"actions.{key}.label must be text")
+            label = label.strip()
+            if (
+                not label
+                or len(label) > 32
+                or any(not character.isprintable() for character in label)
+            ):
+                raise ValueError(
+                    f"actions.{key}.label must be 1 through 32 printable characters"
+                )
+            weight = entry["autoplayWeight"]
+            if (
+                not isinstance(weight, int)
+                or isinstance(weight, bool)
+                or not 0 <= weight <= 10
+            ):
+                raise ValueError(
+                    f"actions.{key}.autoplayWeight must be an integer from 0 through 10"
+                )
+            if action_id not in IN_PLACE_ACTIONS and weight != 0:
+                raise ValueError(
+                    f"actions.{key}.autoplayWeight must be 0 for a moving or idle action"
+                )
+            definitions.append(PetActionDefinition(key, action_id, label, weight))
+
+        if not any(definition.autoplay_weight for definition in definitions):
+            raise ValueError("actions must enable at least one in-place autoplay action")
+        return tuple(definitions)

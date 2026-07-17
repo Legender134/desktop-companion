@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QTimer, Qt, Signal
 from PySide6.QtGui import QBitmap, QGuiApplication, QMouseEvent, QPaintEvent, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -26,6 +26,11 @@ class PetWindow(QWidget):
         self._scale_percent = 100
         self._pending_press_offset: QPointF | None = None
         self._drag_active = False
+        self._single_click_timer = QTimer(self)
+        self._single_click_timer.setSingleShot(True)
+        self._single_click_timer.timeout.connect(
+            lambda: self.action_requested.emit(ActionId.RANDOM)
+        )
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -75,6 +80,7 @@ class PetWindow(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            self._single_click_timer.stop()
             self._clear_drag_state()
             self.action_requested.emit(ActionId.JUMP)
             event.accept()
@@ -88,10 +94,12 @@ class PetWindow(QWidget):
             event.accept()
             return
         if event.button() == Qt.MouseButton.MiddleButton:
+            self._single_click_timer.stop()
             self.action_requested.emit(ActionId.RANDOM)
             event.accept()
             return
         if event.button() == Qt.MouseButton.RightButton:
+            self._single_click_timer.stop()
             self.menu_requested.emit(event.globalPosition().toPoint())
             event.accept()
             return
@@ -107,6 +115,7 @@ class PetWindow(QWidget):
                     event.accept()
                     return
                 self._drag_active = True
+                self._single_click_timer.stop()
                 self.drag_started.emit()
             target = (event.globalPosition() - offset).toPoint()
             self.drag_moved.emit(target)
@@ -122,6 +131,10 @@ class PetWindow(QWidget):
             self._clear_drag_state()
             if target is not None:
                 self.drag_finished.emit(target)
+            else:
+                self._single_click_timer.start(
+                    QGuiApplication.styleHints().mouseDoubleClickInterval()
+                )
             event.accept()
             return
         super().mouseReleaseEvent(event)

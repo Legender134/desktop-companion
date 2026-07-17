@@ -43,8 +43,29 @@ def test_catalog_exposes_all_actions_and_look_directions():
         ActionId.CURIOUS: 6,
     }
     assert {action: len(catalog.frames(action)) for action in expected} == expected
-    assert tuple(catalog.look_degrees) == tuple(index * 22.5 for index in range(16))
-    assert all(not catalog.look_frame(degrees).image.isNull() for degrees in catalog.look_degrees)
+
+
+def test_catalog_exposes_pet_specific_menu_names_and_safe_autoplay_pool():
+    shiyi = AnimationCatalog.load_pet("shiyi")
+    ziling = AnimationCatalog.load_pet("ziling")
+
+    assert dict(shiyi.action_menu_items())["抬爪招呼"] is ActionId.WAVE
+    assert dict(ziling.action_menu_items())["挥手问候"] is ActionId.WAVE
+    assert "撒娇翻肚" not in dict(ziling.action_menu_items())
+    autoplay = dict(ziling.autoplay_actions())
+    assert autoplay[ActionId.WAVE] == 3
+    assert ActionId.IDLE not in autoplay
+    assert ActionId.RUN_RIGHT not in autoplay
+    assert ziling.showcase_actions() == (
+        ActionId.WAVE,
+        ActionId.JUMP,
+        ActionId.BELLY_FLOP,
+        ActionId.EXPECT,
+        ActionId.PATROL,
+        ActionId.CURIOUS,
+    )
+    assert tuple(shiyi.look_degrees) == tuple(index * 22.5 for index in range(16))
+    assert all(not shiyi.look_frame(degrees).image.isNull() for degrees in shiyi.look_degrees)
 
 
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():

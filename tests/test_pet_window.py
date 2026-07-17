@@ -38,6 +38,21 @@ def test_window_uses_frame_mask_and_emits_mouse_intents(qtbot):
     assert drag_events == [("started", None), ("moved", target), ("finished", target)]
 
 
+def test_single_left_click_emits_delayed_random_response_without_drag(qtbot):
+    catalog = AnimationCatalog.load_default()
+    window = PetWindow(catalog)
+    qtbot.addWidget(window)
+    window.set_frame(catalog.frames(ActionId.IDLE)[0], scale_percent=100)
+
+    with qtbot.waitSignal(
+        window.action_requested,
+        timeout=QGuiApplication.styleHints().mouseDoubleClickInterval() + 500,
+    ) as signal:
+        qtbot.mouseClick(window, Qt.LeftButton, pos=QPoint(96, 150))
+
+    assert signal.args == [ActionId.RANDOM]
+
+
 def test_mask_and_size_follow_frame_scale(qtbot):
     catalog = AnimationCatalog.load_default()
     window = PetWindow(catalog)
@@ -169,6 +184,8 @@ def test_realistic_double_click_emits_only_jump_and_no_drag_transaction(qtbot):
         )
     )
 
+    qtbot.wait(QGuiApplication.styleHints().mouseDoubleClickInterval() + 50)
+
     assert events == [("action", ActionId.JUMP)]
 
 
@@ -235,6 +252,8 @@ def test_sub_threshold_jitter_double_click_emits_only_jump(qtbot):
             Qt.MouseButton.NoButton,
         )
     )
+
+    qtbot.wait(QGuiApplication.styleHints().mouseDoubleClickInterval() + 50)
 
     assert jitter < threshold
     assert events == [("action", ActionId.JUMP)]

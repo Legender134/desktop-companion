@@ -44,23 +44,32 @@ def test_menu_contains_every_action_direction_and_toggle():
             ("ziling", "紫灵"),
             ("new_pet", "新宠物"),
         ),
+        action_items_supplier=AnimationCatalog.load_default().action_menu_items,
     )
     labels = menu_controller.flattened_labels()
     for label in (
         "休息",
         "向右奔跑",
         "向左奔跑",
-        "招手",
-        "跳跃",
+        "抬爪招呼",
+        "开心扑跳",
         "撒娇翻肚",
-        "期待",
-        "原地巡视",
+        "乖乖等候",
+        "四处巡视",
         "好奇观察",
         "随机动作",
+        "动作展示",
     ):
         assert label in labels
     assert sum(label.startswith("观察 ") for label in labels) == 16
-    for label in ("自动闲逛", "看向鼠标", "悬停数字快捷键", "始终置顶", "开机启动"):
+    for label in (
+        "自动闲逛",
+        "看向鼠标",
+        "自主小动作",
+        "悬停数字快捷键",
+        "始终置顶",
+        "开机启动",
+    ):
         assert label in labels
     for label in (
         "切换宠物",
@@ -94,10 +103,12 @@ def test_menu_dispatches_typed_values_from_one_command_model(qtbot):
             ("ziling", "紫灵"),
             ("new_pet", "新宠物"),
         ),
+        action_items_supplier=AnimationCatalog.load_default().action_menu_items,
     )
     menu = controller.create_menu()
 
-    _action(menu, "跳跃").trigger()
+    _action(menu, "开心扑跳").trigger()
+    _action(menu, "动作展示").trigger()
     _action(menu, "观察 067.5°").trigger()
     _action(menu, "125%").trigger()
     _action(menu, "新宠物").trigger()
@@ -107,6 +118,7 @@ def test_menu_dispatches_typed_values_from_one_command_model(qtbot):
 
     assert dispatched == [
         MenuCommand("action", ActionId.JUMP),
+        MenuCommand("showcase"),
         MenuCommand("look", 67.5),
         MenuCommand("scale", 125),
         MenuCommand("pet", "new_pet"),
@@ -129,6 +141,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     menu.aboutToShow.emit()
     assert not _action(menu, "自动闲逛").isChecked()
     assert _action(menu, "看向鼠标").isChecked()
+    assert _action(menu, "自主小动作").isChecked()
     assert _action(menu, "100%").isChecked()
     assert _action(_submenu(menu, "动画速度"), "正常").isChecked()
     assert _action(_submenu(menu, "移动速度"), "正常").isChecked()
@@ -169,6 +182,25 @@ def test_pet_choices_are_rebuilt_when_menu_opens(qtbot):
     menu.aboutToShow.emit()
 
     assert _action(_submenu(menu, "切换宠物"), "新宠物") is not None
+
+
+def test_action_names_are_rebuilt_from_the_current_pet(qtbot):
+    current = [AnimationCatalog.load_default()]
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        lambda command: None,
+        action_items_supplier=lambda: current[0].action_menu_items(),
+    )
+    menu = controller.create_menu()
+    assert _action(menu, "抬爪招呼") is not None
+    assert _action(menu, "挥手问候") is None
+
+    current[0] = AnimationCatalog.load_pet("ziling")
+    menu.aboutToShow.emit()
+
+    assert _action(menu, "抬爪招呼") is None
+    assert _action(menu, "挥手问候") is not None
 
 
 def test_unavailable_tray_is_a_safe_disabled_object(monkeypatch, qtbot):
@@ -301,6 +333,7 @@ def test_command_model_has_complete_exact_payload_table():
     assert [command.target for command in toggle_commands] == [
         "wander_enabled",
         "gaze_enabled",
+        "autonomous_actions_enabled",
         "hover_digits_enabled",
         "always_on_top",
         "startup_enabled",

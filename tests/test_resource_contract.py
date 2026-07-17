@@ -26,6 +26,17 @@ def test_packaged_resources_obey_multi_pet_v2_contract():
             "spriteVersionNumber": 2,
             "spritesheetPath": "spritesheet.webp",
             "iconFrame": {"row": 0, "column": 0},
+            "actions": {
+                "idle": {"label": "休息", "autoplayWeight": 0},
+                "moveRight": {"label": "向右奔跑", "autoplayWeight": 0},
+                "moveLeft": {"label": "向左奔跑", "autoplayWeight": 0},
+                "greet": {"label": "抬爪招呼", "autoplayWeight": 3},
+                "jump": {"label": "开心扑跳", "autoplayWeight": 1},
+                "special": {"label": "撒娇翻肚", "autoplayWeight": 2},
+                "wait": {"label": "乖乖等候", "autoplayWeight": 3},
+                "observe": {"label": "四处巡视", "autoplayWeight": 2},
+                "curious": {"label": "好奇观察", "autoplayWeight": 3},
+            },
         },
         "ziling": {
             "id": "ziling",
@@ -34,6 +45,17 @@ def test_packaged_resources_obey_multi_pet_v2_contract():
             "spriteVersionNumber": 2,
             "spritesheetPath": "spritesheet.webp",
             "iconFrame": {"row": 0, "column": 0},
+            "actions": {
+                "idle": {"label": "静静相伴", "autoplayWeight": 0},
+                "moveRight": {"label": "向右轻行", "autoplayWeight": 0},
+                "moveLeft": {"label": "向左轻行", "autoplayWeight": 0},
+                "greet": {"label": "挥手问候", "autoplayWeight": 3},
+                "jump": {"label": "翩然旋舞", "autoplayWeight": 1},
+                "special": {"label": "舒展衣袖", "autoplayWeight": 2},
+                "wait": {"label": "安静等候", "autoplayWeight": 3},
+                "observe": {"label": "凝神静气", "autoplayWeight": 2},
+                "curious": {"label": "若有所思", "autoplayWeight": 3},
+            },
         },
     }
 

@@ -582,7 +582,7 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.dispatch_menu(MenuCommand("toggle", False, "wander_enabled"))
     controller.dispatch_menu(MenuCommand("center"))
     controller.dispatch_menu(MenuCommand("about"))
-    assert about == [("关于桌面灵伴", "桌面灵伴 2.1\n可用宠物：2（十一、紫灵）")]
+    assert about == [("关于桌面灵伴", "桌面灵伴 2.2\n可用宠物：2（十一、紫灵）")]
 
     hooks[0].digit_pressed.emit(4)
     assert controller.current_action is ActionId.WAVE
@@ -606,6 +606,8 @@ def test_pet_switch_is_immediate_and_persisted(qapp):
     initial_icon, initial_name = trays[0].companion_icons[-1]
     assert initial_name == "十一"
     assert initial_icon == controller.catalog.icon_image()
+    assert "抬爪招呼" in controller.menu_controller.flattened_labels()
+    assert "挥手问候" not in controller.menu_controller.flattened_labels()
 
     controller.dispatch_menu(MenuCommand("pet", "ziling"))
 
@@ -617,10 +619,95 @@ def test_pet_switch_is_immediate_and_persisted(qapp):
     assert ziling_name == "紫灵"
     assert ziling_icon == controller.catalog.icon_image()
     assert ziling_icon != initial_icon
+    assert "抬爪招呼" not in controller.menu_controller.flattened_labels()
+    assert "挥手问候" in controller.menu_controller.flattened_labels()
 
     controller.dispatch_menu(MenuCommand("pet", "shiyi"))
     assert controller.settings.pet_id == "shiyi"
     assert controller.catalog.pet_id == "shiyi"
+    controller.shutdown()
+
+
+def test_weighted_random_actions_never_move_or_repeat_immediately(qapp):
+    controller, _, _, _, _ = _controller(qapp)
+    try:
+        chosen = [controller._choose_random_action() for _ in range(30)]
+
+        assert all(action not in {ActionId.RUN_LEFT, ActionId.RUN_RIGHT} for action in chosen)
+        assert all(left is not right for left, right in zip(chosen, chosen[1:]))
+    finally:
+        controller.shutdown()
+
+
+def test_cursor_stillness_triggers_autonomous_action_after_eight_seconds(qapp):
+    controller, _, _, _, _ = _controller(qapp)
+    controller.start(startup=True)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    controller._last_cursor_move_ms = 0
+    controller._autonomous_not_before_ms = 0
+
+    now[0] = 7_999
+    controller._autonomous_timeout()
+    assert controller.current_action is ActionId.IDLE
+
+    controller.autonomous_timer.stop()
+    now[0] = 8_000
+    controller._autonomous_timeout()
+    assert controller.current_action in {
+        ActionId.WAVE,
+        ActionId.JUMP,
+        ActionId.BELLY_FLOP,
+        ActionId.EXPECT,
+        ActionId.PATROL,
+        ActionId.CURIOUS,
+    }
+    controller.shutdown()
+
+
+def test_autonomous_actions_wait_randomly_without_gaze_and_respect_toggle(qapp):
+    settings = replace(AppSettings(), gaze_enabled=False)
+    controller, _, _, _, _ = _controller(qapp, settings=settings)
+    controller.start(startup=True)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    controller._now_ms = lambda: 0
+    controller._autonomous_not_before_ms = 0
+
+    controller._schedule_autonomous()
+    assert 15_000 <= controller._autonomous_not_before_ms <= 35_000
+    assert controller.autonomous_timer.isActive()
+
+    controller.dispatch_menu(
+        MenuCommand("toggle", False, "autonomous_actions_enabled")
+    )
+    assert not controller.settings.autonomous_actions_enabled
+    assert not controller.autonomous_timer.isActive()
+    controller._autonomous_timeout()
+    assert controller.current_action is ActionId.IDLE
+    controller.shutdown()
+
+
+def test_action_showcase_plays_every_in_place_action_once(qapp):
+    controller, _, _, _, _ = _controller(qapp)
+    controller.start(startup=True)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    expected = controller.catalog.showcase_actions()
+
+    controller.dispatch_menu(MenuCommand("showcase"))
+    for action in expected:
+        assert controller.current_action is action
+        controller.timeline.started_ms = 0
+        controller._advance_manual(100_000)
+
+    assert controller.current_action is ActionId.IDLE
+    assert not controller._showcase_active
     controller.shutdown()
 
 
