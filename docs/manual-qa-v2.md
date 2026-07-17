@@ -5,7 +5,7 @@
 ## 自动门禁
 
 - `pip check`：通过，无损坏依赖。
-- 源码测试：`145 passed`。
+- 源码测试：`152 passed`。
 - 冻结版自检测试：`1 passed`。
 - 覆盖率：`90%`，高于 85% 门槛。
 - PyInstaller 冻结：通过；`DesktopCompanion.exe --self-test` 返回 `ok=true`、WebP 可用、每只宠物 74 帧。
@@ -30,8 +30,8 @@
 | 设置持久化 | `settings.ini` 立即写入 `schema_version = 2`、`pet_id = ziling` |
 | 重启恢复 | 退出并重新启动后仍显示紫灵 |
 | 资源契约 | 所有宠物包统一使用 v2、1536×2288、透明 WebP；注册器校验 ID、清单、大小、路径和动作占用表 |
-| 图标 | 功能候选包暂用 2.0 图标；2.1 通用产品图标将在用户选定方案后替换并重新构建 |
-| 托盘图标 | 控制器加载的图标非空，提示为“桌面灵伴”；真实安装运行后 Windows `NotifyIconSettings` 已登记 `DesktopCompanion.exe` |
+| 静态产品图标 | 安装程序、EXE、开始菜单和桌面快捷方式使用从十一休息帧确定性生成的多尺寸 ICO |
+| 动态托盘图标 | 使用当前宠物的 `iconFrame`；十一与紫灵切换时图标和“桌面灵伴 · 角色名”提示同步变化 |
 | 桌面快捷方式 | 覆盖安装后实际生成 `%USERPROFILE%\Desktop\桌面灵伴.lnk`，目标为已安装的 `DesktopCompanion.exe` |
 | 1.0 共存 | 2.1 延续 2.0 的独立 EXE、目录、设置、日志、自启动项、互斥量、IPC 名称和卸载 GUID，不覆盖 1.0 |
 

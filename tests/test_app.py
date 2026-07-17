@@ -79,6 +79,7 @@ class FakeTray:
         self.shown = False
         self.hidden = False
         self.messages = []
+        self.companion_icons = []
 
     def show(self):
         self.shown = True
@@ -89,6 +90,10 @@ class FakeTray:
 
     def show_message(self, title, message, milliseconds=10_000):
         self.messages.append((title, message, milliseconds))
+        return self.available
+
+    def set_companion_icon(self, image, display_name):
+        self.companion_icons.append((image.copy(), display_name))
         return self.available
 
 
@@ -596,8 +601,11 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
 
 
 def test_pet_switch_is_immediate_and_persisted(qapp):
-    controller, store, _, _, _ = _controller(qapp)
+    controller, store, _, _, trays = _controller(qapp)
     original = controller.window.current_frame.image
+    initial_icon, initial_name = trays[0].companion_icons[-1]
+    assert initial_name == "十一"
+    assert initial_icon == controller.catalog.icon_image()
 
     controller.dispatch_menu(MenuCommand("pet", "ziling"))
 
@@ -605,6 +613,10 @@ def test_pet_switch_is_immediate_and_persisted(qapp):
     assert controller.catalog.pet_id == "ziling"
     assert controller.window.current_frame.image != original
     assert store.saved[-1].pet_id == "ziling"
+    ziling_icon, ziling_name = trays[0].companion_icons[-1]
+    assert ziling_name == "紫灵"
+    assert ziling_icon == controller.catalog.icon_image()
+    assert ziling_icon != initial_icon
 
     controller.dispatch_menu(MenuCommand("pet", "shiyi"))
     assert controller.settings.pet_id == "shiyi"

@@ -2,13 +2,48 @@
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QObject
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QSystemTrayIcon, QWidget
 
 from .menu_controller import MenuController
 from .product import PRODUCT_NAME
 from .resource_locator import resource_path
+
+
+def _icon_from_companion_image(image: QImage) -> QIcon:
+    if image.isNull() or not image.hasAlphaChannel():
+        return QIcon()
+    left, top = image.width(), image.height()
+    right = bottom = 0
+    found_visible = False
+    for y in range(image.height()):
+        for x in range(image.width()):
+            if image.pixelColor(x, y).alpha() == 0:
+                continue
+            found_visible = True
+            left = min(left, x)
+            top = min(top, y)
+            right = max(right, x + 1)
+            bottom = max(bottom, y + 1)
+    if not found_visible:
+        return QIcon()
+    trimmed = image.copy(left, top, right - left, bottom - top)
+    square_size = math.ceil(max(trimmed.width(), trimmed.height()) / 0.84)
+    canvas = QImage(square_size, square_size, QImage.Format.Format_RGBA8888)
+    canvas.fill(0)
+    painter = QPainter(canvas)
+    try:
+        painter.drawImage(
+            (square_size - trimmed.width()) // 2,
+            (square_size - trimmed.height()) // 2,
+            trimmed,
+        )
+    finally:
+        painter.end()
+    return QIcon(QPixmap.fromImage(canvas))
 
 
 class TrayController(QObject):
@@ -52,6 +87,16 @@ class TrayController(QObject):
         if self.tray_icon is None:
             return False
         self.tray_icon.showMessage(title, message, msecs=milliseconds)
+        return True
+
+    def set_companion_icon(self, image: QImage, display_name: str) -> bool:
+        if self.tray_icon is None:
+            return False
+        icon = _icon_from_companion_image(image)
+        if icon.isNull():
+            return False
+        self.tray_icon.setIcon(icon)
+        self.tray_icon.setToolTip(f"{PRODUCT_NAME} · {display_name}")
         return True
 
     def _activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:

@@ -61,6 +61,21 @@ def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():
         AnimationCatalog.load_pet("missing")
 
 
+def test_catalog_exposes_configured_visible_icon_frame():
+    catalog = AnimationCatalog(_valid_synthetic_atlas(), icon_frame=(3, 1))
+
+    icon_image = catalog.icon_image()
+
+    assert icon_image == catalog.frames(ActionId.WAVE)[1].image
+    assert catalog.icon_frame == (3, 1)
+
+
+@pytest.mark.parametrize("icon_frame", [(-1, 0), (11, 0), (0, 8), (0, 7)])
+def test_catalog_rejects_invalid_or_empty_icon_frame(icon_frame):
+    with pytest.raises(ValueError, match="iconFrame"):
+        AnimationCatalog(_valid_synthetic_atlas(), icon_frame=icon_frame)
+
+
 def test_alpha_hit_test_uses_scaled_visible_pixel():
     catalog = AnimationCatalog.load_default()
     frame = catalog.frames(ActionId.IDLE)[0]

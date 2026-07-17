@@ -18,7 +18,8 @@ new_pet\
   "displayName": "新宠物",
   "description": "这只宠物的简短说明。",
   "spriteVersionNumber": 2,
-  "spritesheetPath": "spritesheet.webp"
+  "spritesheetPath": "spritesheet.webp",
+  "iconFrame": {"row": 0, "column": 0}
 }
 ```
 
@@ -31,6 +32,7 @@ new_pet\
 | `description` | 可选文本，最长 500 个字符 |
 | `spriteVersionNumber` | 必须是数字 `2` |
 | `spritesheetPath` | 必须精确写为 `spritesheet.webp` |
+| `iconFrame` | 可选；包含整数 `row`（0–10）和 `column`（0–7），指定该宠物的托盘代表帧；省略时默认为第 0 行第 0 列 |
 
 内置 ID `shiyi`、`ziling` 已被占用。用户宠物不能覆盖内置宠物，其他用户宠物之间也不能重名。
 
@@ -58,6 +60,8 @@ new_pet\
 | 10 | 观察方向 180°–337.5° | 8 |
 
 观察方向按每格增加 22.5° 的顺序排列。
+
+`iconFrame` 必须指向表中实际使用且含有非透明像素的格子。程序会裁剪该帧的透明边界、补成带 8% 留白的正方形，并在切换宠物时立即更新托盘图标和提示名称。这样每个角色都使用自己的形象，不需要额外提供通用产品图标或单独的 ICO 文件。
 
 ## 安装与重新扫描
 

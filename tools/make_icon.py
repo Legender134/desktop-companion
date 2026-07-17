@@ -15,7 +15,7 @@ ATLAS_PATH = (
     / "shiyi_desktop_pet"
     / "resources"
     / "pets"
-    / "ziling"
+    / "shiyi"
     / "spritesheet.webp"
 )
 ICON_PATH = REPO_ROOT / "src" / "shiyi_desktop_pet" / "resources" / "app.ico"

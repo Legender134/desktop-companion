@@ -25,6 +25,7 @@ def test_packaged_resources_obey_multi_pet_v2_contract():
             "description": "一只好奇亲人、略带呆萌气质的银黑经典虎斑猫。",
             "spriteVersionNumber": 2,
             "spritesheetPath": "spritesheet.webp",
+            "iconFrame": {"row": 0, "column": 0},
         },
         "ziling": {
             "id": "ziling",
@@ -32,6 +33,7 @@ def test_packaged_resources_obey_multi_pet_v2_contract():
             "description": "《凡人修仙传》动画中的成年紫灵，清冷温柔的精致Q版紫白仙裙人物宠物。",
             "spriteVersionNumber": 2,
             "spritesheetPath": "spritesheet.webp",
+            "iconFrame": {"row": 0, "column": 0},
         },
     }
 

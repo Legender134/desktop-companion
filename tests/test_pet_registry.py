@@ -15,19 +15,21 @@ def _write_pack(
     sprite_version: int = 2,
     spritesheet_path: str = "spritesheet.webp",
     sprite_bytes: bytes = b"fake-webp",
+    icon_frame: object | None = None,
 ) -> Path:
     directory = root / pet_id
     directory.mkdir(parents=True)
+    manifest = {
+        "id": manifest_id or pet_id,
+        "displayName": pet_id.title(),
+        "description": f"{pet_id} test pet",
+        "spriteVersionNumber": sprite_version,
+        "spritesheetPath": spritesheet_path,
+    }
+    if icon_frame is not None:
+        manifest["iconFrame"] = icon_frame
     (directory / "pet.json").write_text(
-        json.dumps(
-            {
-                "id": manifest_id or pet_id,
-                "displayName": pet_id.title(),
-                "description": f"{pet_id} test pet",
-                "spriteVersionNumber": sprite_version,
-                "spritesheetPath": spritesheet_path,
-            }
-        ),
+        json.dumps(manifest),
         encoding="utf-8",
     )
     if spritesheet_path == "spritesheet.webp":
@@ -51,6 +53,7 @@ def test_registry_discovers_bundled_and_user_pets_and_creates_user_root(tmp_path
         ("new_pet", "New_Pet"),
     )
     assert snapshot.by_id("new_pet").is_bundled is False
+    assert snapshot.by_id("new_pet").icon_frame == (0, 0)
     assert snapshot.by_id("shiyi").is_bundled is True
     assert snapshot.issues == ()
 
@@ -98,6 +101,22 @@ def test_registry_requires_canonical_lowercase_id_and_directory(tmp_path: Path):
 
     assert snapshot.choices == (("shiyi", "Shiyi"),)
     assert "invalid pet id" in snapshot.issues[0].message
+
+
+def test_registry_accepts_valid_icon_frame_and_rejects_invalid_values(tmp_path: Path):
+    bundled = tmp_path / "bundled"
+    user = tmp_path / "user-pets"
+    _write_pack(bundled, "shiyi", icon_frame={"row": 3, "column": 1})
+    _write_pack(user, "bad_bool", icon_frame={"row": True, "column": 0})
+    _write_pack(user, "bad_column", icon_frame={"row": 0, "column": 8})
+    _write_pack(user, "bad_shape", icon_frame=[0, 0])
+
+    snapshot = PetRegistry(bundled, user).refresh()
+
+    assert snapshot.by_id("shiyi").icon_frame == (3, 1)
+    assert snapshot.choices == (("shiyi", "Shiyi"),)
+    assert len(snapshot.issues) == 3
+    assert all("iconFrame" in issue.message for issue in snapshot.issues)
 
 
 def test_registry_validator_quarantines_bad_pack_without_hiding_good_pets(tmp_path: Path):

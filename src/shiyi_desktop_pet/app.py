@@ -271,6 +271,9 @@ class DesktopPetApplication:
         )
         self.body_menu = self.menu_controller.create_menu(self.window)
         self.tray = tray_factory(self.window, self.menu_controller)
+        self.tray.set_companion_icon(
+            self.catalog.icon_image(), self.catalog.display_name
+        )
         self.hook = hook_factory(
             self._hook_hit_test,
             enabled=self._session_hover_digits_enabled,
@@ -513,6 +516,7 @@ class DesktopPetApplication:
         catalog = self._catalog_loader(definition)
         self.catalog = catalog
         self.window.set_catalog(catalog)
+        self.tray.set_companion_icon(catalog.icon_image(), catalog.display_name)
         self._settings = replace(self._settings, pet_id=pet_id)
         self._alpha_cache.clear()
         self._displayed_frame = None

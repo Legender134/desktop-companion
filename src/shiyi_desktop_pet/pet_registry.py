@@ -25,6 +25,7 @@ class PetDefinition:
     manifest_path: Path
     spritesheet_path: Path
     is_bundled: bool
+    icon_frame: tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,23 @@ class PetRegistry:
         if manifest.get("spritesheetPath") != _SPRITESHEET_NAME:
             raise ValueError("spritesheetPath must be spritesheet.webp")
 
+        icon_frame = manifest.get("iconFrame", {"row": 0, "column": 0})
+        if not isinstance(icon_frame, dict) or set(icon_frame) != {"row", "column"}:
+            raise ValueError("iconFrame must contain row and column")
+        icon_row = icon_frame["row"]
+        icon_column = icon_frame["column"]
+        if (
+            not isinstance(icon_row, int)
+            or isinstance(icon_row, bool)
+            or not 0 <= icon_row < 11
+            or not isinstance(icon_column, int)
+            or isinstance(icon_column, bool)
+            or not 0 <= icon_column < 8
+        ):
+            raise ValueError(
+                "iconFrame row must be 0 through 10 and column must be 0 through 7"
+            )
+
         spritesheet_path = directory / _SPRITESHEET_NAME
         if not spritesheet_path.is_file():
             raise ValueError("spritesheet.webp is missing")
@@ -188,4 +206,5 @@ class PetRegistry:
             manifest_path=manifest_path,
             spritesheet_path=spritesheet_path,
             is_bundled=is_bundled,
+            icon_frame=(icon_row, icon_column),
         )

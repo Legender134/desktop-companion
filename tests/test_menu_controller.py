@@ -4,6 +4,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QSystemTrayIcon
 
 from shiyi_desktop_pet.menu_controller import MenuCommand, MenuController
+from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.models import ActionId
 from shiyi_desktop_pet.settings import AppSettings
 from shiyi_desktop_pet.tray_controller import TrayController
@@ -186,6 +187,7 @@ def test_unavailable_tray_is_a_safe_disabled_object(monkeypatch, qtbot):
     assert tray.show() is False
     tray.hide()
     tray.show_message("title", "body")
+    assert tray.set_companion_icon(AnimationCatalog.load_default().icon_image(), "十一") is False
 
 
 def test_available_tray_reuses_menu_and_double_click_recovers_pet(monkeypatch, qtbot):
@@ -212,6 +214,10 @@ def test_available_tray_reuses_menu_and_double_click_recovers_pet(monkeypatch, q
     assert tray.tray_icon.contextMenu() is tray.menu
     assert not tray.tray_icon.icon().isNull()
     assert tray.tray_icon.toolTip() == "桌面灵伴"
+    original_key = tray.tray_icon.icon().cacheKey()
+    assert tray.set_companion_icon(AnimationCatalog.load_pet("ziling").icon_image(), "紫灵")
+    assert tray.tray_icon.icon().cacheKey() != original_key
+    assert tray.tray_icon.toolTip() == "桌面灵伴 · 紫灵"
     tray.hide()
 
 

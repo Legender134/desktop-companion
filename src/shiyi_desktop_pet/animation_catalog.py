@@ -21,6 +21,7 @@ class AnimationCatalog:
         *,
         pet_id: str = "custom",
         display_name: str = "",
+        icon_frame: tuple[int, int] = (0, 0),
     ):
         if atlas.isNull():
             raise ValueError("spritesheet could not be decoded")
@@ -31,6 +32,15 @@ class AnimationCatalog:
         self.pet_id = pet_id
         self.display_name = display_name
         self._atlas = atlas.convertToFormat(QImage.Format.Format_RGBA8888)
+        if (
+            not isinstance(icon_frame, tuple)
+            or len(icon_frame) != 2
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in icon_frame)
+            or not 0 <= icon_frame[0] < 11
+            or not 0 <= icon_frame[1] < 8
+        ):
+            raise ValueError("iconFrame is outside the v2 atlas")
+        self.icon_frame = icon_frame
         self.look_degrees = LOOK_DEGREES
         used_counts = (7, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8)
         for row, used in enumerate(used_counts):
@@ -38,6 +48,9 @@ class AnimationCatalog:
                 visible = _has_visible_pixel(self._cell(row, column))
                 if visible is not (column < used):
                     raise ValueError(f"unexpected occupancy at row {row} column {column}")
+        self._icon_image = self._cell(*self.icon_frame)
+        if not _has_visible_pixel(self._icon_image):
+            raise ValueError("iconFrame must select a visible atlas cell")
         self._actions = {
             action: tuple(
                 FrameAsset(self._cell(spec.row, column), spec.row, column)
@@ -64,6 +77,7 @@ class AnimationCatalog:
             QImage(str(definition.spritesheet_path)),
             pet_id=definition.pet_id,
             display_name=definition.display_name,
+            icon_frame=definition.icon_frame,
         )
 
     def _cell(self, row: int, column: int) -> QImage:
@@ -71,6 +85,9 @@ class AnimationCatalog:
 
     def frames(self, action: ActionId) -> tuple[FrameAsset, ...]:
         return self._actions[action]
+
+    def icon_image(self) -> QImage:
+        return self._icon_image.copy()
 
     def look_frame(self, degrees: float) -> FrameAsset:
         index = round(degrees / 22.5)
