@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QBitmap, QMouseEvent, QPaintEvent, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -24,7 +24,8 @@ class PetWindow(QWidget):
         self._catalog = catalog
         self._current_frame: FrameAsset | None = None
         self._scale_percent = 100
-        self._drag_offset: QPoint | None = None
+        self._pending_press_offset: QPointF | None = None
+        self._drag_active = False
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -70,6 +71,7 @@ class PetWindow(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            self._clear_drag_state()
             self.action_requested.emit(ActionId.JUMP)
             event.accept()
             return
@@ -77,8 +79,8 @@ class PetWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = event.position().toPoint()
-            self.drag_started.emit()
+            self._pending_press_offset = QPointF(event.position())
+            self._drag_active = False
             event.accept()
             return
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -92,18 +94,32 @@ class PetWindow(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._drag_offset is not None:
-            target = event.globalPosition().toPoint() - self._drag_offset
+        offset = self._pending_press_offset
+        if offset is not None:
+            if not self._drag_active:
+                if event.position() == offset:
+                    event.accept()
+                    return
+                self._drag_active = True
+                self.drag_started.emit()
+            target = (event.globalPosition() - offset).toPoint()
             self.drag_moved.emit(target)
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_offset is not None:
-            target = event.globalPosition().toPoint() - self._drag_offset
-            self._drag_offset = None
-            self.drag_finished.emit(target)
+        offset = self._pending_press_offset
+        if event.button() == Qt.MouseButton.LeftButton and offset is not None:
+            was_dragging = self._drag_active
+            target = (event.globalPosition() - offset).toPoint() if was_dragging else None
+            self._clear_drag_state()
+            if target is not None:
+                self.drag_finished.emit(target)
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def _clear_drag_state(self) -> None:
+        self._pending_press_offset = None
+        self._drag_active = False

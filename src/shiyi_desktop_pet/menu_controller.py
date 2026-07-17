@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import Callable
 
@@ -10,6 +11,10 @@ from PySide6.QtWidgets import QMenu, QWidget
 
 from .models import ActionId
 from .settings import AppSettings
+
+
+_LOGGER = logging.getLogger(__name__)
+ErrorReporter = Callable[[str, str], None] | logging.Logger
 
 
 @dataclass(frozen=True)
@@ -134,10 +139,12 @@ class MenuController:
         settings_supplier: Callable[[], AppSettings],
         startup_supplier: Callable[[], bool],
         dispatch: Callable[[MenuCommand], None],
+        error_reporter: ErrorReporter | None = None,
     ) -> None:
         self._settings_supplier = settings_supplier
         self._startup_supplier = startup_supplier
         self._dispatch = dispatch
+        self._error_reporter = error_reporter if error_reporter is not None else _LOGGER
         self._menus: list[QMenu] = []
 
     @property
@@ -165,8 +172,20 @@ class MenuController:
         return menu
 
     def refresh(self, menu: QMenu) -> None:
-        settings = self._settings_supplier()
-        startup_enabled = bool(self._startup_supplier())
+        try:
+            settings = self._settings_supplier()
+            if not isinstance(settings, AppSettings):
+                raise TypeError("settings supplier returned an invalid value")
+        except Exception as error:
+            settings = AppSettings()
+            self._report_supplier_error("settings supplier", error)
+
+        try:
+            startup_enabled = bool(self._startup_supplier())
+        except Exception as error:
+            startup_enabled = False
+            self._report_supplier_error("startup supplier", error)
+
         bindings = menu._shiyi_bindings
         for binding in bindings:
             source = binding.item.checked_from
@@ -179,6 +198,17 @@ class MenuController:
             )
             expected = binding.item.checked_value
             binding.action.setChecked(bool(actual) if expected is None else actual == expected)
+
+    def _report_supplier_error(self, context: str, error: Exception) -> None:
+        error_type = type(error).__name__
+        try:
+            warning = getattr(self._error_reporter, "warning", None)
+            if callable(warning):
+                warning("%s failed (%s)", context, error_type)
+            else:
+                self._error_reporter(context, error_type)
+        except Exception:
+            _LOGGER.warning("menu error reporter failed for %s (%s)", context, error_type)
 
     def _populate(
         self,

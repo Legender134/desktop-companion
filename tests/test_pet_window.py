@@ -1,4 +1,5 @@
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.models import ActionId
@@ -25,13 +26,16 @@ def test_window_uses_frame_mask_and_emits_mouse_intents(qtbot):
     with qtbot.waitSignal(window.menu_requested):
         qtbot.mouseClick(window, Qt.RightButton, pos=QPoint(96, 150))
 
-    with qtbot.waitSignal(window.drag_started):
-        qtbot.mousePress(window, Qt.LeftButton, pos=QPoint(96, 150))
-    with qtbot.waitSignal(window.drag_moved) as moved:
-        qtbot.mouseMove(window, pos=QPoint(110, 160))
-    assert moved.args == [window.mapToGlobal(QPoint(14, 10))]
-    with qtbot.waitSignal(window.drag_finished):
-        qtbot.mouseRelease(window, Qt.LeftButton, pos=QPoint(110, 160))
+    drag_events = []
+    window.drag_started.connect(lambda: drag_events.append(("started", None)))
+    window.drag_moved.connect(lambda target: drag_events.append(("moved", target)))
+    window.drag_finished.connect(lambda target: drag_events.append(("finished", target)))
+    qtbot.mousePress(window, Qt.LeftButton, pos=QPoint(96, 150))
+    assert drag_events == []
+    qtbot.mouseMove(window, pos=QPoint(110, 160))
+    qtbot.mouseRelease(window, Qt.LeftButton, pos=QPoint(110, 160))
+    target = window.mapToGlobal(QPoint(14, 10))
+    assert drag_events == [("started", None), ("moved", target), ("finished", target)]
 
 
 def test_mask_and_size_follow_frame_scale(qtbot):
@@ -96,3 +100,104 @@ def test_drag_target_uses_global_mouse_position_minus_press_offset(qtbot):
     expected = window.mapToGlobal(move_position) - press_position
     assert moved.args == [expected]
     qtbot.mouseRelease(window, Qt.LeftButton, pos=move_position)
+
+
+def _mouse_event(
+    event_type: QEvent.Type,
+    local: QPointF,
+    global_position: QPointF,
+    button: Qt.MouseButton,
+    buttons: Qt.MouseButton,
+) -> QMouseEvent:
+    return QMouseEvent(
+        event_type,
+        local,
+        global_position,
+        button,
+        buttons,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def test_realistic_double_click_emits_only_jump_and_no_drag_transaction(qtbot):
+    catalog = AnimationCatalog.load_default()
+    window = PetWindow(catalog)
+    qtbot.addWidget(window)
+    window.set_frame(catalog.frames(ActionId.IDLE)[0], scale_percent=100)
+    events = []
+    window.drag_started.connect(lambda: events.append("drag_started"))
+    window.drag_moved.connect(lambda target: events.append(("drag_moved", target)))
+    window.drag_finished.connect(lambda target: events.append(("drag_finished", target)))
+    window.action_requested.connect(lambda action: events.append(("action", action)))
+    local = QPointF(96.0, 150.0)
+    global_position = QPointF(416.0, 390.0)
+
+    window.mousePressEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonPress,
+            local,
+            global_position,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseReleaseEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonRelease,
+            local,
+            global_position,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+        )
+    )
+    window.mouseDoubleClickEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonDblClick,
+            local,
+            global_position,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseReleaseEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonRelease,
+            local,
+            global_position,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+        )
+    )
+
+    assert events == [("action", ActionId.JUMP)]
+
+
+def test_fractional_drag_subtracts_before_rounding(qtbot):
+    catalog = AnimationCatalog.load_default()
+    window = PetWindow(catalog)
+    qtbot.addWidget(window)
+    window.set_frame(catalog.frames(ActionId.IDLE)[0], scale_percent=100)
+    events = []
+    window.drag_started.connect(lambda: events.append(("started", None)))
+    window.drag_moved.connect(lambda target: events.append(("moved", target)))
+
+    window.mousePressEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonPress,
+            QPointF(10.6, 20.6),
+            QPointF(100.6, 200.6),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    window.mouseMoveEvent(
+        _mouse_event(
+            QEvent.Type.MouseMove,
+            QPointF(40.4, 60.4),
+            QPointF(130.4, 240.4),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+        )
+    )
+
+    assert events == [("started", None), ("moved", QPoint(120, 220))]

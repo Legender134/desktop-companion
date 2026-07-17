@@ -25,6 +25,14 @@ def _submenu(menu, label):
     return action.menu()
 
 
+def _leaf_items(items):
+    for item in items:
+        if item.children:
+            yield from _leaf_items(item.children)
+        else:
+            yield item
+
+
 def test_menu_contains_every_action_direction_and_toggle():
     menu_controller = MenuController(
         settings_supplier=AppSettings,
@@ -155,3 +163,88 @@ def test_available_tray_reuses_menu_and_double_click_recovers_pet(monkeypatch, q
     assert calls == ["show", "raise", "activate"]
     assert tray.tray_icon.contextMenu() is tray.menu
     tray.hide()
+
+
+def test_supplier_failures_fall_back_report_and_do_not_escape_refresh(qtbot):
+    reported = []
+
+    def broken_settings():
+        raise RuntimeError("private settings detail")
+
+    def broken_startup():
+        raise OSError("private registry detail")
+
+    controller = MenuController(
+        broken_settings,
+        broken_startup,
+        lambda command: None,
+        error_reporter=lambda context, error_type: reported.append((context, error_type)),
+    )
+    menu = controller.create_menu()
+
+    controller.refresh(menu)
+
+    assert not _action(menu, "自动闲逛").isChecked()
+    assert _action(menu, "看向鼠标").isChecked()
+    assert _action(menu, "100%").isChecked()
+    assert not _action(menu, "开机启动").isChecked()
+    expected_reports = [
+        ("settings supplier", "RuntimeError"),
+        ("startup supplier", "OSError"),
+    ]
+    assert reported == expected_reports
+    assert all("private" not in part for report in reported for part in report)
+
+    reported.clear()
+    menu.aboutToShow.emit()
+    assert reported == expected_reports
+
+
+def test_command_model_has_complete_exact_payload_table():
+    controller = MenuController(AppSettings, lambda: False, lambda command: None)
+    commands = [item.command for item in _leaf_items(controller.items)]
+    action_commands = [command for command in commands if command.kind == "action"]
+    look_commands = [command for command in commands if command.kind == "look"]
+    toggle_commands = [command for command in commands if command.kind == "toggle"]
+    scale_commands = [command for command in commands if command.kind == "scale"]
+    speed_commands = [
+        command
+        for command in commands
+        if command.kind in {"animation_speed", "movement_speed"}
+    ]
+    terminal_commands = [
+        command for command in commands if command.kind in {"center", "about", "quit"}
+    ]
+
+    assert action_commands == [
+        MenuCommand("action", ActionId.IDLE),
+        MenuCommand("action", ActionId.RUN_RIGHT),
+        MenuCommand("action", ActionId.RUN_LEFT),
+        MenuCommand("action", ActionId.WAVE),
+        MenuCommand("action", ActionId.JUMP),
+        MenuCommand("action", ActionId.BELLY_FLOP),
+        MenuCommand("action", ActionId.EXPECT),
+        MenuCommand("action", ActionId.PATROL),
+        MenuCommand("action", ActionId.CURIOUS),
+        MenuCommand("action", ActionId.RANDOM),
+    ]
+    assert look_commands == [MenuCommand("look", index * 22.5) for index in range(16)]
+    assert [command.target for command in toggle_commands] == [
+        "wander_enabled",
+        "gaze_enabled",
+        "hover_digits_enabled",
+        "always_on_top",
+        "startup_enabled",
+    ]
+    assert all(command.value is None for command in toggle_commands)
+    assert scale_commands == [MenuCommand("scale", value) for value in (75, 100, 125, 150)]
+    assert speed_commands == [
+        MenuCommand(kind, value)
+        for kind in ("animation_speed", "movement_speed")
+        for value in ("slow", "normal", "fast")
+    ]
+    assert terminal_commands == [
+        MenuCommand("center"),
+        MenuCommand("about"),
+        MenuCommand("quit"),
+    ]
