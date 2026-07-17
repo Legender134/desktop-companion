@@ -51,9 +51,7 @@ class SettingsStore:
                 parser.read_file(settings_file)
             if "settings" not in parser:
                 raise ValueError("missing [settings] section")
-            schema_version = self._read_int(
-                parser["settings"], "schema_version", CURRENT_SCHEMA_VERSION
-            )
+            schema_version = self._read_schema_version(parser["settings"])
             if schema_version > CURRENT_SCHEMA_VERSION:
                 raise ValueError(f"unsupported schema version {schema_version}")
             if schema_version < 0:
@@ -107,6 +105,16 @@ class SettingsStore:
             self._read_float(section, "relative_y", defaults.relative_y), defaults.relative_y
         )
         return AppSettings(**values)
+
+    @staticmethod
+    def _read_schema_version(section: configparser.SectionProxy) -> int:
+        """Read a present schema marker strictly; absent markers predate versioning."""
+        if "schema_version" not in section:
+            return CURRENT_SCHEMA_VERSION
+        try:
+            return int(section["schema_version"])
+        except ValueError as error:
+            raise ValueError("malformed schema version") from error
 
     @staticmethod
     def _read_bool(section: configparser.SectionProxy, name: str, default: bool) -> bool:
