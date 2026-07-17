@@ -290,6 +290,7 @@ class LowLevelKeyboardHook(QObject):
         enabled: bool = True,
         parent: QObject | None = None,
         backend_factory: Callable[[], _KeyboardBackend] | None = None,
+        thread_factory: Callable[..., threading.Thread] | None = None,
     ) -> None:
         super().__init__(parent)
         if not callable(hover_hit_test):
@@ -297,8 +298,11 @@ class LowLevelKeyboardHook(QObject):
 
         self._input_snapshot = _HookInputSnapshot(bool(enabled), hover_hit_test)
         self._backend_factory = backend_factory or _WindowsKeyboardBackend
+        self._thread_factory = thread_factory or threading.Thread
         self._condition = threading.Condition(threading.RLock())
         self._state = HookLifecycleState.STOPPED
+        self._generation = 0
+        self._generation_results: dict[int, KeyboardHookError | None] = {}
         self._last_error: KeyboardHookError | None = None
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
@@ -369,6 +373,8 @@ class LowLevelKeyboardHook(QObject):
                 raise self._last_error or KeyboardHookError("keyboard hook failed")
 
             if self._state is HookLifecycleState.STOPPED:
+                self._generation += 1
+                installation_generation = self._generation
                 self._engine = KeyboardDecisionEngine()
                 self._stop_requested = False
                 self._control_error = None
@@ -378,24 +384,54 @@ class LowLevelKeyboardHook(QObject):
                 self._callback = None
                 self._hook_handle = None
                 self._state = HookLifecycleState.STARTING
-                self._thread = threading.Thread(
-                    target=self._run_hook_worker,
-                    name="ShiyiKeyboardHook",
-                    daemon=False,
-                )
-                self._thread.start()
+                try:
+                    thread = self._thread_factory(
+                        target=lambda: self._run_hook_worker(
+                            installation_generation
+                        ),
+                        name="ShiyiKeyboardHook",
+                        daemon=False,
+                    )
+                except BaseException:
+                    error = KeyboardHookError(
+                        "keyboard hook thread construction failed"
+                    )
+                    self._thread = None
+                    self._last_error = error
+                    self._generation_results[installation_generation] = error
+                    self._state = HookLifecycleState.FAILED
+                    self._condition.notify_all()
+                    self._publish_failure(str(error))
+                    raise error
+
+                self._thread = thread
+                try:
+                    thread.start()
+                except BaseException:
+                    error = KeyboardHookError("keyboard hook thread start failed")
+                    self._thread = None
+                    self._last_error = error
+                    self._generation_results[installation_generation] = error
+                    self._state = HookLifecycleState.FAILED
+                    self._condition.notify_all()
+                    self._publish_failure(str(error))
+                    raise error
+            else:
+                installation_generation = self._generation
 
             installation_thread = self._thread
             try:
                 while (
-                    self._thread is installation_thread
+                    self._generation == installation_generation
+                    and self._thread is installation_thread
                     and self._state
                     in (HookLifecycleState.STARTING, HookLifecycleState.STOPPING)
                 ):
                     self._wait_locked(deadline, "keyboard hook start timed out")
             except TimeoutError:
                 if (
-                    self._thread is installation_thread
+                    self._generation == installation_generation
+                    and self._thread is installation_thread
                     and self._state is HookLifecycleState.STARTING
                 ):
                     self._stop_requested = True
@@ -404,12 +440,23 @@ class LowLevelKeyboardHook(QObject):
                 raise
 
             if (
-                self._thread is installation_thread
+                self._generation == installation_generation
+                and self._thread is installation_thread
                 and self._state is HookLifecycleState.RUNNING
             ):
                 return
-            if self._state is HookLifecycleState.FAILED:
-                raise self._last_error or KeyboardHookError("keyboard hook start failed")
+            generation_result = self._generation_results.get(
+                installation_generation
+            )
+            if generation_result is not None:
+                raise generation_result
+            if (
+                self._generation == installation_generation
+                and self._state is HookLifecycleState.FAILED
+            ):
+                raise self._last_error or KeyboardHookError(
+                    "keyboard hook start failed"
+                )
             raise KeyboardHookError("keyboard hook start was cancelled")
 
     def stop(self, timeout: float = 2.0) -> None:
@@ -458,13 +505,13 @@ class LowLevelKeyboardHook(QObject):
                 backend = self._backend
                 thread_id = self._thread_id
                 thread = self._thread
+                stop_generation = self._generation
 
         if retry is not None:
             backend, handle = retry
             self._retry_failed_unhook(backend, handle)
             return
 
-        post_error = None
         if (
             backend is not None
             and thread_id is not None
@@ -476,21 +523,45 @@ class LowLevelKeyboardHook(QObject):
             except BaseException:
                 posted = False
             if not posted:
-                post_error = KeyboardHookError("keyboard hook shutdown request failed")
+                post_error = KeyboardHookError(
+                    "keyboard hook shutdown request failed"
+                )
                 with self._condition:
-                    self._control_error = post_error
+                    if (
+                        self._generation == stop_generation
+                        and self._thread is thread
+                        and thread.is_alive()
+                        and self._state is HookLifecycleState.STOPPING
+                    ):
+                        self._stop_requested = False
+                        self._control_error = None
+                        self._last_error = post_error
+                        self._state = HookLifecycleState.RUNNING
+                        self._condition.notify_all()
+                        self._publish_failure(str(post_error))
+                        raise post_error
 
         if thread is not None:
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(remaining)
             if thread.is_alive():
-                if post_error is not None:
-                    raise post_error
                 raise TimeoutError("keyboard hook shutdown timed out")
 
         with self._condition:
+            result_known = stop_generation in self._generation_results
+            generation_result = self._generation_results.get(stop_generation)
+            if result_known:
+                if generation_result is not None:
+                    raise generation_result
+                return
+            if self._generation != stop_generation:
+                raise KeyboardHookError(
+                    "keyboard hook shutdown result unavailable"
+                )
             if self._state is HookLifecycleState.FAILED:
-                raise self._last_error or KeyboardHookError("keyboard hook shutdown failed")
+                raise self._last_error or KeyboardHookError(
+                    "keyboard hook shutdown failed"
+                )
             if self._state is not HookLifecycleState.STOPPED:
                 raise KeyboardHookError("keyboard hook shutdown did not complete")
 
@@ -531,6 +602,7 @@ class LowLevelKeyboardHook(QObject):
                 self._callback = None
                 self._backend = None
                 self._thread_id = None
+            self._generation_results[self._generation] = None
             self._reset_stopped_locked()
 
     def _reset_stopped_locked(self) -> None:
@@ -540,7 +612,7 @@ class LowLevelKeyboardHook(QObject):
         self._state = HookLifecycleState.STOPPED
         self._condition.notify_all()
 
-    def _run_hook_worker(self) -> None:
+    def _run_hook_worker(self, generation: int) -> None:
         backend: _KeyboardBackend | None = None
         callback: object | None = None
         hook_handle: object | None = None
@@ -552,6 +624,8 @@ class LowLevelKeyboardHook(QObject):
             backend = self._backend_factory()
             thread_id = backend.prepare()
             with self._condition:
+                if generation != self._generation:
+                    return
                 self._backend = backend
                 self._thread_id = thread_id
                 self._condition.notify_all()
@@ -560,6 +634,8 @@ class LowLevelKeyboardHook(QObject):
 
             callback = backend.make_callback(self._native_callback_no_throw)
             with self._condition:
+                if generation != self._generation:
+                    return
                 self._callback = callback
 
             hook_handle = backend.install(callback)
@@ -570,6 +646,8 @@ class LowLevelKeyboardHook(QObject):
                 )
 
             with self._condition:
+                if generation != self._generation:
+                    return
                 self._hook_handle = hook_handle
                 if self._stop_requested:
                     self._state = HookLifecycleState.STOPPING
@@ -614,28 +692,34 @@ class LowLevelKeyboardHook(QObject):
                     public_error = KeyboardHookError("keyboard hook unhook failed")
 
             with self._condition:
-                if public_error is None and self._control_error is not None:
+                if (
+                    generation == self._generation
+                    and public_error is None
+                    and self._control_error is not None
+                ):
                     public_error = self._control_error
 
-                self._engine = KeyboardDecisionEngine()
-                self._stop_requested = False
-                self._control_error = None
-                self._thread_id = None
+                self._generation_results[generation] = public_error
+                if generation == self._generation:
+                    self._engine = KeyboardDecisionEngine()
+                    self._stop_requested = False
+                    self._control_error = None
+                    self._thread_id = None
 
-                if unhook_confirmed:
-                    self._hook_handle = None
-                    self._callback = None
-                    self._backend = None
-                else:
-                    self._hook_handle = hook_handle
-                    self._callback = callback
-                    self._backend = backend
+                    if unhook_confirmed:
+                        self._hook_handle = None
+                        self._callback = None
+                        self._backend = None
+                    else:
+                        self._hook_handle = hook_handle
+                        self._callback = callback
+                        self._backend = backend
 
-                if public_error is not None:
-                    self._last_error = public_error
-                    self._state = HookLifecycleState.FAILED
-                else:
-                    self._state = HookLifecycleState.STOPPED
+                    if public_error is not None:
+                        self._last_error = public_error
+                        self._state = HookLifecycleState.FAILED
+                    else:
+                        self._state = HookLifecycleState.STOPPED
                 self._condition.notify_all()
 
             if public_error is not None:

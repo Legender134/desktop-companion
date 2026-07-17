@@ -73,6 +73,7 @@ class FakeKeyboardBackend:
         message_result=0,
         message_gate=None,
         post_result=True,
+        post_results=None,
         post_gate=None,
         unhook_results=(True,),
         invoke_vk=None,
@@ -84,6 +85,9 @@ class FakeKeyboardBackend:
         self.message_result = message_result
         self.message_gate = message_gate
         self.post_result = post_result
+        self.post_results = (
+            deque(post_results) if post_results is not None else None
+        )
         self.post_gate = post_gate
         self.unhook_results = deque(unhook_results)
         self.invoke_vk = invoke_vk
@@ -130,7 +134,7 @@ class FakeKeyboardBackend:
         if self.message_gate is not None:
             assert self.message_gate.wait(2)
         else:
-            assert self.quit_requested.wait(2)
+            self.quit_requested.wait()
         return self.message_result
 
     def post_quit(self, thread_id):
@@ -138,8 +142,16 @@ class FakeKeyboardBackend:
         self.post_entered.set()
         if self.post_gate is not None:
             assert self.post_gate.wait(2)
-        self.quit_requested.set()
-        return self.post_result
+        result = (
+            self.post_results.popleft()
+            if self.post_results is not None
+            else self.post_result
+        )
+        if isinstance(result, BaseException):
+            raise result
+        if result:
+            self.quit_requested.set()
+        return result
 
     def unhook(self, handle):
         self.unhook_calls += 1
@@ -329,6 +341,145 @@ def test_concurrent_stop_callers_share_one_shutdown_request():
     assert not first.is_alive() and not second.is_alive()
 
 
+@pytest.mark.parametrize(
+    "failed_post",
+    (False, OSError("post failed before enqueue")),
+)
+def test_failed_post_without_queue_release_can_be_retried(failed_post):
+    backend = FakeKeyboardBackend(post_results=(failed_post, True))
+    hook = LowLevelKeyboardHook(lambda: False, backend_factory=lambda: backend)
+    hook.start()
+    worker_thread = hook._thread
+
+    started_at = time.monotonic()
+    try:
+        with pytest.raises(KeyboardHookError, match="shutdown request"):
+            hook.stop(timeout=0.2)
+        assert time.monotonic() - started_at < 0.2
+        assert backend.post_calls == 1
+        assert not backend.quit_requested.is_set()
+        assert hook.state is HookLifecycleState.RUNNING
+        assert hook.is_running
+        assert isinstance(hook.last_error, KeyboardHookError)
+
+        hook.stop(timeout=1.0)
+        assert backend.post_calls == 2
+        assert backend.quit_requested.is_set()
+        assert backend.unhook_calls == 1
+        assert hook.state is HookLifecycleState.STOPPED
+    finally:
+        backend.quit_requested.set()
+        worker_thread.join(1.0)
+        for _ in range(2):
+            try:
+                hook.stop(timeout=1.0)
+            except (KeyboardHookError, TimeoutError):
+                pass
+        assert not any(
+            thread.name == "ShiyiKeyboardHook" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+
+def test_old_stop_validates_its_generation_while_new_start_runs():
+    old_backend = FakeKeyboardBackend()
+    new_backend = FakeKeyboardBackend()
+    backends = deque((old_backend, new_backend))
+    old_joined = threading.Event()
+    release_old_join = threading.Event()
+    thread_count = 0
+
+    class GatedJoinThread(threading.Thread):
+        def join(self, timeout=None):
+            super().join(timeout)
+            if not self.is_alive():
+                old_joined.set()
+                assert release_old_join.wait(2)
+
+    def thread_factory(**kwargs):
+        nonlocal thread_count
+        thread_count += 1
+        if thread_count == 1:
+            return GatedJoinThread(**kwargs)
+        return threading.Thread(**kwargs)
+
+    hook = LowLevelKeyboardHook(
+        lambda: False,
+        backend_factory=lambda: backends.popleft(),
+        thread_factory=thread_factory,
+    )
+    stop_errors = []
+    start_errors = []
+    hook.start()
+    stopper = threading.Thread(target=lambda: _capture_error(hook.stop, stop_errors))
+    starter = threading.Thread(target=lambda: _capture_error(hook.start, start_errors))
+
+    stopper.start()
+    assert old_backend.post_entered.wait(2)
+    starter.start()
+    assert old_joined.wait(2)
+    assert new_backend.installed.wait(2)
+    assert hook.state is HookLifecycleState.RUNNING
+    release_old_join.set()
+    stopper.join(2)
+    starter.join(2)
+
+    assert stop_errors == []
+    assert start_errors == []
+    assert hook.state is HookLifecycleState.RUNNING
+    assert hook._backend is new_backend
+    hook.stop()
+    assert not stopper.is_alive() and not starter.is_alive()
+
+
+@pytest.mark.parametrize("failure_mode", ("construction", "start"))
+def test_thread_creation_failures_are_sanitized_and_reusable(failure_mode):
+    backend = FakeKeyboardBackend()
+    attempts = 0
+
+    class StartFailingThread(threading.Thread):
+        def start(self):
+            raise OSError("raw thread start detail")
+
+        def join(self, timeout=None):
+            raise AssertionError("an unstarted thread must never be joined")
+
+    def thread_factory(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1 and failure_mode == "construction":
+            raise OSError("raw thread construction detail")
+        if attempts == 1:
+            return StartFailingThread(**kwargs)
+        return threading.Thread(**kwargs)
+
+    hook = LowLevelKeyboardHook(
+        lambda: False,
+        backend_factory=lambda: backend,
+        thread_factory=thread_factory,
+    )
+
+    with pytest.raises(KeyboardHookError, match="thread"):
+        hook.start()
+    assert hook.state is HookLifecycleState.FAILED
+    assert isinstance(hook.last_error, KeyboardHookError)
+    assert "raw thread" not in str(hook.last_error)
+    assert attempts == 1
+
+    with pytest.raises(KeyboardHookError, match="thread"):
+        hook.start()
+    assert attempts == 1
+    hook.stop()
+    hook.stop()
+    assert hook.state is HookLifecycleState.STOPPED
+
+    hook.start()
+    assert hook.state is HookLifecycleState.RUNNING
+    hook.stop()
+    assert attempts == 2
+    assert not hook.is_running
+
+
 def _capture_error(call, errors):
     try:
         call()
@@ -353,20 +504,6 @@ def test_runtime_message_failure_sets_last_error_and_queues_failure(qapp):
     with pytest.raises(KeyboardHookError, match="message loop"):
         hook.start()
     hook.stop()
-
-
-def test_zero_post_result_is_reported_without_leaking_thread():
-    backend = FakeKeyboardBackend(post_result=False)
-    hook = LowLevelKeyboardHook(lambda: False, backend_factory=lambda: backend)
-    hook.start()
-
-    with pytest.raises(KeyboardHookError, match="shutdown"):
-        hook.stop()
-
-    assert hook.state is HookLifecycleState.FAILED
-    assert not hook.is_running
-    hook.stop()
-    assert hook.state is HookLifecycleState.STOPPED
 
 
 def test_failed_unhook_retains_callback_until_retry_succeeds():
