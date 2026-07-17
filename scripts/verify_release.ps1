@@ -22,9 +22,15 @@ param(
 
     [switch]$InternalMutexContentionAttempt,
 
+    [switch]$InternalMutexHolderProbe,
+
     [string]$InternalProbeToken,
 
     [string]$InternalVerificationId,
+
+    [string]$InternalMutexReadyPath,
+
+    [string]$InternalMutexReleasePath,
 
     [ValidateRange(1, 3600)]
     [int]$UninstallTimeoutSeconds = 180
@@ -39,8 +45,13 @@ $workRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'work'))
 $installerPath = (Resolve-Path -LiteralPath $Installer -ErrorAction Stop).Path
 $testDirPath = [System.IO.Path]::GetFullPath($TestDir)
 $upgradeDirPath = [System.IO.Path]::GetFullPath("$testDirPath-upgrade")
-$internalProductionProbe = $InjectSafeFunctionalFailureAfterStateCapture -or $InternalMutexContentionAttempt
-if ($InjectSafeFunctionalFailureAfterStateCapture -and $InternalMutexContentionAttempt) {
+$internalProbeModeCount = @(
+    $InjectSafeFunctionalFailureAfterStateCapture,
+    $InternalMutexContentionAttempt,
+    $InternalMutexHolderProbe
+).Where({ $_ }).Count
+$internalProductionProbe = $internalProbeModeCount -ne 0
+if ($internalProbeModeCount -gt 1) {
     throw 'Only one internal production probe mode may be selected'
 }
 if ($internalProductionProbe) {
@@ -53,10 +64,18 @@ if ($internalProductionProbe) {
         throw 'Internal production probe requires a matching wrapper token, a lowercase 32-hex verification ID, and a production-flow invocation'
     }
     $verificationId = $InternalVerificationId
+    if ($InternalMutexHolderProbe) {
+        if (-not $InternalMutexReadyPath -or -not $InternalMutexReleasePath) {
+            throw 'Internal mutex holder requires ready and release paths'
+        }
+    }
+    elseif ($InternalMutexReadyPath -or $InternalMutexReleasePath) {
+        throw 'Internal mutex ready/release paths are valid only with the internal holder probe'
+    }
 }
 else {
-    if ($InternalProbeToken -or $InternalVerificationId) {
-        throw 'InternalProbeToken and InternalVerificationId are valid only with an internal production probe'
+    if ($InternalProbeToken -or $InternalVerificationId -or $InternalMutexReadyPath -or $InternalMutexReleasePath) {
+        throw 'Internal probe token, verification ID, and holder paths are valid only with an internal production probe'
     }
     $verificationId = [guid]::NewGuid().ToString('N')
 }
@@ -75,7 +94,25 @@ $allJobTreesQuiescent = $true
 $rollbackSafetyUnknown = $false
 $rollbackSafetyReasons = [System.Collections.Generic.List[string]]::new()
 $uninstallLaunchCount = 0
-$releaseVerificationMutexName = 'Local\ShiyiDesktopPet.ReleaseVerify.v1'
+$windowsIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+try {
+    if ($null -eq $windowsIdentity.User) {
+        throw 'Current Windows identity has no user SID'
+    }
+    $currentUserSidValue = $windowsIdentity.User.Value
+}
+finally {
+    $windowsIdentity.Dispose()
+}
+$currentUserSid = [System.Security.Principal.SecurityIdentifier]::new($currentUserSidValue)
+if ($currentUserSid.Value -cne $currentUserSidValue) {
+    throw "Current-user SID was not canonical: $currentUserSidValue"
+}
+$localSystemSid = [System.Security.Principal.SecurityIdentifier]::new(
+    [System.Security.Principal.WellKnownSidType]::LocalSystemSid,
+    $null
+)
+$releaseVerificationMutexName = "Global\ShiyiDesktopPet.ReleaseVerify.$currentUserSidValue.v1"
 
 if ($null -eq ('ShiyiVerifier.JobObject' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -941,11 +978,80 @@ function Format-ExceptionDetails {
     return ($parts -join ' -> INNER: ')
 }
 
+function New-ReleaseVerificationMutexSecurity {
+    $security = [System.Security.AccessControl.MutexSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner($currentUserSid)
+    foreach ($sid in @($currentUserSid, $localSystemSid)) {
+        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new(
+            $sid,
+            [System.Security.AccessControl.MutexRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        ))
+    }
+    return $security
+}
+
+function Assert-ReleaseVerificationMutexAcl {
+    param([Parameter(Mandatory = $true)][System.Threading.Mutex]$Mutex)
+
+    $security = [System.Threading.ThreadingAclExtensions]::GetAccessControl($Mutex)
+    if (-not $security.AreAccessRulesProtected) {
+        throw 'Release-verification mutex DACL is not protected from inheritance'
+    }
+    $owner = $security.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($owner -cne $currentUserSidValue) {
+        throw "Release-verification mutex owner is not the current user SID: $owner"
+    }
+    $rules = @($security.GetAccessRules(
+        $true,
+        $false,
+        [System.Security.Principal.SecurityIdentifier]
+    ))
+    $allowedSids = @($currentUserSidValue, $localSystemSid.Value)
+    if ($rules.Count -ne 2) {
+        throw "Release-verification mutex must have exactly two explicit DACL entries, found $($rules.Count)"
+    }
+    foreach ($rule in $rules) {
+        $sid = $rule.IdentityReference.Value
+        if ($sid -notin $allowedSids) {
+            throw "Release-verification mutex DACL contains a broad or unexpected principal: $sid"
+        }
+        if (
+            $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+            $rule.MutexRights -ne [System.Security.AccessControl.MutexRights]::FullControl -or
+            $rule.IsInherited
+        ) {
+            throw "Release-verification mutex DACL entry is not explicit FullControl Allow: SID=$sid rights=$($rule.MutexRights) type=$($rule.AccessControlType) inherited=$($rule.IsInherited)"
+        }
+    }
+    foreach ($requiredSid in $allowedSids) {
+        if (@($rules | Where-Object { $_.IdentityReference.Value -ceq $requiredSid }).Count -ne 1) {
+            throw "Release-verification mutex DACL does not contain exactly one rule for $requiredSid"
+        }
+    }
+    return [pscustomobject]@{
+        Protected = $true
+        Owner = $owner
+        Rules = @($rules | Sort-Object { $_.IdentityReference.Value } | ForEach-Object {
+            "$($_.IdentityReference.Value):$($_.MutexRights):$($_.AccessControlType)"
+        })
+    }
+}
+
 function Enter-ReleaseVerificationMutex {
     $createdNew = $false
-    $mutex = [System.Threading.Mutex]::new($false, $releaseVerificationMutexName, [ref]$createdNew)
+    $mutexSecurity = New-ReleaseVerificationMutexSecurity
+    $mutex = [System.Threading.MutexAcl]::Create(
+        $false,
+        $releaseVerificationMutexName,
+        [ref]$createdNew,
+        $mutexSecurity
+    )
     $acquired = $false
     try {
+        $acl = Assert-ReleaseVerificationMutexAcl -Mutex $mutex
+        Write-Host "RELEASE VERIFY MUTEX ACL: name=$releaseVerificationMutexName; protected=$($acl.Protected); owner=$($acl.Owner); rules=$($acl.Rules -join ','); broad-principal=false"
         try {
             $acquired = $mutex.WaitOne(0)
         }
@@ -1618,40 +1724,88 @@ function Invoke-MutexContentionProbe {
     $beforeState = Convert-ProtectedProductStateToJson -Snapshot (Get-ProtectedProductStateSnapshot)
     $beforeWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
     $token = [guid]::NewGuid().ToString('N')
+    $holderToken = [guid]::NewGuid().ToString('N')
+    $fixtureToken = [guid]::NewGuid().ToString('N')
     $probeVerificationId = [guid]::NewGuid().ToString('N')
+    $holderVerificationId = [guid]::NewGuid().ToString('N')
     $expectedBackup = [System.IO.Path]::GetFullPath((Join-Path $workRoot "release-verify-$probeVerificationId"))
+    $holderBackup = [System.IO.Path]::GetFullPath((Join-Path $workRoot "release-verify-$holderVerificationId"))
+    $probeRoot = [System.IO.Path]::GetFullPath((Join-Path $workRoot "global-mutex-probe-$fixtureToken"))
+    $ownershipMarker = Join-Path $probeRoot '.sdd-global-mutex-probe-owner'
+    $readyPath = Join-Path $probeRoot 'holder.ready'
+    $releasePath = Join-Path $probeRoot 'holder.release'
     $oldToken = $env:SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN
-    $ready = [System.Threading.ManualResetEventSlim]::new($false)
-    $release = [System.Threading.ManualResetEventSlim]::new($false)
-    $holderRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $holder = [System.Management.Automation.PowerShell]::Create()
-    $async = $null
-    $holderEnded = $false
-    $holderFailure = $null
-    $probeAssertionsPassed = $false
+    $holder = $null
+    $holderExited = $false
+    $probeRootCreated = $false
     try {
-        $holderRunspace.Open()
-        $holder.Runspace = $holderRunspace
-        [void]$holder.AddScript(@'
-param($MutexName, $Ready, $Release)
-$ErrorActionPreference = 'Stop'
-$createdNew = $false
-$mutex = [System.Threading.Mutex]::new($false, $MutexName, [ref]$createdNew)
-$acquired = $false
-try {
-    $acquired = $mutex.WaitOne(0)
-    if (-not $acquired) { throw "Mutex holder could not acquire $MutexName" }
-    $Ready.Set()
-    if (-not $Release.Wait(30000)) { throw 'Mutex holder release wait timed out' }
-}
-finally {
-    if ($acquired) { $mutex.ReleaseMutex() }
-    $mutex.Dispose()
-}
-'@).AddArgument($releaseVerificationMutexName).AddArgument($ready).AddArgument($release)
-        $async = $holder.BeginInvoke()
-        if (-not $ready.Wait(5000)) {
-            throw 'Mutex contention holder did not acquire and signal within five seconds'
+        foreach ($path in @($expectedBackup, $holderBackup, $probeRoot)) {
+            if (Test-Path -LiteralPath $path) {
+                throw "Generated cross-process mutex probe identity unexpectedly exists: $path"
+            }
+        }
+        [void](New-Item -ItemType Directory -Path $probeRoot)
+        $probeRootCreated = $true
+        [System.IO.File]::WriteAllText($ownershipMarker, $fixtureToken, [System.Text.UTF8Encoding]::new($false))
+
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = (Get-Process -Id $PID).Path
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        foreach ($argument in @(
+            '-NoProfile',
+            '-NonInteractive',
+            '-File',
+            $PSCommandPath,
+            '-Installer',
+            $installerPath,
+            '-TestDir',
+            $testDirPath,
+            '-UninstallTimeoutSeconds',
+            $UninstallTimeoutSeconds.ToString(),
+            '-InternalMutexHolderProbe',
+            '-InternalProbeToken',
+            $holderToken,
+            '-InternalVerificationId',
+            $holderVerificationId,
+            '-InternalMutexReadyPath',
+            $readyPath,
+            '-InternalMutexReleasePath',
+            $releasePath
+        )) {
+            $startInfo.ArgumentList.Add($argument)
+        }
+        $startInfo.Environment['SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN'] = $holderToken
+        $holder = [System.Diagnostics.Process]::new()
+        $holder.StartInfo = $startInfo
+        if (-not $holder.Start()) {
+            throw 'Could not start independent pwsh Global mutex holder'
+        }
+
+        $readyDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
+            if ($holder.HasExited) {
+                $holder.WaitForExit()
+                $holderExited = $true
+                throw "Independent pwsh mutex holder exited before readiness: exit=$($holder.ExitCode); stdout=$($holder.StandardOutput.ReadToEnd()); stderr=$($holder.StandardError.ReadToEnd())"
+            }
+            if ($readyDeadline.Elapsed.TotalSeconds -ge 10) {
+                throw 'Independent pwsh mutex holder did not signal readiness within ten seconds'
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        $readyEvidence = [System.IO.File]::ReadAllText($readyPath)
+        foreach ($expectedEvidence in @(
+            "PID=$($holder.Id)",
+            "NAME=$releaseVerificationMutexName",
+            "SID=$currentUserSidValue",
+            'ACL=protected-current-user-and-system-only'
+        )) {
+            if (-not $readyEvidence.Contains($expectedEvidence)) {
+                throw "Independent holder readiness lacks '$expectedEvidence': $readyEvidence"
+            }
         }
 
         try {
@@ -1668,11 +1822,19 @@ finally {
         if ($null -eq $contentionResult.Exception -or $contentionResult.ExceptionDetails -notmatch 'Another Shiyi release verification is already active') {
             throw "Second production verification did not fail on mutex contention before mutation: $($contentionResult.Evidence)"
         }
+        if (
+            $contentionResult.Evidence -notmatch [regex]::Escape($releaseVerificationMutexName) -or
+            $contentionResult.Evidence -notmatch 'broad-principal=false'
+        ) {
+            throw "Second production entry did not report the actual Global SID mutex and verified DACL: $($contentionResult.Evidence)"
+        }
         if ($contentionResult.Evidence -match 'USER DATA BACKUP:|REGISTRY BACKUP:|STATE ISOLATION:|INTERNAL MUTEX CONTENTION ATTEMPT ACQUIRED') {
             throw "Mutex contention reached a state-mutation marker: $($contentionResult.Evidence)"
         }
-        if (Test-Path -LiteralPath $expectedBackup) {
-            throw "Mutex-rejected verification created its recovery root: $expectedBackup"
+        foreach ($path in @($expectedBackup, $holderBackup)) {
+            if (Test-Path -LiteralPath $path) {
+                throw "Mutex probe created a forbidden recovery root before mutation: $path"
+            }
         }
         if ((Convert-ProtectedProductStateToJson -Snapshot (Get-ProtectedProductStateSnapshot)) -cne $beforeState) {
             throw 'Mutex contention probe changed protected product state'
@@ -1680,43 +1842,102 @@ finally {
         if ((Test-Path -LiteralPath $testDirPath) -or (Test-Path -LiteralPath $upgradeDirPath)) {
             throw 'Mutex contention probe created a test install root'
         }
+        $duringWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
+        $expectedDuringWorkEntries = @(($beforeWorkEntries + $probeRoot) | Sort-Object)
+        if (($duringWorkEntries | ConvertTo-Json -Compress) -cne ($expectedDuringWorkEntries | ConvertTo-Json -Compress)) {
+            throw "Mutex contention probe created unexpected work entries: $($duringWorkEntries -join ', ')"
+        }
+        [System.IO.File]::WriteAllText($releasePath, $fixtureToken, [System.Text.UTF8Encoding]::new($false))
+        if (-not $holder.WaitForExit(10000)) {
+            throw 'Independent pwsh mutex holder did not exit within ten seconds after release'
+        }
+        $holderExited = $true
+        $holderOutput = $holder.StandardOutput.ReadToEnd()
+        $holderError = $holder.StandardError.ReadToEnd()
+        if ($holder.ExitCode -ne 0) {
+            throw "Independent pwsh mutex holder failed: exit=$($holder.ExitCode); stdout=$holderOutput; stderr=$holderError"
+        }
+        foreach ($holderEvidence in @(
+            $releaseVerificationMutexName,
+            'broad-principal=false',
+            'INTERNAL CROSS-PROCESS MUTEX HOLDER RELEASE SIGNAL OBSERVED',
+            'RELEASE VERIFY MUTEX RELEASED:'
+        )) {
+            if (-not $holderOutput.Contains($holderEvidence)) {
+                throw "Independent holder output lacks '$holderEvidence': stdout=$holderOutput stderr=$holderError"
+            }
+        }
+
+        $reacquiredMutex = Enter-ReleaseVerificationMutex
+        Exit-ReleaseVerificationMutex -Mutex $reacquiredMutex
+
+        if (
+            -not (Test-Path -LiteralPath $ownershipMarker -PathType Leaf) -or
+            [System.IO.File]::ReadAllText($ownershipMarker) -cne $fixtureToken
+        ) {
+            throw 'Cross-process mutex probe ownership marker changed'
+        }
+        Remove-SafeTree -Path $probeRoot -AllowedRoots @($workRoot) -Purpose 'owned cross-process Global mutex probe cleanup'
+        $probeRootCreated = $false
+
+        $afterState = Convert-ProtectedProductStateToJson -Snapshot (Get-ProtectedProductStateSnapshot)
+        if ($afterState -cne $beforeState) {
+            throw 'Cross-process mutex probe changed protected product state after holder release'
+        }
         $afterWorkEntries = @(Get-ChildItem -LiteralPath $workRoot -Force | Sort-Object FullName | Select-Object -ExpandProperty FullName)
         if (($afterWorkEntries | ConvertTo-Json -Compress) -cne ($beforeWorkEntries | ConvertTo-Json -Compress)) {
-            throw 'Mutex contention probe changed work inventory before rejection'
+            throw 'Cross-process mutex probe did not restore work inventory'
         }
-        $probeAssertionsPassed = $true
+        Write-Output "MUTEX CONTENTION PROBE PASSED: cross-process-pwsh=true; global-current-user-mutex=$releaseVerificationMutexName; acl-protected=true; acl-current-user-full-control=true; acl-system-only-additional=true; broad-principal=false; second-verification-rejected-before-mutation=true; exact-backup-absent=true; product-state-mutated=false; reacquire-after-release=true"
     }
     finally {
-        $release.Set()
-        if ($null -ne $async -and -not $holderEnded) {
-            try {
-                [void]$holder.EndInvoke($async)
-                $holderEnded = $true
-            }
-            catch {
-                $holderFailure = Format-ExceptionDetails -Exception $_.Exception
-            }
-        }
-        if ($holder.Streams.Error.Count -ne 0) {
-            $holderFailure = @($holder.Streams.Error | ForEach-Object { $_.ToString() }) -join ' | '
-        }
-        $holder.Dispose()
-        $holderRunspace.Dispose()
-        $ready.Dispose()
-        $release.Dispose()
         [System.Environment]::SetEnvironmentVariable(
             'SHIYI_INTERNAL_ROLLBACK_PROBE_TOKEN',
             $oldToken,
             [System.EnvironmentVariableTarget]::Process
         )
+        if ($null -ne $holder) {
+            try {
+                if (-not $holder.HasExited) {
+                    $probeOwned =
+                        $probeRootCreated -and
+                        (Test-Path -LiteralPath $ownershipMarker -PathType Leaf) -and
+                        ([System.IO.File]::ReadAllText($ownershipMarker) -ceq $fixtureToken)
+                    if ($probeOwned) {
+                        [System.IO.File]::WriteAllText($releasePath, $fixtureToken, [System.Text.UTF8Encoding]::new($false))
+                        [void]$holder.WaitForExit(10000)
+                    }
+                    if (-not $holder.HasExited) {
+                        $holder.Kill($true)
+                        [void]$holder.WaitForExit(10000)
+                    }
+                }
+                $holderExited = $holder.HasExited
+            }
+            catch {
+                Write-Warning "Cross-process mutex holder cleanup failed: $(Format-ExceptionDetails -Exception $_.Exception)"
+            }
+            finally {
+                $holder.Dispose()
+            }
+        }
+        if ($probeRootCreated -and (Test-Path -LiteralPath $probeRoot) -and $holderExited) {
+            try {
+                if (
+                    (Test-Path -LiteralPath $ownershipMarker -PathType Leaf) -and
+                    [System.IO.File]::ReadAllText($ownershipMarker) -ceq $fixtureToken
+                ) {
+                    Remove-SafeTree -Path $probeRoot -AllowedRoots @($workRoot) -Purpose 'failed owned cross-process Global mutex probe cleanup'
+                }
+                else {
+                    Write-Warning "Cross-process mutex probe fixture retained because ownership changed: $probeRoot"
+                }
+            }
+            catch {
+                Write-Warning "Cross-process mutex probe fixture cleanup failed: $(Format-ExceptionDetails -Exception $_.Exception)"
+            }
+        }
     }
-    if ($null -ne $holderFailure) {
-        throw "Mutex contention holder failed: $holderFailure"
-    }
-    if (-not $probeAssertionsPassed) {
-        throw 'Mutex contention probe did not complete all before-mutation assertions'
-    }
-    Write-Output "MUTEX CONTENTION PROBE PASSED: current-user-mutex=$releaseVerificationMutexName; second-verification-rejected-before-mutation=true; exact-backup-absent=true; product-state-mutated=false"
 }
 
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
@@ -1805,6 +2026,37 @@ $productionCompletionError = $null
 $mutexReleaseError = $null
 try {
 $releaseVerificationMutex = Enter-ReleaseVerificationMutex
+if ($InternalMutexHolderProbe) {
+    $readyPath = [System.IO.Path]::GetFullPath($InternalMutexReadyPath)
+    $releasePath = [System.IO.Path]::GetFullPath($InternalMutexReleasePath)
+    $readyParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $readyPath))
+    $releaseParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $releasePath))
+    if (
+        -not (Test-DescendantPath -Path $readyPath -Root $workRoot) -or
+        -not (Test-DescendantPath -Path $releasePath -Root $workRoot) -or
+        -not [string]::Equals($readyParent, $releaseParent, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw 'Internal mutex holder coordination paths must be sibling files under strict work'
+    }
+    [void](Assert-NoReparseComponents -Path $readyParent -Purpose 'mutex holder coordination root')
+    if ((Test-Path -LiteralPath $readyPath) -or (Test-Path -LiteralPath $releasePath)) {
+        throw 'Internal mutex holder coordination files must start absent'
+    }
+    [System.IO.File]::WriteAllText(
+        $readyPath,
+        "PID=$PID; NAME=$releaseVerificationMutexName; SID=$currentUserSidValue; ACL=protected-current-user-and-system-only",
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    $holderDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        if ($holderDeadline.Elapsed.TotalSeconds -ge 30) {
+            throw 'Internal cross-process mutex holder timed out waiting for release signal'
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Write-Output 'INTERNAL CROSS-PROCESS MUTEX HOLDER RELEASE SIGNAL OBSERVED: no product state was mutated'
+    return
+}
 if ($InternalMutexContentionAttempt) {
     Write-Output 'INTERNAL MUTEX CONTENTION ATTEMPT ACQUIRED: no product state was mutated'
     return
@@ -2187,7 +2439,7 @@ finally {
             Exit-ReleaseVerificationMutex -Mutex $releaseVerificationMutex
         }
         catch {
-            if ($InternalMutexContentionAttempt) {
+            if ($InternalMutexContentionAttempt -or $InternalMutexHolderProbe) {
                 throw
             }
             $mutexReleaseError = $_.Exception
