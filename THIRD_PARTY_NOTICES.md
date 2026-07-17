@@ -68,10 +68,12 @@ Pillow 在本项目中读取批准图集并生成多尺寸 Windows 图标，也�
 ### Inno Setup
 
 - Planned build target: 7.0.2；若该版本无法从官方渠道取得，项目计划只接受经过签名验证的官方兼容版本 `>=6.7.3,<8`
-- License: Inno Setup License；商业使用还须遵守上游当前的购买/许可要求
+- License: Inno Setup License（允许任何用途，包括商业应用）
 - Official project: https://jrsoftware.org/isinfo.php
 - Official license: https://jrsoftware.org/files/is/license.txt
 - Official purchase/licensing information: https://jrsoftware.org/isorder.php
+
+上游请求其定义范围内的商业用户购买商业许可证以支持开发，但官方购买说明的 Q&A 明确说明购买并非严格要求；详情请参阅上面的官方购买/许可链接。
 
 Inno Setup 仅用于生成 Windows 安装程序，编译器本身不随十一桌面宠物安装。当前源码提交尚未生成或附带该安装程序。
 
