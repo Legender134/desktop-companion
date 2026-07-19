@@ -2,6 +2,7 @@ import json
 
 from PySide6.QtGui import QImage
 
+from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.resource_locator import resource_path
 
 
@@ -81,16 +82,25 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert manifest["displayName"] == "南宫婉"
     assert manifest["spriteVersionNumber"] == 3
     assert manifest["spritesheetPath"] == "spritesheet.webp"
-    assert len(manifest["actions"]) == 19
+    assert len(manifest["actions"]) == 20
+    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 190
     assert manifest["actions"]["idle"]["role"] == "idle"
     assert manifest["actions"]["moveRight"]["role"] == "move"
     assert manifest["actions"]["moveLeft"]["role"] == "move"
     assert manifest["actions"]["burstRight"]["role"] == "burstMove"
     assert manifest["actions"]["burstLeft"]["role"] == "burstMove"
+    assert manifest["actions"]["gaze"] == {
+        "label": "随眸相望",
+        "role": "gaze",
+        "row": 19,
+        "frameCount": 16,
+        "frameMs": 100,
+        "showInMenu": False,
+    }
 
     atlas = QImage(str(resource_path(f"{root}/spritesheet.webp")))
     assert not atlas.isNull()
-    assert (atlas.width(), atlas.height()) == (1920, 3952)
+    assert (atlas.width(), atlas.height()) == (3072, 4160)
     assert atlas.hasAlphaChannel()
 
     columns = atlas.width() // 192
@@ -100,3 +110,18 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
             row, column = divmod(start + offset, columns)
             cell = atlas.copy(column * 192, row * 208, 192, 208)
             assert alpha_count(cell) > 0
+
+    catalog = AnimationCatalog.load_pet("nangongwan")
+    assert catalog.supports_gaze
+    assert len(catalog.look_degrees) == 16
+    assert len(
+        {
+            catalog.look_frame(degrees).image.constBits().tobytes()
+            for degrees in catalog.look_degrees
+        }
+    ) == 16
+    assert (catalog.look_frame(0.0).row, catalog.look_frame(0.0).column) == (19, 0)
+    assert (catalog.look_frame(337.5).row, catalog.look_frame(337.5).column) == (
+        19,
+        15,
+    )
