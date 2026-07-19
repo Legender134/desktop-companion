@@ -142,6 +142,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     assert not _action(menu, "自动闲逛").isChecked()
     assert _action(menu, "看向鼠标").isChecked()
     assert _action(menu, "自主小动作").isChecked()
+    assert _action(_submenu(menu, "闲逛强度"), "标准").isChecked()
     assert _action(menu, "100%").isChecked()
     assert _action(_submenu(menu, "动画速度"), "正常").isChecked()
     assert _action(_submenu(menu, "移动速度"), "正常").isChecked()
@@ -154,6 +155,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
         scale_percent=150,
         animation_speed="fast",
         movement_speed="slow",
+        wander_intensity="active",
         pet_id="ziling",
     )
     state["startup"] = True
@@ -163,6 +165,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     assert _action(menu, "150%").isChecked()
     assert _action(_submenu(menu, "动画速度"), "快速").isChecked()
     assert _action(_submenu(menu, "移动速度"), "慢速").isChecked()
+    assert _action(_submenu(menu, "闲逛强度"), "活跃").isChecked()
     assert _action(menu, "开机启动").isChecked()
     assert _action(_submenu(menu, "切换宠物"), "紫灵").isChecked()
 
@@ -201,6 +204,30 @@ def test_action_names_are_rebuilt_from_the_current_pet(qtbot):
 
     assert _action(menu, "抬爪招呼") is None
     assert _action(menu, "挥手问候") is not None
+
+
+def test_dynamic_action_menu_accepts_variable_count_and_hides_unsupported_gaze(qtbot):
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        lambda command: None,
+        action_items_supplier=lambda: (
+            ("安静陪伴", "rest"),
+            ("向右移动", "moveRight"),
+            ("向左移动", "moveLeft"),
+            ("专属动作一", "specialOne"),
+            ("专属动作二", "specialTwo"),
+            ("遁光向右", "dashRight"),
+        ),
+        look_degrees_supplier=lambda: (),
+    )
+    menu = controller.create_menu()
+
+    assert _action(menu, "专属动作一") is not None
+    assert _action(menu, "专属动作二") is not None
+    assert _action(menu, "遁光向右") is not None
+    assert _action(menu, "观察方向") is None
+    assert _action(menu, "看向鼠标") is None
 
 
 def test_unavailable_tray_is_a_safe_disabled_object(monkeypatch, qtbot):
@@ -345,10 +372,17 @@ def test_command_model_has_complete_exact_payload_table():
         MenuCommand("pet", "ziling"),
         MenuCommand("pet", "new_pet"),
     ]
+    wander_commands = [
+        command for command in commands if command.kind == "wander_intensity"
+    ]
     assert speed_commands == [
         MenuCommand(kind, value)
         for kind in ("animation_speed", "movement_speed")
         for value in ("slow", "normal", "fast")
+    ]
+    assert wander_commands == [
+        MenuCommand("wander_intensity", value)
+        for value in ("quiet", "standard", "active")
     ]
     assert terminal_commands == [
         MenuCommand("refresh_pets"),

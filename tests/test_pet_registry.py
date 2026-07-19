@@ -2,8 +2,10 @@ import json
 from pathlib import Path
 import shutil
 
+from PySide6.QtGui import QColor, QImage
+
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
-from shiyi_desktop_pet.models import ActionId
+from shiyi_desktop_pet.models import ActionId, ActionRole
 from shiyi_desktop_pet.pet_registry import PetRegistry
 from shiyi_desktop_pet.resource_locator import resource_root
 
@@ -141,6 +143,70 @@ def _valid_actions() -> dict[str, dict[str, object]]:
     }
 
 
+def _valid_v3_actions() -> dict[str, dict[str, object]]:
+    return {
+        "rest": {
+            "label": "静静陪伴",
+            "role": "idle",
+            "row": 0,
+            "frameCount": 3,
+            "frameMs": 180,
+            "loop": True,
+        },
+        "walkRight": {
+            "label": "向右轻行",
+            "role": "move",
+            "direction": "right",
+            "row": 1,
+            "frameCount": 5,
+            "frameDurations": [80, 90, 100, 90, 80],
+            "loop": True,
+            "autoplayWeight": 9,
+        },
+        "walkLeft": {
+            "label": "向左轻行",
+            "role": "move",
+            "direction": "left",
+            "mirrorOf": "walkRight",
+            "autoplayWeight": 9,
+        },
+        "hello": {
+            "label": "点头回应",
+            "role": "interaction",
+            "row": 2,
+            "frameCount": 4,
+            "frameMs": 140,
+            "repeatCount": 2,
+            "autoplayWeight": 3,
+            "autoplayGroup": "quiet",
+        },
+        "dashRight": {
+            "label": "遁光向右",
+            "role": "burstMove",
+            "direction": "right",
+            "row": 3,
+            "frameCount": 8,
+            "frameMs": 90,
+            "travelStartFrame": 3,
+            "travelEndFrame": 6,
+            "autoplayWeight": 1,
+            "cooldownMs": 45000,
+            "minDistance": 280,
+            "travelDistanceRatio": 0.5,
+            "maxVerticalRatio": 0.1,
+        },
+        "dashLeft": {
+            "label": "遁光向左",
+            "role": "burstMove",
+            "direction": "left",
+            "mirrorOf": "dashRight",
+            "autoplayWeight": 1,
+            "cooldownMs": 45000,
+            "minDistance": 280,
+        },
+    }
+
+
 def test_registry_loads_complete_pet_specific_action_names_and_weights(tmp_path: Path):
     bundled = tmp_path / "bundled"
     _write_pack(bundled, "shiyi", actions=_valid_actions())
@@ -190,6 +256,82 @@ def test_registry_rejects_incomplete_or_unsafe_action_metadata(tmp_path: Path):
     assert "at least one in-place autoplay action" in messages
 
 
+def test_registry_loads_dynamic_v3_actions_timing_mirroring_and_burst_metadata(
+    tmp_path: Path,
+):
+    bundled = tmp_path / "bundled"
+    _write_pack(
+        bundled,
+        "dynamic_pet",
+        sprite_version=3,
+        actions=_valid_v3_actions(),
+    )
+
+    definition = PetRegistry(bundled, None).refresh().by_id("dynamic_pet")
+    actions = {item.action_id: item for item in definition.actions}
+
+    assert definition.sprite_version == 3
+    assert actions["rest"].role is ActionRole.IDLE
+    assert actions["walkRight"].spec.frame_count == 5
+    assert actions["walkRight"].spec.frame_durations == (80, 90, 100, 90, 80)
+    assert actions["walkLeft"].mirror_of == "walkRight"
+    assert actions["dashRight"].role is ActionRole.BURST_MOVE
+    assert actions["dashRight"].travel_start_frame == 3
+    assert actions["dashRight"].travel_end_frame == 6
+    assert actions["dashRight"].cooldown_ms == 45000
+    assert actions["dashRight"].min_distance == 280
+    assert actions["dashRight"].travel_distance_ratio == 0.5
+    assert actions["dashRight"].max_vertical_ratio == 0.1
+    assert actions["dashLeft"].travel_distance_ratio == 0.5
+    assert actions["dashLeft"].max_vertical_ratio == 0.1
+    assert actions["hello"].autoplay_group == "quiet"
+
+
+def test_registry_rejects_v3_without_required_capabilities_or_valid_timing(
+    tmp_path: Path,
+):
+    bundled = tmp_path / "bundled"
+    user = tmp_path / "user"
+    _write_pack(bundled, "good", sprite_version=3, actions=_valid_v3_actions())
+
+    missing_interaction = _valid_v3_actions()
+    del missing_interaction["hello"]
+    _write_pack(
+        user,
+        "missing_interaction",
+        sprite_version=3,
+        actions=missing_interaction,
+    )
+    bad_durations = _valid_v3_actions()
+    bad_durations["walkRight"]["frameDurations"] = [80, 90]
+    _write_pack(
+        user,
+        "bad_durations",
+        sprite_version=3,
+        actions=bad_durations,
+    )
+    bad_group = _valid_v3_actions()
+    bad_group["hello"]["autoplayGroup"] = "unsafe group"
+    _write_pack(user, "bad_group", sprite_version=3, actions=bad_group)
+    movement_group = _valid_v3_actions()
+    movement_group["walkRight"]["autoplayGroup"] = "movement"
+    _write_pack(
+        user,
+        "movement_group",
+        sprite_version=3,
+        actions=movement_group,
+    )
+
+    snapshot = PetRegistry(bundled, user).refresh()
+
+    assert snapshot.choices == (("good", "Good"),)
+    messages = "\n".join(issue.message for issue in snapshot.issues)
+    assert "at least one interaction" in messages
+    assert "frameDurations must match frameCount" in messages
+    assert "autoplayGroup must be empty or a safe" in messages
+    assert "autoplayGroup is only valid for interaction" in messages
+
+
 def test_registry_validator_quarantines_bad_pack_without_hiding_good_pets(tmp_path: Path):
     bundled = tmp_path / "bundled"
     user = tmp_path / "user-pets"
@@ -225,7 +367,46 @@ def test_real_v2_pack_can_be_added_without_changing_product_code(tmp_path: Path)
     definition = snapshot.by_id("copycat")
     catalog = AnimationCatalog.load_definition(definition)
 
-    assert {pet_id for pet_id, _ in snapshot.choices} == {"shiyi", "ziling", "copycat"}
+    assert {pet_id for pet_id, _ in snapshot.choices} == {
+        "nangongwan",
+        "shiyi",
+        "ziling",
+        "copycat",
+    }
     assert catalog.pet_id == "copycat"
     assert catalog.display_name == "Copycat"
     assert snapshot.issues == ()
+
+
+def test_real_dynamic_v3_webp_is_discovered_validated_and_loaded(tmp_path: Path):
+    user = tmp_path / "pets"
+    directory = _write_pack(
+        user,
+        "dynamic_pet",
+        sprite_version=3,
+        actions=_valid_v3_actions(),
+    )
+    atlas = QImage(8 * 192, 4 * 208, QImage.Format.Format_RGBA8888)
+    atlas.fill(QColor(0, 0, 0, 0))
+    for row, used in enumerate((3, 5, 4, 8)):
+        for column in range(used):
+            atlas.setPixelColor(
+                column * 192 + 5, row * 208 + 5, QColor(255, 255, 255, 255)
+            )
+    assert atlas.save(str(directory / "spritesheet.webp"), "WEBP")
+
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    registry = PetRegistry(
+        bundled,
+        user,
+        validator=AnimationCatalog.load_definition,
+    )
+    snapshot = registry.refresh()
+    catalog = AnimationCatalog.load_definition(snapshot.by_id("dynamic_pet"))
+
+    assert snapshot.issues == ()
+    assert catalog.sprite_version == 3
+    assert catalog.atlas_size == (1536, 832)
+    assert len(catalog.frames("walkRight")) == 5
+    assert len(catalog.frames("dashLeft")) == 8

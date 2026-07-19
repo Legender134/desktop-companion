@@ -10,7 +10,7 @@ from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QMenu, QWidget
 
 from .constants import DEFAULT_PET_ACTIONS
-from .models import ActionId
+from .models import ActionId, ActionKey
 from .settings import AppSettings
 
 
@@ -75,8 +75,26 @@ def _choice(
 
 def _menu_items(
     pet_choices: tuple[tuple[str, str], ...],
-    action_items: tuple[tuple[str, ActionId], ...],
+    action_items: tuple[tuple[str, ActionKey], ...],
+    look_degrees: tuple[float, ...] = tuple(index * 22.5 for index in range(16)),
 ) -> tuple[MenuItem, ...]:
+    look_item = (
+        (
+            MenuItem(
+                "观察方向",
+                children=tuple(
+                    MenuItem(
+                        _direction_label(degrees),
+                        MenuCommand("look", degrees),
+                    )
+                    for degrees in look_degrees
+                ),
+            ),
+        )
+        if look_degrees
+        else ()
+    )
+    gaze_toggle = (_toggle("看向鼠标", "gaze_enabled"),) if look_degrees else ()
     return (
         MenuItem(
             "动作",
@@ -87,20 +105,28 @@ def _menu_items(
                 ),
                 MenuItem("随机动作", MenuCommand("action", ActionId.RANDOM)),
                 MenuItem("动作展示", MenuCommand("showcase")),
-                MenuItem(
-                    "观察方向",
-                    children=tuple(
-                        MenuItem(
-                            _direction_label(index * 22.5),
-                            MenuCommand("look", index * 22.5),
-                        )
-                        for index in range(16)
-                    ),
-                ),
+                *look_item,
             ),
         ),
         _toggle("自动闲逛", "wander_enabled"),
-        _toggle("看向鼠标", "gaze_enabled"),
+        MenuItem(
+            "闲逛强度",
+            children=tuple(
+                _choice(
+                    label,
+                    "wander_intensity",
+                    intensity,
+                    "wander_intensity",
+                    "wander_intensity",
+                )
+                for label, intensity in (
+                    ("安静", "quiet"),
+                    ("标准", "standard"),
+                    ("活跃", "active"),
+                )
+            ),
+        ),
+        *gaze_toggle,
         _toggle("自主小动作", "autonomous_actions_enabled"),
         _toggle("悬停数字快捷键", "hover_digits_enabled"),
         _toggle("始终置顶", "always_on_top"),
@@ -175,7 +201,8 @@ class MenuController:
         dispatch: Callable[[MenuCommand], None],
         error_reporter: ErrorReporter | None = None,
         pet_choices_supplier: Callable[[], tuple[tuple[str, str], ...]] | None = None,
-        action_items_supplier: Callable[[], tuple[tuple[str, ActionId], ...]] | None = None,
+        action_items_supplier: Callable[[], tuple[tuple[str, ActionKey], ...]] | None = None,
+        look_degrees_supplier: Callable[[], tuple[float, ...]] | None = None,
     ) -> None:
         self._settings_supplier = settings_supplier
         self._startup_supplier = startup_supplier
@@ -185,11 +212,16 @@ class MenuController:
         self._action_items_supplier = action_items_supplier or (
             lambda: _DEFAULT_ACTION_ITEMS
         )
+        self._look_degrees_supplier = look_degrees_supplier or (
+            lambda: tuple(index * 22.5 for index in range(16))
+        )
         self._menus: list[QMenu] = []
 
     @property
     def items(self) -> tuple[MenuItem, ...]:
-        return _menu_items(self._pet_choices(), self._action_items())
+        return _menu_items(
+            self._pet_choices(), self._action_items(), self._look_degrees()
+        )
 
     def flattened_labels(self) -> tuple[str, ...]:
         def flatten(items: tuple[MenuItem, ...]):
@@ -264,17 +296,17 @@ class MenuController:
             self._report_supplier_error("pet choices supplier", error)
             return ()
 
-    def _action_items(self) -> tuple[tuple[str, ActionId], ...]:
+    def _action_items(self) -> tuple[tuple[str, ActionKey], ...]:
         try:
             items = tuple(self._action_items_supplier())
             if (
-                len(items) != len(_DEFAULT_ACTION_ITEMS)
-                or {action for _, action in items}
-                != {action for _, action in _DEFAULT_ACTION_ITEMS}
+                not items
+                or len({action for _, action in items}) != len(items)
                 or any(
                     not isinstance(label, str)
                     or not label
-                    or not isinstance(action, ActionId)
+                    or not isinstance(action, str)
+                    or not action
                     for label, action in items
                 )
             ):
@@ -283,6 +315,21 @@ class MenuController:
         except Exception as error:
             self._report_supplier_error("action items supplier", error)
             return _DEFAULT_ACTION_ITEMS
+
+    def _look_degrees(self) -> tuple[float, ...]:
+        try:
+            values = tuple(self._look_degrees_supplier())
+            if any(
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0.0 <= float(value) < 360.0
+                for value in values
+            ):
+                raise TypeError("look degrees supplier returned invalid values")
+            return tuple(float(value) for value in values)
+        except Exception as error:
+            self._report_supplier_error("look degrees supplier", error)
+            return ()
 
     def _report_supplier_error(self, context: str, error: Exception) -> None:
         error_type = type(error).__name__

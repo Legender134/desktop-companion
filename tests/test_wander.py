@@ -1,4 +1,5 @@
 from random import Random
+import math
 
 from shiyi_desktop_pet.geometry import Point, Rect, Size, clamp_position
 from shiyi_desktop_pet.wander import WanderPlanner, WanderTarget
@@ -111,3 +112,20 @@ def test_step_toward_preserves_current_position_for_non_positive_steps():
 def test_step_toward_supports_fractional_vector_steps():
     planner = WanderPlanner(Random(7))
     assert planner.step_toward(Point(0, 0), Point(3, 4), 2.5) == Point(1.5, 2.0)
+
+
+def test_planner_honors_optional_circular_distance_cap():
+    planner = WanderPlanner(Random(7))
+    current = Point(500, 300)
+    target = planner.choose_target(
+        current,
+        Size(192, 208),
+        Rect(0, 0, 1200, 800),
+        max_distance=180,
+    )
+
+    distance = math.hypot(
+        target.position.x - current.x,
+        target.position.y - current.y,
+    )
+    assert 0 < distance <= 180

@@ -9,3 +9,6 @@ artifacts/
 outputs/
 work/
 .coverage
+
+# Copyrighted visual references kept for local study only.
+private-reference/

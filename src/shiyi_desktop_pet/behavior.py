@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .models import ActionId
+from .models import ActionId, ActionKey
 
 
 class BehaviorMode(StrEnum):
@@ -18,12 +18,12 @@ class BehaviorEngine:
     wander_enabled: bool = False
     gaze_degrees: float | None = None
     mode: BehaviorMode = field(default=BehaviorMode.IDLE, init=False)
-    current_action: ActionId | None = field(default=None, init=False)
+    current_action: ActionKey | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.mode = self._base_mode()
 
-    def trigger_manual(self, action: ActionId) -> None:
+    def trigger_manual(self, action: ActionKey) -> None:
         if self.mode is BehaviorMode.SHUTTING_DOWN:
             return
         if action is ActionId.IDLE:

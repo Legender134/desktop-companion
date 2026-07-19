@@ -1,19 +1,70 @@
 {
   "id": "my_pet",
   "displayName": "我的宠物",
-  "description": "这是一个桌面灵伴 v2 宠物包模板。",
-  "spriteVersionNumber": 2,
+  "description": "这是一个动作数量和帧数可自由扩展的桌面灵伴 v3 宠物包模板。",
+  "spriteVersionNumber": 3,
   "spritesheetPath": "spritesheet.webp",
   "iconFrame": {"row": 0, "column": 0},
   "actions": {
-    "idle": {"label": "安静陪伴", "autoplayWeight": 0},
-    "moveRight": {"label": "向右移动", "autoplayWeight": 0},
-    "moveLeft": {"label": "向左移动", "autoplayWeight": 0},
-    "greet": {"label": "打个招呼", "autoplayWeight": 3},
-    "jump": {"label": "开心跃起", "autoplayWeight": 1},
-    "special": {"label": "特别动作", "autoplayWeight": 2},
-    "wait": {"label": "安静等待", "autoplayWeight": 3},
-    "observe": {"label": "看看四周", "autoplayWeight": 2},
-    "curious": {"label": "好奇观察", "autoplayWeight": 3}
+    "idle": {
+      "label": "安静陪伴",
+      "role": "idle",
+      "row": 0,
+      "frameCount": 4,
+      "frameMs": 180,
+      "loop": true,
+      "showInMenu": true
+    },
+    "moveRight": {
+      "label": "向右移动",
+      "role": "move",
+      "direction": "right",
+      "row": 1,
+      "frameCount": 8,
+      "frameMs": 90,
+      "loop": true,
+      "autoplayWeight": 19
+    },
+    "moveLeft": {
+      "label": "向左移动",
+      "role": "move",
+      "direction": "left",
+      "mirrorOf": "moveRight",
+      "autoplayWeight": 19
+    },
+    "greet": {
+      "label": "打个招呼",
+      "role": "interaction",
+      "row": 2,
+      "frameCount": 6,
+      "frameMs": 150,
+      "repeatCount": 2,
+      "autoplayWeight": 3,
+      "showInMenu": true
+    },
+    "dashRight": {
+      "label": "遁光向右",
+      "role": "burstMove",
+      "direction": "right",
+      "row": 3,
+      "frameCount": 8,
+      "frameMs": 90,
+      "travelStartFrame": 3,
+      "travelEndFrame": 6,
+      "autoplayWeight": 1,
+      "cooldownMs": 45000,
+      "minDistance": 280,
+      "travelDistanceRatio": 0.5,
+      "maxVerticalRatio": 0.1
+    },
+    "dashLeft": {
+      "label": "遁光向左",
+      "role": "burstMove",
+      "direction": "left",
+      "mirrorOf": "dashRight",
+      "autoplayWeight": 1,
+      "cooldownMs": 45000,
+      "minDistance": 280
+    }
   }
 }

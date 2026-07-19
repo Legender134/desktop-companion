@@ -17,7 +17,7 @@ def alpha_count(image: QImage) -> int:
     )
 
 
-def test_packaged_resources_obey_multi_pet_v2_contract():
+def test_packaged_legacy_resources_obey_multi_pet_v2_contract():
     expected = {
         "shiyi": {
             "id": "shiyi",
@@ -71,3 +71,32 @@ def test_packaged_resources_obey_multi_pet_v2_contract():
             for column in range(8):
                 cell = atlas.copy(column * 192, row * 208, 192, 208)
                 assert (alpha_count(cell) > 0) is (column < used)
+
+
+def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
+    root = "pets/nangongwan"
+    manifest = json.loads(resource_path(f"{root}/pet.json").read_text(encoding="utf-8"))
+
+    assert manifest["id"] == "nangongwan"
+    assert manifest["displayName"] == "南宫婉"
+    assert manifest["spriteVersionNumber"] == 3
+    assert manifest["spritesheetPath"] == "spritesheet.webp"
+    assert len(manifest["actions"]) == 19
+    assert manifest["actions"]["idle"]["role"] == "idle"
+    assert manifest["actions"]["moveRight"]["role"] == "move"
+    assert manifest["actions"]["moveLeft"]["role"] == "move"
+    assert manifest["actions"]["burstRight"]["role"] == "burstMove"
+    assert manifest["actions"]["burstLeft"]["role"] == "burstMove"
+
+    atlas = QImage(str(resource_path(f"{root}/spritesheet.webp")))
+    assert not atlas.isNull()
+    assert (atlas.width(), atlas.height()) == (1920, 3952)
+    assert atlas.hasAlphaChannel()
+
+    columns = atlas.width() // 192
+    for spec in manifest["actions"].values():
+        start = spec["row"] * columns + spec.get("startColumn", 0)
+        for offset in range(spec["frameCount"]):
+            row, column = divmod(start + offset, columns)
+            cell = atlas.copy(column * 192, row * 208, 192, 208)
+            assert alpha_count(cell) > 0

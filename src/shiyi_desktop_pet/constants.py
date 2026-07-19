@@ -1,4 +1,4 @@
-from .models import ActionId, AnimationSpec, PetActionDefinition
+from .models import ActionId, ActionRole, AnimationSpec, PetActionDefinition
 
 
 CELL_WIDTH, CELL_HEIGHT, COLUMNS, ROWS = 192, 208, 8, 11
@@ -25,8 +25,21 @@ ACTION_MANIFEST_SLOTS = (
     ("observe", ActionId.PATROL, "环顾四周", 2),
     ("curious", ActionId.CURIOUS, "好奇观察", 3),
 )
+_LEGACY_ROLES = {
+    ActionId.IDLE: (ActionRole.IDLE, 0),
+    ActionId.RUN_RIGHT: (ActionRole.MOVE, 1),
+    ActionId.RUN_LEFT: (ActionRole.MOVE, -1),
+}
 DEFAULT_PET_ACTIONS = tuple(
-    PetActionDefinition(key, action_id, label, autoplay_weight)
+    PetActionDefinition(
+        key,
+        action_id,
+        label,
+        autoplay_weight,
+        spec=ACTION_SPECS[action_id],
+        role=_LEGACY_ROLES.get(action_id, (ActionRole.INTERACTION, 0))[0],
+        direction=_LEGACY_ROLES.get(action_id, (ActionRole.INTERACTION, 0))[1],
+    )
     for key, action_id, label, autoplay_weight in ACTION_MANIFEST_SLOTS
 )
 IN_PLACE_ACTIONS = (

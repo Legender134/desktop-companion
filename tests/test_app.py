@@ -9,7 +9,7 @@ import sys
 
 import pytest
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QColor, QImage
 
 from shiyi_desktop_pet.app import (
     DesktopPetApplication,
@@ -156,6 +156,93 @@ def _catalog():
     return AnimationCatalog.load_default()
 
 
+def _dynamic_catalog():
+    actions = PetRegistry._parse_v3_actions(
+        {
+            "rest": {
+                "label": "待机", "role": "idle", "row": 0,
+                "frameCount": 3, "frameMs": 180, "loop": True,
+            },
+            "moveRight": {
+                "label": "向右", "role": "move", "direction": "right",
+                "row": 1, "frameCount": 5, "frameMs": 80, "loop": True,
+                "autoplayWeight": 19,
+            },
+            "moveLeft": {
+                "label": "向左", "role": "move", "direction": "left",
+                "mirrorOf": "moveRight", "autoplayWeight": 19,
+            },
+            "hello": {
+                "label": "问候", "role": "interaction", "row": 2,
+                "frameCount": 4, "frameMs": 140, "autoplayWeight": 3,
+            },
+            "dashRight": {
+                "label": "遁光向右", "role": "burstMove", "direction": "right",
+                "row": 3, "frameCount": 8, "frameMs": 90,
+                "travelStartFrame": 3, "travelEndFrame": 6,
+                "autoplayWeight": 1, "cooldownMs": 45000,
+                "minDistance": 280, "travelDistanceRatio": 0.5,
+                "maxVerticalRatio": 0.1,
+            },
+            "dashLeft": {
+                "label": "遁光向左", "role": "burstMove", "direction": "left",
+                "mirrorOf": "dashRight", "autoplayWeight": 1,
+                "cooldownMs": 45000, "minDistance": 280,
+            },
+        }
+    )
+    atlas = QImage(8 * 192, 4 * 208, QImage.Format.Format_RGBA8888)
+    atlas.fill(QColor(0, 0, 0, 0))
+    for row, used in enumerate((3, 5, 4, 8)):
+        for column in range(used):
+            atlas.setPixelColor(
+                column * 192 + 5, row * 208 + 5, QColor(255, 255, 255, 255)
+            )
+    return AnimationCatalog(atlas, actions=actions, sprite_version=3)
+
+
+def _grouped_catalog():
+    actions = PetRegistry._parse_v3_actions(
+        {
+            "rest": {
+                "label": "待机", "role": "idle", "row": 0,
+                "frameCount": 3, "frameMs": 180, "loop": True,
+            },
+            "moveRight": {
+                "label": "向右", "role": "move", "direction": "right",
+                "row": 1, "frameCount": 5, "frameMs": 80, "loop": True,
+                "autoplayWeight": 19,
+            },
+            "moveLeft": {
+                "label": "向左", "role": "move", "direction": "left",
+                "mirrorOf": "moveRight", "autoplayWeight": 19,
+            },
+            "daily": {
+                "label": "日常", "role": "interaction", "row": 2,
+                "frameCount": 4, "frameMs": 140, "autoplayWeight": 1,
+            },
+            "spellA": {
+                "label": "术法甲", "role": "interaction", "row": 3,
+                "frameCount": 4, "frameMs": 140, "autoplayWeight": 100,
+                "autoplayGroup": "spell",
+            },
+            "spellB": {
+                "label": "术法乙", "role": "interaction", "row": 4,
+                "frameCount": 4, "frameMs": 140, "autoplayWeight": 100,
+                "autoplayGroup": "spell",
+            },
+        }
+    )
+    atlas = QImage(5 * 192, 5 * 208, QImage.Format.Format_RGBA8888)
+    atlas.fill(QColor(0, 0, 0, 0))
+    for row, used in enumerate((3, 5, 4, 4, 4)):
+        for column in range(used):
+            atlas.setPixelColor(
+                column * 192 + 5, row * 208 + 5, QColor(255, 255, 255, 255)
+            )
+    return AnimationCatalog(atlas, actions=actions, sprite_version=3)
+
+
 def _install_test_pet(user_root: Path, pet_id: str, display_name: str) -> Path:
     directory = user_root / pet_id
     directory.mkdir(parents=True)
@@ -183,6 +270,7 @@ def _controller(
     qa_window=False,
     pet_registry=None,
     open_pet_directory=None,
+    catalog_factory=_catalog,
 ):
     store = MemorySettingsStore(settings)
     startup = FakeStartup()
@@ -206,7 +294,7 @@ def _controller(
         qapp,
         settings_store=store,
         startup_manager=startup,
-        catalog_factory=_catalog,
+        catalog_factory=catalog_factory,
         hook_factory=hook_factory,
         tray_factory=tray_factory,
         random=Random(0),
@@ -236,7 +324,7 @@ def test_self_test_reports_resources_qt_and_webp():
     report = run_self_test()
     assert report["ok"] is True
     assert report["atlas"] == {"width": 1536, "height": 2288, "frames": 74}
-    assert report["pets"] == ["shiyi", "ziling"]
+    assert report["pets"] == ["nangongwan", "shiyi", "ziling"]
     assert report["webp_plugin"] is True
     assert report["qt"]
 
@@ -417,7 +505,7 @@ def test_direction_zero_does_not_start_wander_running_action(qapp, monkeypatch):
     monkeypatch.setattr(
         controller.wander_planner,
         "choose_target",
-        lambda *args: __import__("shiyi_desktop_pet.wander", fromlist=["WanderTarget"]).WanderTarget(
+        lambda *args, **kwargs: __import__("shiyi_desktop_pet.wander", fromlist=["WanderTarget"]).WanderTarget(
             current, 0
         ),
     )
@@ -437,16 +525,37 @@ def test_menu_dispatch_updates_runtime_settings_and_shutdown_saves(qapp):
     controller.dispatch_menu(MenuCommand("scale", 125))
     controller.dispatch_menu(MenuCommand("animation_speed", "fast"))
     controller.dispatch_menu(MenuCommand("movement_speed", "slow"))
+    controller.dispatch_menu(MenuCommand("wander_intensity", "quiet"))
     controller.dispatch_menu(MenuCommand("action", ActionId.WAVE))
 
     assert controller.settings.wander_enabled
     assert not controller.settings.gaze_enabled
     assert startup.enabled
     assert controller.settings.scale_percent == 125
+    assert controller.settings.wander_intensity == "quiet"
     assert controller.current_action is ActionId.WAVE
     assert hooks[0].started
     controller.shutdown()
     assert store.saved
+
+
+def test_wander_intensity_controls_schedule_delay(qapp):
+    settings = replace(
+        AppSettings(),
+        wander_enabled=True,
+        wander_intensity="quiet",
+    )
+    controller, _, _, _, _ = _controller(qapp, settings=settings)
+    controller.start(startup=True)
+    controller.wander_timer.stop()
+
+    controller._schedule_wander()
+    assert 8_000 <= controller.wander_timer.interval() <= 18_000
+
+    controller.dispatch_menu(MenuCommand("wander_intensity", "active"))
+    assert controller.settings.wander_intensity == "active"
+    assert 1_000 <= controller.wander_timer.interval() <= 3_000
+    controller.shutdown()
 
 
 def test_controller_advances_manual_run_wander_gaze_and_drag(qapp, monkeypatch):
@@ -470,7 +579,7 @@ def test_controller_advances_manual_run_wander_gaze_and_drag(qapp, monkeypatch):
     monkeypatch.setattr(
         controller.wander_planner,
         "choose_target",
-        lambda *args: WanderTarget(target, 1),
+        lambda *args, **kwargs: WanderTarget(target, 1),
     )
     controller.begin_wander()
     assert controller.current_action is ActionId.RUN_RIGHT
@@ -582,7 +691,9 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.dispatch_menu(MenuCommand("toggle", False, "wander_enabled"))
     controller.dispatch_menu(MenuCommand("center"))
     controller.dispatch_menu(MenuCommand("about"))
-    assert about == [("关于桌面灵伴", "桌面灵伴 2.2\n可用宠物：2（十一、紫灵）")]
+    assert about == [
+        ("关于桌面灵伴", "桌面灵伴 2.3\n可用宠物：3（南宫婉、十一、紫灵）")
+    ]
 
     hooks[0].digit_pressed.emit(4)
     assert controller.current_action is ActionId.WAVE
@@ -598,6 +709,106 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     with pytest.raises(ValueError):
         controller.trigger_action("broken")
     controller.shutdown()
+
+
+def test_dynamic_burst_move_is_rare_distance_gated_cooled_down_and_interpolated(qapp):
+    class PickLast:
+        @staticmethod
+        def randint(lower, upper):
+            del lower
+            return upper
+
+        @staticmethod
+        def random():
+            return 1.0
+
+    settings = replace(AppSettings(), wander_enabled=True)
+    controller, _, _, _, _ = _controller(
+        qapp, settings=settings, catalog_factory=_dynamic_catalog
+    )
+    try:
+        controller._rng = PickLast()
+        controller._now_ms = lambda: 100_000
+
+        assert controller._choose_wander_action(-1, 200) == "moveLeft"
+        assert controller._choose_wander_action(-1, 400) == "dashLeft"
+        controller._last_action_played_ms["dashLeft"] = 99_999
+        assert controller._choose_wander_action(-1, 400) == "moveLeft"
+
+        controller._last_action_played_ms.clear()
+        start = Point(float(controller.window.x()), float(controller.window.y()))
+        target = Point(start.x - 300, start.y)
+        area = controller._current_screen_area()
+        controller._wander_target = target
+        controller._wander_direction = -1
+        controller._wander_area = area
+        controller._wander_action = "dashLeft"
+        controller._wander_start = start
+        controller.timeline.start("dashLeft", 0)
+
+        controller._advance_wander(100, 0.1)
+        assert controller.wander_target == target
+        assert controller.window.x() == round(start.x)
+
+        controller._advance_wander(405, 0.1)
+        assert target.x < controller.window.x() < start.x
+
+        controller._advance_wander(540, 0.1)
+        assert controller.window.x() == round(target.x)
+        assert controller.wander_target == target
+
+        controller._advance_wander(720, 0.1)
+        assert controller.wander_target is None
+        assert controller.window.x() == round(target.x)
+        assert controller.current_action == "rest"
+    finally:
+        controller.shutdown()
+
+
+def test_ratio_burst_moves_half_screen_inward_and_manual_edge_action_reverses(qapp):
+    class PickBurst:
+        @staticmethod
+        def randint(lower, upper):
+            del lower
+            return upper
+
+    settings = replace(AppSettings(), wander_enabled=True)
+    controller, _, _, _, _ = _controller(
+        qapp, settings=settings, catalog_factory=_dynamic_catalog
+    )
+    try:
+        controller._rng = PickBurst()
+        controller._now_ms = lambda: 100_000
+        area = controller._current_screen_area()
+        pet = controller._pet_size()
+        max_x = area.x + area.width - pet.width
+        max_y = area.y + area.height - pet.height
+        controller.window.move(round(max_x), round((area.y + max_y) / 2))
+        current = Point(float(controller.window.x()), float(controller.window.y()))
+        normal_target = Point(max_x, max_y)
+
+        plan = controller._choose_ratio_wander_plan(
+            current, normal_target, 1, area
+        )
+
+        assert plan is not None
+        action, target, direction = plan
+        assert action == "dashLeft"
+        assert direction == -1
+        usable_width = area.width - pet.width
+        assert target.x == pytest.approx(current.x - usable_width * 0.5)
+        assert abs(target.y - current.y) <= (area.height - pet.height) * 0.1
+        assert area.x <= target.x <= max_x
+        assert area.y <= target.y <= max_y
+
+        controller.trigger_action("dashRight")
+        assert controller.current_action == "dashLeft"
+        assert controller._manual_burst_target is not None
+        assert controller._manual_burst_target.x == pytest.approx(
+            current.x - usable_width * 0.5
+        )
+    finally:
+        controller.shutdown()
 
 
 def test_pet_switch_is_immediate_and_persisted(qapp):
@@ -639,6 +850,27 @@ def test_weighted_random_actions_never_move_or_repeat_immediately(qapp):
         controller.shutdown()
 
 
+def test_weighted_random_actions_do_not_repeat_a_nonempty_autoplay_group(qapp):
+    class PickLast:
+        @staticmethod
+        def randint(lower, upper):
+            del lower
+            return upper
+
+    controller, _, _, _, _ = _controller(qapp, catalog_factory=_grouped_catalog)
+    try:
+        controller._rng = PickLast()
+        controller._last_random_group = "spell"
+
+        assert controller._choose_random_action() == "daily"
+        assert controller._last_random_group is None
+        assert controller._choose_random_action() == "spellB"
+        assert controller._last_random_group == "spell"
+        assert controller._choose_random_action() == "daily"
+    finally:
+        controller.shutdown()
+
+
 def test_cursor_stillness_triggers_autonomous_action_after_eight_seconds(qapp):
     controller, _, _, _, _ = _controller(qapp)
     controller.start(startup=True)
@@ -665,6 +897,27 @@ def test_cursor_stillness_triggers_autonomous_action_after_eight_seconds(qapp):
         ActionId.PATROL,
         ActionId.CURIOUS,
     }
+    controller.shutdown()
+
+
+def test_pet_without_gaze_frames_does_not_wait_for_cursor_stillness(qapp):
+    controller, _, _, _, _ = _controller(qapp, catalog_factory=_dynamic_catalog)
+    controller.start(startup=True)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [1_000]
+    controller._now_ms = lambda: now[0]
+    controller._last_cursor_move_ms = now[0]
+    controller._autonomous_not_before_ms = 0
+
+    controller._schedule_autonomous()
+    assert 16_000 <= controller._autonomous_not_before_ms <= 36_000
+    now[0] = controller._autonomous_not_before_ms
+    controller._last_cursor_move_ms = now[0]
+    controller._autonomous_timeout()
+
+    assert controller.current_action == "hello"
     controller.shutdown()
 
 
@@ -724,12 +977,17 @@ def test_dynamic_pet_pack_refresh_switch_and_open_directory(tmp_path, qapp):
         pet_registry=registry,
         open_pet_directory=lambda path: opened.append(path) or True,
     )
-    assert controller.pet_choices == (("shiyi", "十一"), ("ziling", "紫灵"))
+    assert controller.pet_choices == (
+        ("nangongwan", "南宫婉"),
+        ("shiyi", "十一"),
+        ("ziling", "紫灵"),
+    )
 
     _install_test_pet(user_root, "new_pet", "新宠物")
     controller.dispatch_menu(MenuCommand("refresh_pets"))
 
     assert controller.pet_choices == (
+        ("nangongwan", "南宫婉"),
         ("shiyi", "十一"),
         ("ziling", "紫灵"),
         ("new_pet", "新宠物"),

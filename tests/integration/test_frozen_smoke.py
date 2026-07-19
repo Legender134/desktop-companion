@@ -14,4 +14,4 @@ def test_frozen_exe_self_test(repo_root: Path):
     assert report["ok"] is True
     assert report["webp_plugin"] is True
     assert report["atlas"]["frames"] == 74
-    assert report["pets"] == ["shiyi", "ziling"]
+    assert report["pets"] == ["nangongwan", "shiyi", "ziling"]

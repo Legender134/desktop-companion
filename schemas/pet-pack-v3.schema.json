@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Legender134/desktop-companion/main/schemas/pet-pack-v3.schema.json",
+  "title": "桌面灵伴 v3 动态宠物包清单",
+  "description": "动作数量、帧数和图集行数均可变化；基础能力和图集内容仍由桌面灵伴运行时复核。",
+  "type": "object",
+  "required": ["id", "displayName", "spriteVersionNumber", "spritesheetPath", "actions"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "\\S"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "spriteVersionNumber": {"const": 3},
+    "spritesheetPath": {"const": "spritesheet.webp"},
+    "iconFrame": {
+      "type": "object",
+      "required": ["row", "column"],
+      "additionalProperties": false,
+      "properties": {
+        "row": {"type": "integer", "minimum": 0, "maximum": 127},
+        "column": {"type": "integer", "minimum": 0, "maximum": 63}
+      }
+    },
+    "actions": {
+      "type": "object",
+      "minProperties": 3,
+      "maxProperties": 64,
+      "propertyNames": {"pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"},
+      "additionalProperties": {"$ref": "#/$defs/action"}
+    }
+  },
+  "$defs": {
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "\\S"
+    },
+    "common": {
+      "type": "object",
+      "required": ["label", "role"],
+      "properties": {
+        "label": {"$ref": "#/$defs/label"},
+        "role": {
+          "enum": ["idle", "move", "interaction", "burstMove", "gaze"]
+        },
+        "direction": {"enum": ["left", "right"]},
+        "showInMenu": {"type": "boolean"},
+        "autoplayWeight": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "cooldownMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        },
+        "autoplayGroup": {
+          "type": "string",
+          "oneOf": [
+            {"const": ""},
+            {"pattern": "^[a-z][a-zA-Z0-9_-]{0,31}$"}
+          ]
+        },
+        "minDistance": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "travelDistanceRatio": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1
+        },
+        "maxVerticalRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["autoplayGroup"]},
+          "then": {"properties": {"role": {"const": "interaction"}}}
+        }
+      ]
+    },
+    "direct": {
+      "allOf": [
+        {"$ref": "#/$defs/common"},
+        {
+          "type": "object",
+          "required": ["row", "frameCount"],
+          "properties": {
+            "row": {"type": "integer", "minimum": 0, "maximum": 127},
+            "startColumn": {"type": "integer", "minimum": 0, "maximum": 63},
+            "frameCount": {"type": "integer", "minimum": 1, "maximum": 64},
+            "frameMs": {"type": "integer", "minimum": 33, "maximum": 2000},
+            "frameDurations": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {"type": "integer", "minimum": 33, "maximum": 2000}
+            },
+            "loop": {"type": "boolean"},
+            "repeatCount": {"type": "integer", "minimum": 1, "maximum": 20},
+            "holdMs": {"type": "integer", "minimum": 0, "maximum": 10000},
+            "travelStartFrame": {"type": "integer", "minimum": 0, "maximum": 63},
+            "travelEndFrame": {"type": "integer", "minimum": 1, "maximum": 63}
+          },
+          "oneOf": [
+            {"required": ["frameMs"], "not": {"required": ["frameDurations"]}},
+            {"required": ["frameDurations"], "not": {"required": ["frameMs"]}}
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "mirror": {
+      "allOf": [
+        {"$ref": "#/$defs/common"},
+        {
+          "type": "object",
+          "required": ["mirrorOf"],
+          "properties": {
+            "mirrorOf": {
+              "type": "string",
+              "pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "action": {
+      "oneOf": [
+        {"$ref": "#/$defs/direct"},
+        {"$ref": "#/$defs/mirror"}
+      ]
+    }
+  }
+}

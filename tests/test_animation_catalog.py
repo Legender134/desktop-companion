@@ -2,7 +2,8 @@ import pytest
 from PySide6.QtGui import QColor, QImage
 
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
-from shiyi_desktop_pet.models import ActionId, FrameAsset
+from shiyi_desktop_pet.models import ActionId, ActionRole, FrameAsset
+from shiyi_desktop_pet.pet_registry import PetRegistry
 
 
 USED_COUNTS = (7, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8)
@@ -26,6 +27,75 @@ def _atlas_with_empty_used_cell() -> QImage:
 def _atlas_with_non_empty_unused_cell() -> QImage:
     atlas = _valid_synthetic_atlas()
     atlas.setPixelColor(7 * 192, 0, QColor(255, 255, 255, 255))
+    return atlas
+
+
+def _dynamic_actions():
+    return PetRegistry._parse_v3_actions(
+        {
+            "rest": {
+                "label": "待机",
+                "role": "idle",
+                "row": 0,
+                "frameCount": 3,
+                "frameMs": 180,
+                "loop": True,
+            },
+            "moveRight": {
+                "label": "向右",
+                "role": "move",
+                "direction": "right",
+                "row": 1,
+                "frameCount": 5,
+                "frameMs": 80,
+                "loop": True,
+                "autoplayWeight": 9,
+            },
+            "moveLeft": {
+                "label": "向左",
+                "role": "move",
+                "direction": "left",
+                "mirrorOf": "moveRight",
+                "autoplayWeight": 9,
+            },
+            "hello": {
+                "label": "问候",
+                "role": "interaction",
+                "row": 2,
+                "frameCount": 4,
+                "frameMs": 140,
+                "autoplayWeight": 3,
+            },
+            "dashRight": {
+                "label": "遁光向右",
+                "role": "burstMove",
+                "direction": "right",
+                "row": 3,
+                "frameCount": 8,
+                "frameMs": 90,
+                "travelStartFrame": 3,
+                "travelEndFrame": 6,
+                "autoplayWeight": 1,
+            },
+            "dashLeft": {
+                "label": "遁光向左",
+                "role": "burstMove",
+                "direction": "left",
+                "mirrorOf": "dashRight",
+                "autoplayWeight": 1,
+            },
+        }
+    )
+
+
+def _valid_dynamic_atlas() -> QImage:
+    atlas = QImage(8 * 192, 4 * 208, QImage.Format.Format_RGBA8888)
+    atlas.fill(QColor(0, 0, 0, 0))
+    for row, used in enumerate((3, 5, 4, 8)):
+        for column in range(used):
+            atlas.setPixelColor(
+                column * 192 + 5, row * 208 + 5, QColor(255, 255, 255, 255)
+            )
     return atlas
 
 
@@ -146,3 +216,27 @@ def test_alpha_hit_test_rejects_invalid_scale_and_upper_bounds():
 def test_unknown_direction_is_rejected():
     with pytest.raises(ValueError, match="22.5-degree"):
         AnimationCatalog.load_default().look_frame(13.0)
+
+
+def test_v3_catalog_supports_dynamic_frame_counts_roles_and_mirrored_actions():
+    catalog = AnimationCatalog(
+        _valid_dynamic_atlas(),
+        actions=_dynamic_actions(),
+        sprite_version=3,
+    )
+
+    assert catalog.idle_action == "rest"
+    assert len(catalog.frames("rest")) == 3
+    assert len(catalog.frames("moveRight")) == 5
+    assert len(catalog.frames("dashRight")) == 8
+    assert catalog.spec("moveRight").frame_ms == 80
+    assert catalog.definition("dashRight").role is ActionRole.BURST_MOVE
+    assert [item.action_id for item in catalog.movement_actions(1)] == [
+        "moveRight",
+        "dashRight",
+    ]
+    assert catalog.interaction_actions() == ("hello",)
+    assert not catalog.supports_gaze
+    assert catalog.look_degrees == ()
+    assert catalog.frames("moveRight")[0].image.pixelColor(5, 5).alpha() == 255
+    assert catalog.frames("moveLeft")[0].image.pixelColor(186, 5).alpha() == 255

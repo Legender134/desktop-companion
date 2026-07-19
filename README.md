@@ -1,22 +1,22 @@
-# 桌面灵伴 2.2
+# 桌面灵伴 2.3
 
-桌面灵伴是面向 Windows 10/11 x64 的透明桌面宠物。它内置“十一”和“紫灵”，支持切换宠物、单击互动、看向鼠标、自动闲逛、自主小动作和自制宠物包。程序本身不发起网络请求。
+桌面灵伴是面向 Windows 10/11 x64 的透明桌面宠物。它内置“十一”“紫灵”和同人宠物“南宫婉”，支持切换宠物、单击互动、看向鼠标、自动闲逛、自主小动作和自制宠物包。程序本身不发起网络请求。
 
 ## 第一次来这里？从这里开始
 
 | 你想做什么 | 应该点击哪里 |
 |---|---|
-| 只想安装使用 | [Gitee 直接下载](https://gitee.com/legender134/desktop-companion/releases/download/v2.2.0/桌面灵伴安装程序.exe) / [GitHub 直接下载](https://github.com/Legender134/desktop-companion/releases/download/v2.2.0/DesktopCompanion-2.2.0-Setup.exe) |
+| 只想安装使用 | [Gitee 直接下载](https://gitee.com/legender134/desktop-companion/releases/download/v2.3.0/桌面灵伴安装程序.exe) / [GitHub 直接下载](https://github.com/Legender134/desktop-companion/releases/download/v2.3.0/DesktopCompanion-2.3.0-Setup.exe) |
 | 完全不懂代码托管网站 | [查看新手使用指南](docs/新手使用指南.md) |
 | 想添加自己的宠物 | [查看添加新宠物指南](docs/添加新宠物指南.md) |
-| 已经会制作图集，需要查精确标准 | [查看 v2 宠物包技术规范](docs/pet-pack-format-v2.md) |
+| 已经会制作图集，需要查精确标准 | [查看 v3 动态宠物包技术规范](docs/pet-pack-format-v3.md) |
 | 想修改或构建程序 | 跳到[从源码准备、构建与验证](#从源码准备构建与验证) |
 
-> 普通用户只需要下载其中一个安装程序：在 Gitee 下载 `桌面灵伴安装程序.exe`，或在 GitHub 下载 `DesktopCompanion-2.2.0-Setup.exe`。不要下载名字中带有 `Source`、`源代码` 的压缩包，它们是给开发者看的源码，不能直接安装。
+> 普通用户只需要下载其中一个安装程序：在 Gitee 下载 `桌面灵伴安装程序.exe`，或在 GitHub 下载 `DesktopCompanion-2.3.0-Setup.exe`。不要下载名字中带有 `Source`、`源代码` 的压缩包，它们是给开发者看的源码，不能直接安装。
 
 ### 三步开始使用
 
-1. 从 Gitee 下载并双击 `桌面灵伴安装程序.exe`，或从 GitHub 下载并双击 `DesktopCompanion-2.2.0-Setup.exe`。
+1. 从 Gitee 下载并双击 `桌面灵伴安装程序.exe`，或从 GitHub 下载并双击 `DesktopCompanion-2.3.0-Setup.exe`。
 2. 按安装向导完成安装；不需要安装 Python、Qt、Codex 或开发工具。
 3. 从桌面“桌面灵伴”快捷方式启动。右键宠物或右下角托盘图标即可切换宠物、播放动作和修改设置。
 
@@ -24,33 +24,34 @@
 
 ## 它能做什么
 
-- 内置十一和紫灵，并能在运行时切换；
+- 内置十一、紫灵和南宫婉，并能在运行时切换；
 - 单击随机回应、双击跳跃、拖动改变位置；
 - 看向鼠标、自动闲逛和不改变位置的自主小动作；
 - 动作展示、大小与速度调整、开机启动和多显示器位置记忆；
 - 从 `%APPDATA%\DesktopCompanion\pets` 读取由 `pet.json` 和 `spritesheet.webp` 组成的用户宠物包；
-- 每只宠物可以定义自己的动作名称、托盘代表帧和自主动作权重。
+- 每只宠物可以动态定义动作数量、每个动作的帧数与时长、托盘代表帧、自动权重和低频快速移动；旧 v2 固定图集继续兼容。
 
 ## 下载文件怎么选
 
-[Gitee v2.2.0 发布页](https://gitee.com/legender134/desktop-companion/releases/tag/v2.2.0)和 [GitHub 最新版发布页](https://github.com/Legender134/desktop-companion/releases/latest)都提供可直接下载的安装程序：
+[Gitee v2.3.0 发布页](https://gitee.com/legender134/desktop-companion/releases/tag/v2.3.0)和 [GitHub 最新版发布页](https://github.com/Legender134/desktop-companion/releases/latest)都提供可直接下载的安装程序：
 
 | 文件 | 用途 | 普通用户需要吗 |
 |---|---|---|
-| Gitee：`桌面灵伴安装程序.exe`；GitHub：`DesktopCompanion-2.2.0-Setup.exe` | Windows 安装程序 | **需要，下载这个** |
+| Gitee：`桌面灵伴安装程序.exe`；GitHub：`DesktopCompanion-2.3.0-Setup.exe` | Windows 安装程序 | **需要，下载这个** |
 | Gitee：`安装说明.md`；GitHub：`INSTALL-zh-CN.md` | 离线中文安装说明 | 可选 |
 | `SHA256SUMS.txt` | 校验下载文件是否完整 | 可选 |
-| Gitee：`桌面灵伴2.2源代码.zip`；GitHub：`DesktopCompanion-2.2.0-Source.zip` | 对应版本的源码归档 | 不需要 |
+| Gitee：`桌面灵伴2.3源代码.zip`；GitHub：`DesktopCompanion-2.3.0-Source.zip` | 对应版本的源码归档 | 不需要 |
 | GitHub 自动生成的 `Source code` | 标签源码快照 | 不需要 |
 
-本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。自动验收结果、人工检查范围和已知工具限制见 [docs/manual-qa-v2.md](docs/manual-qa-v2.md)。
+本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。v2.3.0 发布验证结果见 [docs/manual-qa-v2.3.md](docs/manual-qa-v2.3.md)，此前的 v2.2 验收记录仍保留在 [docs/manual-qa-v2.md](docs/manual-qa-v2.md)。
 
 ### 历史版本
 
-新用户应优先安装 v2.2.0。旧版本仍保留用于学习、比较和回退：
+新用户应优先安装 v2.3.0。旧版本仍保留用于学习、比较和回退：
 
 | 版本 | 主要内容 | Gitee 下载页 | GitHub 下载页 |
 |---|---|---|---|
+| v2.3.0 | 内置南宫婉、v3 动态动作、可变帧数、遁光移动、动作分组和闲逛强度 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.3.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.3.0) |
 | v2.2.0 | 单击互动、自主小动作、动作展示、宠物专属动作名称与权重 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.2.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.2.0) |
 | v2.1.0 | 动态宠物包与跟随当前宠物的托盘图标 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.1.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.1.0) |
 | v2.0.0 | 项目更名为桌面灵伴，支持十一与紫灵切换 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.0.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.0.0) |
@@ -120,6 +121,8 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopCompanion
 
 ## 安装用户宠物包
 
+> v2.3.0 已正式支持 v3 动态动作宠物包；旧 v2 固定图集继续兼容。
+
 在宠物或托盘菜单中选择“打开宠物目录”，程序会打开并在需要时创建：
 
 ```text
@@ -135,9 +138,9 @@ pets\
    └─ spritesheet.webp
 ```
 
-复制完成后选择“重新扫描宠物”。通过校验的角色会出现在“切换宠物”子菜单中；损坏、重复或不符合 v2 图集契约的宠物包会被忽略并显示通知，不会阻止内置宠物启动。内置 ID `shiyi` 和 `ziling` 不允许被用户包覆盖。
+复制完成后选择“重新扫描宠物”。通过校验的角色会出现在“切换宠物”子菜单中；损坏、重复或不符合 v2/v3 图集契约的宠物包会被忽略并显示通知，不会阻止内置宠物启动。内置 ID `shiyi` 和 `ziling` 不允许被用户包覆盖。
 
-第一次制作时请按[添加新宠物指南](docs/添加新宠物指南.md)操作，并从 [`examples/pet-pack-template`](examples/pet-pack-template) 复制 JSON 模板。动作名称、自动权重、尺寸、帧布局和安全限制的精确定义见 [v2 宠物包格式](docs/pet-pack-format-v2.md)。覆盖升级会保留用户宠物目录；卸载会清理整个 `%APPDATA%\DesktopCompanion`，需要保留自制宠物时请先备份 `pets` 文件夹。
+第一次制作时请按[添加新宠物指南](docs/添加新宠物指南.md)操作，并从 [`examples/pet-pack-template`](examples/pet-pack-template) 复制 v3 JSON 模板。动态动作、帧数、快速移动和安全限制见 [v3 宠物包格式](docs/pet-pack-format-v3.md)，旧式图集见 [v2 兼容格式](docs/pet-pack-format-v2.md)。覆盖升级会保留用户宠物目录；卸载会清理整个 `%APPDATA%\DesktopCompanion`，需要保留自制宠物时请先备份 `pets` 文件夹。
 
 ## 鼠标和托盘控制
 
@@ -182,6 +185,7 @@ pets\
   当前宠物 JSON 定义的 9 个动作名称 / 随机动作 / 动作展示
   观察方向 > 000° 至 337.5°，每 22.5° 一个方向，共 16 个
 自动闲逛
+闲逛强度 > 安静 / 标准 / 活跃
 看向鼠标
 自主小动作
 悬停数字快捷键
@@ -198,9 +202,13 @@ pets\
 退出
 ```
 
-“动作展示”会连续播放当前宠物的六个原地动作，单击、双击或拖动宠物即可切换或中断。“回到屏幕中央”使用光标所在显示器的可用区域。自动闲逛会在宠物当前显示器的可用区域内选择朝左或朝右的目标位置，移动窗口时也可能改变垂直位置，但不会进入任务栏区域；拖动、手动动作或菜单命令会中断当前闲逛。
+“动作展示”会连续播放当前宠物的原地动作，单击、双击或拖动宠物即可切换或中断。“回到屏幕中央”使用光标所在显示器的可用区域。自动闲逛会在宠物当前显示器的可用区域内选择朝左或朝右的目标位置，移动窗口时也可能改变垂直位置，但不会进入任务栏区域；拖动、手动动作或菜单命令会中断当前闲逛。
 
-关闭自动闲逛且开启自主小动作时：如果“看向鼠标”开启，鼠标连续静止约 8 秒后可触发一个原地动作；如果“看向鼠标”关闭，则每隔随机的约 15–35 秒触发。动作结束后还有随机冷却时间，左右移动永远不会进入自主动作池，同一动作也不会连续出现。
+闲逛强度分为三档：“安静”每次等待约 8–18 秒，并把单次目标距离限制在可移动宽度的 25%；“标准”保持原有约 2–6 秒等待和全屏目标范围；“活跃”把等待缩短到约 1–3 秒。升级旧设置时默认使用“标准”。
+
+关闭自动闲逛且开启自主小动作时：只有当前宠物真正提供 16 帧 `gaze` 动作且“看向鼠标”开启，才要求鼠标连续静止约 8 秒；不支持视线动作的宠物和关闭看向鼠标时均按约 15–35 秒随机间隔触发。动作结束后还有独立冷却，左右移动不会进入自主动作池，同一动作不会连续出现；具有相同 `autoplayGroup` 的术法或强特效也不会连续随机播放。
+
+实现语义和验收方法见[动作分组、视线门槛与闲逛强度](docs/behavior-groups-and-wander-intensity.md)。
 
 ## 开机启动
 
@@ -216,7 +224,11 @@ pets\
 2. 首次安装默认勾选开机启动；向导末页可立即运行。覆盖安装会先请求现有实例安全退出，并保留已有设置和用户当前的开机启动选择。
 3. 卸载时打开 Windows“设置 > 应用 > 已安装的应用”，找到“桌面灵伴”并选择卸载。卸载程序会请求现有实例退出，并清除应用文件、该应用的 HKCU 启动项、设置和日志。
 
-桌面灵伴使用新的安装目录、卸载 GUID、设置目录、自启动项和单实例标识，可以与“十一桌面宠物 1.0”同时安装；安装或卸载 2.2 不会删除 1.0。两版也能同时运行，但初始位置可能重叠，建议拖开或只保留一版开机启动。
+桌面灵伴使用新的安装目录、卸载 GUID、设置目录、自启动项和单实例标识，可以与“十一桌面宠物 1.0”同时安装；安装或卸载 2.3 不会删除 1.0。两版也能同时运行，但初始位置可能重叠，建议拖开或只保留一版开机启动。
+
+## 同人内容说明
+
+南宫婉和紫灵为基于《凡人修仙传》角色制作的非官方同人桌面宠物，仅用于学习与交流，不代表原作、动画制作方或相关权利方。角色及原作相关权利归其各自权利人所有；请勿将相关视觉资源用于商业用途。
 
 如需核验下载文件，请在 PowerShell 中运行 `Get-FileHash -Algorithm SHA256`，并与同目录的 `SHA256SUMS.txt` 比较。更简明的用户说明见发布目录中的 `安装说明.md`。
 

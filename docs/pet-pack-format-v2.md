@@ -1,6 +1,8 @@
 # 桌面灵伴 v2 宠物包格式
 
-桌面灵伴 2.2 支持从 `%APPDATA%\DesktopCompanion\pets` 动态发现数据型宠物包。宠物包不能包含或执行 Python、JavaScript、DLL、EXE 等代码；程序只读取清单和固定格式的透明 WebP 图集。
+> 这是固定 11 行图集的兼容规范。新制作的宠物建议使用[动作和帧数可动态扩展的 v3 格式](pet-pack-format-v3.md)；十一、紫灵和已有 v2 宠物包无需修改。
+
+桌面灵伴 2.3 继续支持从 `%APPDATA%\DesktopCompanion\pets` 动态发现 v2 数据型宠物包。宠物包不能包含或执行 Python、JavaScript、DLL、EXE 等代码；程序只读取清单和固定格式的透明 WebP 图集。新宠物优先使用 [v3 动态格式](pet-pack-format-v3.md)。
 
 这是供制作者查阅的精确技术规范。第一次制作宠物时，建议先按[添加新宠物指南](添加新宠物指南.md)逐步操作，再回来核对本页。可直接复制的文件位于 [`examples/pet-pack-template`](../examples/pet-pack-template)，支持 JSON Schema 的编辑器可加载 [`schemas/pet-pack-v2.schema.json`](../schemas/pet-pack-v2.schema.json)。
 

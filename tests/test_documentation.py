@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import re
 
-from shiyi_desktop_pet.models import ActionId
+from shiyi_desktop_pet.models import ActionRole
 from shiyi_desktop_pet.pet_registry import PetRegistry
 
 
@@ -12,10 +12,11 @@ _MARKDOWN_LINK = re.compile(r"\[[^]]+\]\(([^)]+)\)")
 def test_beginner_readme_names_the_installer_and_routes_each_audience(repo_root: Path):
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
 
-    assert "DesktopCompanion-2.2.0-Setup.exe" in readme
+    assert "DesktopCompanion-2.3.0-Setup.exe" in readme
     assert "普通用户只需要下载" in readme
     assert "docs/新手使用指南.md" in readme
     assert "docs/添加新宠物指南.md" in readme
+    assert "docs/pet-pack-format-v3.md" in readme
     assert "docs/pet-pack-format-v2.md" in readme
 
 
@@ -24,6 +25,7 @@ def test_documentation_local_links_point_to_existing_files(repo_root: Path):
         repo_root / "README.md",
         repo_root / "docs" / "新手使用指南.md",
         repo_root / "docs" / "添加新宠物指南.md",
+        repo_root / "docs" / "pet-pack-format-v3.md",
         repo_root / "docs" / "pet-pack-format-v2.md",
         repo_root / "examples" / "pet-pack-template" / "README.md",
     )
@@ -60,14 +62,18 @@ def test_pet_pack_template_matches_runtime_manifest_contract(
 
     assert snapshot.issues == ()
     assert definition.display_name == "我的宠物"
-    assert actions[ActionId.WAVE].label == "打个招呼"
-    assert actions[ActionId.WAVE].autoplay_weight == 3
-    assert actions[ActionId.RUN_RIGHT].autoplay_weight == 0
+    assert definition.sprite_version == 3
+    assert actions["greet"].label == "打个招呼"
+    assert actions["greet"].autoplay_weight == 3
+    assert actions["greet"].role is ActionRole.INTERACTION
+    assert actions["moveRight"].autoplay_weight == 19
+    assert actions["moveLeft"].mirror_of == "moveRight"
+    assert actions["dashRight"].role is ActionRole.BURST_MOVE
 
 
-def test_pet_pack_schema_covers_all_template_actions(repo_root: Path):
+def test_pet_pack_v3_schema_and_template_describe_dynamic_actions(repo_root: Path):
     schema = json.loads(
-        (repo_root / "schemas" / "pet-pack-v2.schema.json").read_text(
+        (repo_root / "schemas" / "pet-pack-v3.schema.json").read_text(
             encoding="utf-8"
         )
     )
@@ -78,7 +84,24 @@ def test_pet_pack_schema_covers_all_template_actions(repo_root: Path):
     )
 
     action_schema = schema["properties"]["actions"]
-    assert set(action_schema["required"]) == set(template["actions"])
-    assert set(action_schema["properties"]) == set(template["actions"])
-    assert schema["properties"]["spriteVersionNumber"]["const"] == 2
+    assert action_schema["minProperties"] == 3
+    assert action_schema["maxProperties"] == 64
+    assert schema["properties"]["spriteVersionNumber"]["const"] == 3
     assert schema["properties"]["spritesheetPath"]["const"] == "spritesheet.webp"
+    assert "autoplayGroup" in schema["$defs"]["common"]["properties"]
+    assert template["spriteVersionNumber"] == 3
+    assert {entry["role"] for entry in template["actions"].values()} >= {
+        "idle",
+        "move",
+        "interaction",
+        "burstMove",
+    }
+
+
+def test_legacy_v2_schema_remains_available(repo_root: Path):
+    schema = json.loads(
+        (repo_root / "schemas" / "pet-pack-v2.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert schema["properties"]["spriteVersionNumber"]["const"] == 2

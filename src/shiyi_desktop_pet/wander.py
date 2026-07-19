@@ -19,8 +19,15 @@ class WanderPlanner:
     def __init__(self, random: Random) -> None:
         self._random = random
 
-    def choose_target(self, current: Point, pet: Size, area: Rect) -> WanderTarget:
-        """Choose a visible target on this monitor and its horizontal heading."""
+    def choose_target(
+        self,
+        current: Point,
+        pet: Size,
+        area: Rect,
+        *,
+        max_distance: float | None = None,
+    ) -> WanderTarget:
+        """Choose a visible target, optionally capped to a circular distance."""
         current = clamp_position(current, pet, area)
         min_x = area.x
         max_x = max(area.x, area.x + area.width - pet.width)
@@ -46,10 +53,27 @@ class WanderPlanner:
         direction = self._random.choice(directions)
 
         room = right_room if direction == 1 else left_room
-        minimum_motion = 80 if room >= 80 else min(1.0, room)
-        motion = self._random.uniform(minimum_motion, room)
+        motion_limit = (
+            room
+            if max_distance is None
+            else min(room, max(0.0, float(max_distance)))
+        )
+        if motion_limit <= 0:
+            return WanderTarget(position=current, direction=0)
+        minimum_motion = 80 if motion_limit >= 80 else min(1.0, motion_limit)
+        motion = self._random.uniform(minimum_motion, motion_limit)
         target_x = current.x + direction * motion
-        target_y = self._random.uniform(min_y, max_y) if max_y > min_y else min_y
+        if max_distance is None:
+            target_y = self._random.uniform(min_y, max_y) if max_y > min_y else min_y
+        else:
+            vertical_room = math.sqrt(max(0.0, max_distance**2 - motion**2))
+            target_min_y = max(min_y, current.y - vertical_room)
+            target_max_y = min(max_y, current.y + vertical_room)
+            target_y = (
+                self._random.uniform(target_min_y, target_max_y)
+                if target_max_y > target_min_y
+                else target_min_y
+            )
         position = clamp_position(Point(target_x, target_y), pet, area)
         return WanderTarget(position=position, direction=direction)
 

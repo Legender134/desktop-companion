@@ -1,5 +1,5 @@
 from shiyi_desktop_pet.animation_player import AnimationTimeline
-from shiyi_desktop_pet.models import ActionId
+from shiyi_desktop_pet.models import ActionId, AnimationSpec
 
 
 def test_wave_runs_exactly_three_loops_then_finishes():
@@ -44,3 +44,24 @@ def test_idle_wraps_indefinitely_and_clamps_pre_start_timestamps():
     assert not timeline.advance(0).finished
     assert timeline.advance(100 + 7 * 180).frame_index == 0
     assert timeline.advance(100 + 9 * 180).frame_index == 2
+
+
+def test_dynamic_per_frame_durations_and_repeat_count_are_honored():
+    timeline = AnimationTimeline()
+    spec = AnimationSpec(
+        row=0,
+        frame_count=3,
+        frame_ms=100,
+        loops=2,
+        frame_durations=(50, 100, 200),
+    )
+    timeline.start("custom", 0)
+
+    assert timeline.advance(49, spec).frame_index == 0
+    assert timeline.advance(50, spec).frame_index == 1
+    assert timeline.advance(149, spec).frame_index == 1
+    assert timeline.advance(150, spec).frame_index == 2
+    assert timeline.advance(349, spec).frame_index == 2
+    assert timeline.advance(350, spec).frame_index == 0
+    assert timeline.advance(699, spec).frame_index == 2
+    assert timeline.advance(700, spec).finished

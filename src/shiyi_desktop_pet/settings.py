@@ -13,9 +13,10 @@ from .pet_registry import is_valid_pet_id
 from .product import DEFAULT_PET_ID
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 VALID_SCALES = frozenset({75, 100, 125, 150})
 VALID_SPEEDS = frozenset({"slow", "normal", "fast"})
+VALID_WANDER_INTENSITIES = frozenset({"quiet", "standard", "active"})
 
 
 class Logger(Protocol):
@@ -27,6 +28,7 @@ class AppSettings:
     schema_version: int = CURRENT_SCHEMA_VERSION
     pet_id: str = DEFAULT_PET_ID
     wander_enabled: bool = False
+    wander_intensity: str = "standard"
     gaze_enabled: bool = True
     autonomous_actions_enabled: bool = True
     hover_digits_enabled: bool = True
@@ -89,6 +91,14 @@ class SettingsStore:
         pet_id = section.get("pet_id", defaults.pet_id).strip().lower()
         values["pet_id"] = pet_id if is_valid_pet_id(pet_id) else defaults.pet_id
         values["wander_enabled"] = self._read_bool(section, "wander_enabled", defaults.wander_enabled)
+        wander_intensity = section.get(
+            "wander_intensity", defaults.wander_intensity
+        ).lower()
+        values["wander_intensity"] = (
+            wander_intensity
+            if wander_intensity in VALID_WANDER_INTENSITIES
+            else defaults.wander_intensity
+        )
         values["gaze_enabled"] = self._read_bool(section, "gaze_enabled", defaults.gaze_enabled)
         values["autonomous_actions_enabled"] = self._read_bool(
             section,
@@ -164,6 +174,11 @@ class SettingsStore:
             schema_version=CURRENT_SCHEMA_VERSION,
             pet_id=SettingsStore._normalize_pet_id(settings.pet_id),
             wander_enabled=bool(settings.wander_enabled),
+            wander_intensity=(
+                settings.wander_intensity.lower()
+                if settings.wander_intensity.lower() in VALID_WANDER_INTENSITIES
+                else AppSettings.wander_intensity
+            ),
             gaze_enabled=bool(settings.gaze_enabled),
             autonomous_actions_enabled=bool(settings.autonomous_actions_enabled),
             hover_digits_enabled=bool(settings.hover_digits_enabled),
