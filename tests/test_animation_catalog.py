@@ -218,6 +218,23 @@ def test_unknown_direction_is_rejected():
         AnimationCatalog.load_default().look_frame(13.0)
 
 
+def test_nearest_gaze_accepts_continuous_angles_and_wraps_at_zero():
+    catalog = AnimationCatalog.load_default()
+
+    exact = catalog.nearest_look_frame(22.5)
+    below_boundary = catalog.nearest_look_frame(11.2)
+    above_boundary = catalog.nearest_look_frame(11.3)
+    wrapped = catalog.nearest_look_frame(358.7)
+
+    assert exact is catalog.look_frame(22.5)
+    assert below_boundary is catalog.look_frame(0.0)
+    assert above_boundary is catalog.look_frame(22.5)
+    assert wrapped is catalog.look_frame(0.0)
+
+    with pytest.raises(ValueError, match="between 0 and 360"):
+        catalog.nearest_look_frame(360.0)
+
+
 def test_v3_catalog_supports_dynamic_frame_counts_roles_and_mirrored_actions():
     catalog = AnimationCatalog(
         _valid_dynamic_atlas(),

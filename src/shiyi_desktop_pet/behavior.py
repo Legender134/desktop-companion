@@ -66,15 +66,19 @@ class BehaviorEngine:
 
     def request_gaze(self, degrees: float | None) -> None:
         self.gaze_degrees = degrees
-        if self.mode in {BehaviorMode.IDLE, BehaviorMode.GAZE}:
+        if self.mode not in {
+            BehaviorMode.MANUAL_ACTION,
+            BehaviorMode.DRAGGING,
+            BehaviorMode.SHUTTING_DOWN,
+        }:
             self.mode = self._base_mode()
 
     def begin_shutdown(self) -> None:
         self.mode = BehaviorMode.SHUTTING_DOWN
 
     def _base_mode(self) -> BehaviorMode:
-        if self.wander_enabled:
-            return BehaviorMode.WANDER
         if self.gaze_degrees is not None:
             return BehaviorMode.GAZE
+        if self.wander_enabled:
+            return BehaviorMode.WANDER
         return BehaviorMode.IDLE

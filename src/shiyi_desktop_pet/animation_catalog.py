@@ -299,6 +299,18 @@ class AnimationCatalog:
             raise ValueError("direction must be a supported 22.5-degree step")
         return self._look_frames[index]
 
+    def nearest_look_frame(self, degrees: float) -> FrameAsset:
+        """Return the nearest clear gaze keyframe for an arbitrary angle."""
+        if (
+            not self.supports_gaze
+            or not isinstance(degrees, (int, float))
+            or isinstance(degrees, bool)
+            or not 0.0 <= float(degrees) < 360.0
+        ):
+            raise ValueError("direction must be between 0 and 360 degrees")
+        index = round(float(degrees) / 22.5) % len(self._look_frames)
+        return self._look_frames[index]
+
     def hit_test(self, frame: FrameAsset, x: float, y: float, scale: float) -> bool:
         if scale <= 0 or x < 0 or y < 0:
             return False

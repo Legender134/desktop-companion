@@ -13,10 +13,11 @@ from .pet_registry import is_valid_pet_id
 from .product import DEFAULT_PET_ID
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 VALID_SCALES = frozenset({75, 100, 125, 150})
 VALID_SPEEDS = frozenset({"slow", "normal", "fast"})
 VALID_WANDER_INTENSITIES = frozenset({"quiet", "standard", "active"})
+VALID_GAZE_MODES = frozenset({"active", "always"})
 
 
 class Logger(Protocol):
@@ -30,6 +31,7 @@ class AppSettings:
     wander_enabled: bool = False
     wander_intensity: str = "standard"
     gaze_enabled: bool = True
+    gaze_mode: str = "active"
     autonomous_actions_enabled: bool = True
     hover_digits_enabled: bool = True
     always_on_top: bool = True
@@ -100,6 +102,10 @@ class SettingsStore:
             else defaults.wander_intensity
         )
         values["gaze_enabled"] = self._read_bool(section, "gaze_enabled", defaults.gaze_enabled)
+        gaze_mode = section.get("gaze_mode", defaults.gaze_mode).lower()
+        values["gaze_mode"] = (
+            gaze_mode if gaze_mode in VALID_GAZE_MODES else defaults.gaze_mode
+        )
         values["autonomous_actions_enabled"] = self._read_bool(
             section,
             "autonomous_actions_enabled",
@@ -180,6 +186,11 @@ class SettingsStore:
                 else AppSettings.wander_intensity
             ),
             gaze_enabled=bool(settings.gaze_enabled),
+            gaze_mode=(
+                settings.gaze_mode.lower()
+                if settings.gaze_mode.lower() in VALID_GAZE_MODES
+                else AppSettings.gaze_mode
+            ),
             autonomous_actions_enabled=bool(settings.autonomous_actions_enabled),
             hover_digits_enabled=bool(settings.hover_digits_enabled),
             always_on_top=bool(settings.always_on_top),

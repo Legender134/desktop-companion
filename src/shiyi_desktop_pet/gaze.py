@@ -1,4 +1,4 @@
-"""Cursor-direction quantization and timing-based gaze stabilization."""
+"""Cursor-direction mapping and smooth gaze tracking."""
 
 import math
 
@@ -15,34 +15,60 @@ def quantize_gaze(dx: float, dy: float, dead_zone: float) -> float | None:
     return round(degrees / 22.5) % 16 * 22.5
 
 
-class GazeStabilizer:
-    """Publish a changed direction only after it remains stable long enough."""
+def cursor_angle(dx: float, dy: float, dead_zone: float) -> float | None:
+    """Return the exact clockwise screen-space angle, with zero pointing up."""
+    if math.hypot(dx, dy) < dead_zone:
+        return None
+    return math.degrees(math.atan2(dx, -dy)) % 360
 
-    def __init__(self, stable_ms: int = 80) -> None:
-        self.stable_ms = stable_ms
+
+class GazeSmoother:
+    """Follow cursor angles over the shortest arc without abrupt direction jumps."""
+
+    def __init__(
+        self,
+        response_ms: int = 110,
+        max_speed_degrees_per_second: float = 360.0,
+    ) -> None:
+        if response_ms <= 0:
+            raise ValueError("response_ms must be positive")
+        if max_speed_degrees_per_second <= 0:
+            raise ValueError("max gaze speed must be positive")
+        self.response_ms = response_ms
+        self.max_speed_degrees_per_second = max_speed_degrees_per_second
         self._direction: float | None = None
-        self._candidate: float | None = None
-        self._candidate_since_ms: int | None = None
+        self._updated_ms: int | None = None
 
-    def update(self, direction: float | None, now_ms: int) -> float | None:
-        """Return the current stabilized direction at ``now_ms``.
+    @property
+    def direction(self) -> float | None:
+        return self._direction
 
-        A new candidate starts its own timer.  The previous stable direction
-        remains active while the candidate is still settling.
-        """
-        if direction == self._direction:
-            self._candidate = direction
-            self._candidate_since_ms = now_ms
+    def reset(self) -> None:
+        self._direction = None
+        self._updated_ms = None
+
+    def update(self, target: float | None, now_ms: int) -> float | None:
+        """Move toward ``target`` using a time-based circular low-pass filter."""
+        if target is None:
+            self._updated_ms = now_ms
+            return self._direction
+        target %= 360
+        if self._direction is None or self._updated_ms is None:
+            self._direction = target
+            self._updated_ms = now_ms
             return self._direction
 
-        if direction != self._candidate:
-            self._candidate = direction
-            self._candidate_since_ms = now_ms
+        elapsed_ms = max(0, now_ms - self._updated_ms)
+        self._updated_ms = now_ms
+        if elapsed_ms == 0:
+            return self._direction
 
-        if (
-            self._candidate_since_ms is not None
-            and now_ms - self._candidate_since_ms >= self.stable_ms
-        ):
-            self._direction = self._candidate
-
+        delta = (target - self._direction + 180) % 360 - 180
+        progress = 1.0 - math.exp(-elapsed_ms / self.response_ms)
+        movement = delta * progress
+        maximum = self.max_speed_degrees_per_second * elapsed_ms / 1000.0
+        movement = min(maximum, max(-maximum, movement))
+        self._direction = (self._direction + movement) % 360
+        if abs(delta) < 0.1:
+            self._direction = target
         return self._direction

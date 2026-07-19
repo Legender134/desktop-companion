@@ -594,8 +594,6 @@ def test_controller_advances_manual_run_wander_gaze_and_drag(qapp, monkeypatch):
     assert controller.wander_target is None
 
     controller.behavior.set_wander_enabled(False)
-    controller.gaze_stabilizer.stable_ms = 0
-    controller._gaze_tick()
     controller._gaze_tick()
     controller._render_base(controller._now_ms())
 
@@ -692,7 +690,7 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.dispatch_menu(MenuCommand("center"))
     controller.dispatch_menu(MenuCommand("about"))
     assert about == [
-        ("关于桌面灵伴", "桌面灵伴 2.3.1\n可用宠物：3（南宫婉、十一、紫灵）")
+        ("关于桌面灵伴", "桌面灵伴 2.4.0\n可用宠物：3（南宫婉、十一、紫灵）")
     ]
 
     hooks[0].digit_pressed.emit(4)
@@ -897,6 +895,84 @@ def test_cursor_stillness_triggers_autonomous_action_after_eight_seconds(qapp):
         ActionId.PATROL,
         ActionId.CURIOUS,
     }
+    controller.shutdown()
+
+
+def test_active_gaze_releases_to_wander_and_mouse_motion_takes_control_again(
+    qapp, monkeypatch
+):
+    cursor = [QPoint(900, 300)]
+
+    class ControlledCursor:
+        @staticmethod
+        def pos():
+            return QPoint(cursor[0])
+
+    monkeypatch.setattr("shiyi_desktop_pet.app.QCursor", ControlledCursor)
+    settings = replace(
+        AppSettings(), wander_enabled=True, gaze_mode="active"
+    )
+    controller, _, _, _, _ = _controller(qapp, settings=settings)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    now = [100]
+    controller._now_ms = lambda: now[0]
+    controller._last_cursor_move_ms = 0
+    controller._last_cursor_position = QPoint(cursor[0])
+
+    controller._gaze_tick()
+    assert controller.behavior.mode is BehaviorMode.GAZE
+    assert not controller.wander_timer.isActive()
+
+    now[0] = 8_000
+    controller._gaze_tick()
+    assert controller.behavior.mode is BehaviorMode.WANDER
+    assert controller.behavior.gaze_degrees is None
+    assert controller.wander_timer.isActive()
+
+    cursor[0] = QPoint(950, 320)
+    now[0] = 8_050
+    controller._gaze_tick()
+    assert controller.behavior.mode is BehaviorMode.GAZE
+    assert controller.behavior.gaze_degrees is not None
+    assert not controller.wander_timer.isActive()
+    controller.shutdown()
+
+
+def test_always_gaze_suppresses_wander_and_autonomous_actions(qapp, monkeypatch):
+    class ControlledCursor:
+        @staticmethod
+        def pos():
+            return QPoint(900, 300)
+
+    monkeypatch.setattr("shiyi_desktop_pet.app.QCursor", ControlledCursor)
+    settings = replace(
+        AppSettings(), wander_enabled=True, gaze_mode="always"
+    )
+    controller, _, _, _, _ = _controller(qapp, settings=settings)
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller._now_ms = lambda: 60_000
+    controller._last_cursor_move_ms = 0
+
+    controller._gaze_tick()
+    controller._schedule_wander()
+    controller._schedule_autonomous()
+
+    assert controller.behavior.mode is BehaviorMode.GAZE
+    assert not controller.wander_timer.isActive()
+    assert not controller.autonomous_timer.isActive()
+    controller.shutdown()
+
+
+def test_gaze_mode_menu_command_is_persisted_in_runtime_settings(qapp):
+    controller, _, _, _, _ = _controller(qapp)
+
+    controller.dispatch_menu(MenuCommand("gaze_mode", "always"))
+
+    assert controller.settings.gaze_mode == "always"
+    with pytest.raises(ValueError, match="unsupported gaze mode"):
+        controller.dispatch_menu(MenuCommand("gaze_mode", "sometimes"))
     controller.shutdown()
 
 

@@ -94,7 +94,32 @@ def _menu_items(
         if look_degrees
         else ()
     )
-    gaze_toggle = (_toggle("看向鼠标", "gaze_enabled"),) if look_degrees else ()
+    gaze_controls = (
+        (
+            _toggle("看向鼠标", "gaze_enabled"),
+            MenuItem(
+                "注视方式",
+                children=(
+                    _choice(
+                        "鼠标活动时（推荐）",
+                        "gaze_mode",
+                        "active",
+                        "gaze_mode",
+                        "gaze_mode",
+                    ),
+                    _choice(
+                        "始终看向鼠标",
+                        "gaze_mode",
+                        "always",
+                        "gaze_mode",
+                        "gaze_mode",
+                    ),
+                ),
+            ),
+        )
+        if look_degrees
+        else ()
+    )
     return (
         MenuItem(
             "动作",
@@ -126,7 +151,7 @@ def _menu_items(
                 )
             ),
         ),
-        *gaze_toggle,
+        *gaze_controls,
         _toggle("自主小动作", "autonomous_actions_enabled"),
         _toggle("悬停数字快捷键", "hover_digits_enabled"),
         _toggle("始终置顶", "always_on_top"),

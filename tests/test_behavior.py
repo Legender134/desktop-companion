@@ -67,6 +67,15 @@ def test_constructor_derives_the_configured_base_mode():
     assert BehaviorEngine().mode is BehaviorMode.IDLE
 
 
+def test_live_gaze_takes_priority_over_wander_and_releases_back_to_it():
+    engine = BehaviorEngine(wander_enabled=True)
+    engine.request_gaze(45.0)
+    assert engine.mode is BehaviorMode.GAZE
+
+    engine.request_gaze(None)
+    assert engine.mode is BehaviorMode.WANDER
+
+
 def test_shutdown_cannot_be_resurrected_by_normal_intents():
     engine = BehaviorEngine()
     engine.begin_shutdown()

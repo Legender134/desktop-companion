@@ -65,6 +65,9 @@ def test_menu_contains_every_action_direction_and_toggle():
     for label in (
         "自动闲逛",
         "看向鼠标",
+        "注视方式",
+        "鼠标活动时（推荐）",
+        "始终看向鼠标",
         "自主小动作",
         "悬停数字快捷键",
         "始终置顶",
@@ -115,6 +118,7 @@ def test_menu_dispatches_typed_values_from_one_command_model(qtbot):
     _action(menu, "重新扫描宠物").trigger()
     _action(menu, "打开宠物目录").trigger()
     _action(menu, "自动闲逛").trigger()
+    _action(menu, "始终看向鼠标").trigger()
 
     assert dispatched == [
         MenuCommand("action", ActionId.JUMP),
@@ -125,6 +129,7 @@ def test_menu_dispatches_typed_values_from_one_command_model(qtbot):
         MenuCommand("refresh_pets"),
         MenuCommand("open_pets_directory"),
         MenuCommand("toggle", True, "wander_enabled"),
+        MenuCommand("gaze_mode", "always"),
     ]
 
 
@@ -141,6 +146,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     menu.aboutToShow.emit()
     assert not _action(menu, "自动闲逛").isChecked()
     assert _action(menu, "看向鼠标").isChecked()
+    assert _action(_submenu(menu, "注视方式"), "鼠标活动时（推荐）").isChecked()
     assert _action(menu, "自主小动作").isChecked()
     assert _action(_submenu(menu, "闲逛强度"), "标准").isChecked()
     assert _action(menu, "100%").isChecked()
@@ -152,6 +158,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
         state["settings"],
         wander_enabled=True,
         gaze_enabled=False,
+        gaze_mode="always",
         scale_percent=150,
         animation_speed="fast",
         movement_speed="slow",
@@ -162,6 +169,7 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     menu.aboutToShow.emit()
     assert _action(menu, "自动闲逛").isChecked()
     assert not _action(menu, "看向鼠标").isChecked()
+    assert _action(_submenu(menu, "注视方式"), "始终看向鼠标").isChecked()
     assert _action(menu, "150%").isChecked()
     assert _action(_submenu(menu, "动画速度"), "快速").isChecked()
     assert _action(_submenu(menu, "移动速度"), "慢速").isChecked()
@@ -375,6 +383,9 @@ def test_command_model_has_complete_exact_payload_table():
     wander_commands = [
         command for command in commands if command.kind == "wander_intensity"
     ]
+    gaze_mode_commands = [
+        command for command in commands if command.kind == "gaze_mode"
+    ]
     assert speed_commands == [
         MenuCommand(kind, value)
         for kind in ("animation_speed", "movement_speed")
@@ -383,6 +394,10 @@ def test_command_model_has_complete_exact_payload_table():
     assert wander_commands == [
         MenuCommand("wander_intensity", value)
         for value in ("quiet", "standard", "active")
+    ]
+    assert gaze_mode_commands == [
+        MenuCommand("gaze_mode", "active"),
+        MenuCommand("gaze_mode", "always"),
     ]
     assert terminal_commands == [
         MenuCommand("refresh_pets"),

@@ -1,6 +1,8 @@
 import math
 
-from shiyi_desktop_pet.gaze import GazeStabilizer, quantize_gaze
+import pytest
+
+from shiyi_desktop_pet.gaze import GazeSmoother, cursor_angle, quantize_gaze
 
 
 def test_screen_vectors_map_clockwise_from_up():
@@ -12,11 +14,12 @@ def test_screen_vectors_map_clockwise_from_up():
     assert quantize_gaze(2, 2, 18) is None
 
 
-def test_stabilizer_requires_80_ms_before_direction_switch():
-    gaze = GazeStabilizer(stable_ms=80)
-    assert gaze.update(90.0, 0) is None
-    assert gaze.update(90.0, 79) is None
-    assert gaze.update(90.0, 80) == 90.0
+def test_exact_cursor_angle_preserves_intermediate_directions():
+    assert cursor_angle(0, -100, 18) == 0.0
+    assert cursor_angle(100, 0, 18) == 90.0
+    assert cursor_angle(0, 100, 18) == 180.0
+    assert cursor_angle(-100, 0, 18) == 270.0
+    assert cursor_angle(2, 2, 18) is None
 
 
 def test_quantization_wraps_and_uses_22_5_degree_boundaries():
@@ -27,16 +30,26 @@ def test_quantization_wraps_and_uses_22_5_degree_boundaries():
     assert quantize_gaze(math.sin(math.radians(11.3)), -math.cos(math.radians(11.3)), 0) == 22.5
 
 
-def test_stabilizer_resets_changed_candidates_and_return_to_current_direction():
-    gaze = GazeStabilizer(stable_ms=80)
-    assert gaze.update(90.0, 0) is None
-    assert gaze.update(90.0, 80) == 90.0
-    assert gaze.update(180.0, 100) == 90.0
-    assert gaze.update(None, 150) == 90.0
-    assert gaze.update(180.0, 200) == 90.0
-    assert gaze.update(180.0, 279) == 90.0
-    assert gaze.update(180.0, 280) == 180.0
-    assert gaze.update(90.0, 300) == 180.0
-    assert gaze.update(180.0, 340) == 180.0
-    assert gaze.update(90.0, 400) == 180.0
-    assert gaze.update(90.0, 480) == 90.0
+def test_smoother_follows_shortest_arc_and_holds_inside_dead_zone():
+    gaze = GazeSmoother(response_ms=100)
+    assert gaze.update(350.0, 0) == 350.0
+    clockwise = gaze.update(10.0, 100)
+    assert clockwise is not None
+    assert clockwise > 350.0 or clockwise < 10.0
+    assert gaze.update(None, 150) == clockwise
+    gaze.reset()
+    assert gaze.direction is None
+
+
+def test_smoother_limits_large_jumps_so_keyframes_are_visited_in_order():
+    gaze = GazeSmoother(response_ms=100, max_speed_degrees_per_second=360)
+    assert gaze.update(0.0, 0) == 0.0
+    assert gaze.update(180.0, 50) == 342.0
+    assert gaze.update(180.0, 100) == 324.0
+
+
+def test_smoother_rejects_invalid_response_time():
+    with pytest.raises(ValueError, match="positive"):
+        GazeSmoother(response_ms=0)
+    with pytest.raises(ValueError, match="speed"):
+        GazeSmoother(max_speed_degrees_per_second=0)

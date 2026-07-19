@@ -26,7 +26,7 @@ from .constants import (
     CELL_WIDTH,
     KEY_TO_ACTION,
 )
-from .gaze import GazeStabilizer, quantize_gaze
+from .gaze import GazeSmoother, cursor_angle
 from .geometry import Point, Rect, Size, clamp_position
 from .keyboard_hook import LowLevelKeyboardHook
 from .logging_setup import configure_logging, install_exception_hook
@@ -261,7 +261,7 @@ class DesktopPetApplication:
         self.behavior = BehaviorEngine(wander_enabled=self._settings.wander_enabled)
         self.timeline = AnimationTimeline()
         self.wander_planner = WanderPlanner(self._rng)
-        self.gaze_stabilizer = GazeStabilizer()
+        self.gaze_smoother = GazeSmoother()
         self.window = window_factory(self.catalog)
         if qa_window:
             window_flags = self.window.windowFlags()
@@ -296,6 +296,7 @@ class DesktopPetApplication:
         self._clock.start()
         self._last_cursor_position = QCursor.pos()
         self._last_cursor_move_ms = self._now_ms()
+        self._live_gaze_active = False
         self._autonomous_not_before_ms = 0
         self.timeline.start(self.catalog.idle_action, self._now_ms())
 
@@ -725,6 +726,16 @@ class DesktopPetApplication:
                 raise ValueError(f"unsupported wander intensity: {value}")
             self._settings = replace(self._settings, wander_intensity=value)
             return
+        if kind == "gaze_mode":
+            value = str(command.value)
+            if value not in {"active", "always"}:
+                raise ValueError(f"unsupported gaze mode: {value}")
+            self._settings = replace(self._settings, gaze_mode=value)
+            self._last_cursor_position = QCursor.pos()
+            self._last_cursor_move_ms = self._now_ms()
+            self._live_gaze_active = False
+            self.gaze_smoother.reset()
+            return
         if kind == "center":
             self.center_on_cursor_screen()
             return
@@ -751,6 +762,9 @@ class DesktopPetApplication:
         catalog = self._catalog_loader(definition)
         self.catalog = catalog
         self._fixed_look_degrees = None
+        self._live_gaze_active = False
+        self.gaze_smoother.reset()
+        self.behavior.request_gaze(None)
         self._cancel_showcase()
         if self.behavior.current_action is not None:
             self.behavior.manual_finished()
@@ -839,6 +853,8 @@ class DesktopPetApplication:
         elif target == "gaze_enabled":
             self._last_cursor_position = QCursor.pos()
             self._last_cursor_move_ms = self._now_ms()
+            self._live_gaze_active = False
+            self.gaze_smoother.reset()
             if not enabled:
                 self.behavior.request_gaze(None)
         elif target == "autonomous_actions_enabled" and not enabled:
@@ -1125,32 +1141,61 @@ class DesktopPetApplication:
         )
 
     def _gaze_tick(self) -> None:
+        now_ms = self._now_ms()
         cursor = QCursor.pos()
         self._refresh_hover_snapshot(cursor)
-        if cursor != self._last_cursor_position:
+        cursor_moved = cursor != self._last_cursor_position
+        if cursor_moved:
             self._last_cursor_position = QPoint(cursor)
-            self._last_cursor_move_ms = self._now_ms()
+            self._last_cursor_move_ms = now_ms
             if self._gaze_delays_autonomous():
                 self._schedule_autonomous()
         if self._fixed_look_degrees is not None:
             return
-        if (
-            not self.catalog.supports_gaze
-            or not self._settings.gaze_enabled
-            or self.behavior.mode not in {BehaviorMode.IDLE, BehaviorMode.GAZE}
-        ):
-            if not self.catalog.supports_gaze:
-                self.behavior.request_gaze(None)
+        if not self.catalog.supports_gaze or not self._settings.gaze_enabled:
+            self._live_gaze_active = False
+            self.gaze_smoother.reset()
+            self.behavior.request_gaze(None)
             return
+
+        gaze_active = (
+            self._settings.gaze_mode == "always"
+            or now_ms - self._last_cursor_move_ms < _CURSOR_STILL_MS
+        )
+        if not gaze_active:
+            if self._live_gaze_active or self.behavior.gaze_degrees is not None:
+                self._live_gaze_active = False
+                self.gaze_smoother.reset()
+                self.behavior.request_gaze(None)
+                self.timeline.start(self.catalog.idle_action, now_ms)
+                self._render_current_frame()
+                self._schedule_wander()
+                self._schedule_autonomous()
+            return
+        if self.behavior.mode in {
+            BehaviorMode.MANUAL_ACTION,
+            BehaviorMode.DRAGGING,
+            BehaviorMode.SHUTTING_DOWN,
+        }:
+            return
+
+        activating_gaze = not self._live_gaze_active
+        if (cursor_moved or activating_gaze) and (
+            self.behavior.mode is BehaviorMode.WANDER
+            or self._wander_target is not None
+            or self.wander_timer.isActive()
+        ):
+            self._interrupt_wander(reschedule=False)
+        self._live_gaze_active = True
         center_x = self.window.x() + self.window.width() / 2
         center_y = self.window.y() + self.window.height() / 2
-        direction = quantize_gaze(
+        direction = cursor_angle(
             cursor.x() - center_x,
             cursor.y() - center_y,
             dead_zone=24 * self._settings.scale_percent / 100.0,
         )
-        stable = self.gaze_stabilizer.update(direction, self._now_ms())
-        self.behavior.request_gaze(stable)
+        smoothed = self.gaze_smoother.update(direction, now_ms)
+        self.behavior.request_gaze(0.0 if smoothed is None else smoothed)
 
     def _render_base(self, now_ms: int) -> None:
         if self._fixed_look_degrees is not None and self.catalog.supports_gaze:
@@ -1161,7 +1206,9 @@ class DesktopPetApplication:
             and self.behavior.mode is BehaviorMode.GAZE
             and self.behavior.gaze_degrees is not None
         ):
-            self._show_frame(self.catalog.look_frame(self.behavior.gaze_degrees))
+            self._show_frame(
+                self.catalog.nearest_look_frame(self.behavior.gaze_degrees)
+            )
             return
         idle = self.catalog.idle_action
         spec = self.catalog.spec(idle)
@@ -1219,6 +1266,11 @@ class DesktopPetApplication:
         return (
             self._settings.autonomous_actions_enabled
             and not self._settings.wander_enabled
+            and not (
+                self._settings.gaze_enabled
+                and self._settings.gaze_mode == "always"
+                and self.catalog.supports_gaze
+            )
             and self.behavior.mode in {BehaviorMode.IDLE, BehaviorMode.GAZE}
             and self.behavior.current_action is None
             and self._fixed_look_degrees is None
@@ -1227,7 +1279,11 @@ class DesktopPetApplication:
         )
 
     def _gaze_delays_autonomous(self) -> bool:
-        return self._settings.gaze_enabled and self.catalog.supports_gaze
+        return (
+            self._settings.gaze_enabled
+            and self._settings.gaze_mode == "active"
+            and self.catalog.supports_gaze
+        )
 
     def _schedule_autonomous(self) -> None:
         if not self._autonomous_eligible():
