@@ -6,17 +6,18 @@
 
 | 你想做什么 | 应该点击哪里 |
 |---|---|
-| 只想安装使用 | [Gitee 直接下载](https://gitee.com/legender134/desktop-companion/releases/download/v2.3.0/桌面灵伴安装程序.exe) / [GitHub 直接下载](https://github.com/Legender134/desktop-companion/releases/download/v2.3.0/DesktopCompanion-2.3.0-Setup.exe) |
+| 只想安装使用 | [Gitee 直接下载](https://gitee.com/legender134/desktop-companion/releases/download/v2.4.0/DesktopCompanion-2.4.0-setup.exe) / [GitHub 直接下载](https://github.com/Legender134/desktop-companion/releases/download/v2.4.0/DesktopCompanion-2.4.0-setup.exe) |
 | 完全不懂代码托管网站 | [查看新手使用指南](docs/新手使用指南.md) |
+| 想知道每版更新了什么 | [查看完整更新日志](CHANGELOG.md) |
 | 想添加自己的宠物 | [查看添加新宠物指南](docs/添加新宠物指南.md) |
 | 已经会制作图集，需要查精确标准 | [查看 v3 动态宠物包技术规范](docs/pet-pack-format-v3.md) |
 | 想修改或构建程序 | 跳到[从源码准备、构建与验证](#从源码准备构建与验证) |
 
-> 普通用户只需要下载其中一个安装程序：在 Gitee 下载 `桌面灵伴安装程序.exe`，或在 GitHub 下载 `DesktopCompanion-2.3.0-Setup.exe`。不要下载名字中带有 `Source`、`源代码` 的压缩包，它们是给开发者看的源码，不能直接安装。
+> 普通用户只需要下载其中一个平台的 `DesktopCompanion-2.4.0-setup.exe`。不要下载名字中带有 `Source`、`源代码` 的压缩包，它们是给开发者看的源码，不能直接安装。
 
 ### 三步开始使用
 
-1. 从 Gitee 下载并双击 `桌面灵伴安装程序.exe`，或从 GitHub 下载并双击 `DesktopCompanion-2.3.0-Setup.exe`。
+1. 从 Gitee 或 GitHub 下载并双击 `DesktopCompanion-2.4.0-setup.exe`。
 2. 按安装向导完成安装；不需要安装 Python、Qt、Codex 或开发工具。
 3. 从桌面“桌面灵伴”快捷方式启动。右键宠物或右下角托盘图标即可切换宠物、播放动作和修改设置。
 
@@ -33,24 +34,22 @@
 
 ## 下载文件怎么选
 
-[Gitee v2.3.0 发布页](https://gitee.com/legender134/desktop-companion/releases/tag/v2.3.0)和 [GitHub 最新版发布页](https://github.com/Legender134/desktop-companion/releases/latest)都提供可直接下载的安装程序：
+[Gitee v2.4.0 发布页](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.0)和 [GitHub 最新版发布页](https://github.com/Legender134/desktop-companion/releases/latest)都提供可直接下载的安装程序：
 
 | 文件 | 用途 | 普通用户需要吗 |
 |---|---|---|
-| Gitee：`桌面灵伴安装程序.exe`；GitHub：`DesktopCompanion-2.3.0-Setup.exe` | Windows 安装程序 | **需要，下载这个** |
-| Gitee：`安装说明.md`；GitHub：`INSTALL-zh-CN.md` | 离线中文安装说明 | 可选 |
-| `SHA256SUMS.txt` | 校验下载文件是否完整 | 可选 |
-| Gitee：`桌面灵伴2.3源代码.zip`；GitHub：`DesktopCompanion-2.3.0-Source.zip` | 对应版本的源码归档 | 不需要 |
+| `DesktopCompanion-2.4.0-setup.exe` | Windows 安装程序 | **需要，下载这个** |
 | GitHub 自动生成的 `Source code` | 标签源码快照 | 不需要 |
 
-本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。v2.3.0 发布验证结果见 [docs/manual-qa-v2.3.md](docs/manual-qa-v2.3.md)，此前的 v2.2 验收记录仍保留在 [docs/manual-qa-v2.md](docs/manual-qa-v2.md)。
+本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。v2.4.0 发布验证结果见 [docs/manual-qa-v2.4.md](docs/manual-qa-v2.4.md)，每个正式版本的主要变化见[更新日志](CHANGELOG.md)。
 
 ### 历史版本
 
-新用户应优先安装 v2.3.0。旧版本仍保留用于学习、比较和回退：
+新用户应优先安装 v2.4.0。旧版本仍保留用于学习、比较和回退：
 
 | 版本 | 主要内容 | Gitee 下载页 | GitHub 下载页 |
 |---|---|---|---|
+| v2.4.0 | 南宫婉 64 方向平滑注视、两种注视模式、菜单圆形问号与参数级详情 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.0) |
 | v2.3.0 | 内置南宫婉、v3 动态动作、可变帧数、遁光移动、动作分组和闲逛强度 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.3.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.3.0) |
 | v2.2.0 | 单击互动、自主小动作、动作展示、宠物专属动作名称与权重 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.2.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.2.0) |
 | v2.1.0 | 动态宠物包与跟随当前宠物的托盘图标 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.1.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.1.0) |
