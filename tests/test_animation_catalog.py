@@ -138,6 +138,32 @@ def test_catalog_exposes_pet_specific_menu_names_and_safe_autoplay_pool():
     assert all(not shiyi.look_frame(degrees).image.isNull() for degrees in shiyi.look_degrees)
 
 
+def test_catalog_builds_precise_action_help_and_current_digit_mapping():
+    catalog = AnimationCatalog.load_pet("nangongwan")
+    details = catalog.action_menu_details()
+
+    burst = details["burstRight"]
+    assert "10 帧" in burst
+    assert "90–160 毫秒" in burst
+    assert "总时长约 1.2 秒" in burst
+    assert "第 4–8 帧" in burst
+    assert "50%" in burst
+    assert "至少 280 像素" in burst
+    assert "1/20" in burst
+    assert "45 秒" in burst
+
+    spell = details["reincarnationLight"]
+    assert "180 秒" in spell
+    assert "spell" in spell
+    assert "慢速时长乘 1.25" in spell
+
+    shortcuts = dict(catalog.digit_shortcut_labels())
+    assert shortcuts[1] == "静立凝神"
+    assert shortcuts[2] == "御风向右"
+    assert shortcuts[4] == "遗帕相赠"
+    assert shortcuts[0] == "按权重随机"
+
+
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():
     shiyi = AnimationCatalog.load_pet("shiyi")
     ziling = AnimationCatalog.load_pet("ziling")

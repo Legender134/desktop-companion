@@ -308,6 +308,9 @@ class DesktopPetApplication:
             pet_choices_supplier=lambda: self.pet_choices,
             action_items_supplier=lambda: self.catalog.action_menu_items(),
             look_degrees_supplier=lambda: tuple(self.catalog.manual_look_degrees),
+            action_details_supplier=lambda: self.catalog.action_menu_details(),
+            gaze_frame_count_supplier=lambda: len(self.catalog.look_degrees),
+            shortcut_labels_supplier=lambda: self.catalog.digit_shortcut_labels(),
         )
         self.body_menu = self.menu_controller.create_menu(self.window)
         self.tray = tray_factory(self.window, self.menu_controller)
@@ -836,6 +839,7 @@ class DesktopPetApplication:
             "autonomous_actions_enabled",
             "hover_digits_enabled",
             "always_on_top",
+            "menu_details_enabled",
         }:
             raise ValueError(f"unsupported setting toggle: {target}")
         self._settings = replace(self._settings, **{target: enabled})

@@ -521,6 +521,7 @@ def test_menu_dispatch_updates_runtime_settings_and_shutdown_saves(qapp):
     controller.start(startup=True)
     controller.dispatch_menu(MenuCommand("toggle", True, "wander_enabled"))
     controller.dispatch_menu(MenuCommand("toggle", False, "gaze_enabled"))
+    controller.dispatch_menu(MenuCommand("toggle", True, "menu_details_enabled"))
     controller.dispatch_menu(MenuCommand("toggle", True, "startup_enabled"))
     controller.dispatch_menu(MenuCommand("scale", 125))
     controller.dispatch_menu(MenuCommand("animation_speed", "fast"))
@@ -530,6 +531,7 @@ def test_menu_dispatch_updates_runtime_settings_and_shutdown_saves(qapp):
 
     assert controller.settings.wander_enabled
     assert not controller.settings.gaze_enabled
+    assert controller.settings.menu_details_enabled
     assert startup.enabled
     assert controller.settings.scale_percent == 125
     assert controller.settings.wander_intensity == "quiet"

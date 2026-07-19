@@ -14,10 +14,10 @@ class FakeLogger:
 def test_first_launch_defaults_match_approved_design(tmp_path: Path):
     settings = SettingsStore(tmp_path / "settings.ini").load()
     assert settings == AppSettings(
-        schema_version=5, pet_id="shiyi", wander_enabled=False,
+        schema_version=6, pet_id="shiyi", wander_enabled=False,
         wander_intensity="standard", gaze_enabled=True, gaze_mode="active",
         autonomous_actions_enabled=True,
-        hover_digits_enabled=True, always_on_top=True,
+        hover_digits_enabled=True, always_on_top=True, menu_details_enabled=False,
         scale_percent=100, animation_speed="normal", movement_speed="normal",
         screen_name="", relative_x=0.85, relative_y=0.75,
     )
@@ -29,12 +29,14 @@ def test_round_trip_and_corrupt_file_fallback(tmp_path: Path):
         pet_id="ziling",
         wander_enabled=True,
         wander_intensity="quiet",
+        menu_details_enabled=True,
         scale_percent=125,
     )
     store.save(changed)
     assert store.load().wander_enabled
     assert store.load().pet_id == "ziling"
     assert store.load().wander_intensity == "quiet"
+    assert store.load().menu_details_enabled is True
     store.path.write_text("not-an-ini", encoding="utf-8")
     assert store.load().scale_percent == 100
 
@@ -43,13 +45,14 @@ def test_older_schema_is_migrated_with_new_defaults(tmp_path: Path):
     path = tmp_path / "settings.ini"
     path.write_text("[settings]\nschema_version=0\nwander_enabled=true\n", encoding="utf-8")
     loaded = SettingsStore(path).load()
-    assert loaded.schema_version == 5
+    assert loaded.schema_version == 6
     assert loaded.autonomous_actions_enabled is True
     assert loaded.pet_id == "shiyi"
     assert loaded.wander_enabled is True
     assert loaded.wander_intensity == "standard"
     assert loaded.gaze_enabled is True
     assert loaded.gaze_mode == "active"
+    assert loaded.menu_details_enabled is False
 
 
 def test_unknown_but_valid_pet_id_is_preserved_for_dynamic_registry(tmp_path: Path):
@@ -74,7 +77,7 @@ def test_invalid_values_are_normalized_and_future_schema_falls_back(tmp_path: Pa
     assert settings.wander_intensity == "standard"
     assert (settings.relative_x, settings.relative_y) == (1.0, 0.0)
 
-    path.write_text("[settings]\nschema_version=6\n", encoding="utf-8")
+    path.write_text("[settings]\nschema_version=7\n", encoding="utf-8")
     assert SettingsStore(path).load() == AppSettings()
 
 

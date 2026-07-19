@@ -1,7 +1,8 @@
 from dataclasses import replace
 
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QSystemTrayIcon
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QHelpEvent, QIcon, QMouseEvent
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QToolTip
 
 from shiyi_desktop_pet.menu_controller import MenuCommand, MenuController
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
@@ -32,6 +33,24 @@ def _leaf_items(items):
             yield from _leaf_items(item.children)
         else:
             yield item
+
+
+def _rendered_action(menu, label):
+    for candidate in menu.actions():
+        if candidate.property("_shiyi_label") == label:
+            return candidate
+        if candidate.menu() is not None:
+            found = _rendered_action(candidate.menu(), label)
+            if found is not None:
+                return found
+    return None
+
+
+def _rendered_actions(menu):
+    for action in menu.actions():
+        yield action
+        if action.menu() is not None:
+            yield from _rendered_actions(action.menu())
 
 
 def test_menu_contains_every_action_direction_and_toggle():
@@ -72,6 +91,7 @@ def test_menu_contains_every_action_direction_and_toggle():
         "悬停数字快捷键",
         "始终置顶",
         "开机启动",
+        "显示详情",
     ):
         assert label in labels
     for label in (
@@ -176,6 +196,145 @@ def test_checked_state_refreshes_each_time_menu_opens(qtbot):
     assert _action(_submenu(menu, "闲逛强度"), "活跃").isChecked()
     assert _action(menu, "开机启动").isChecked()
     assert _action(_submenu(menu, "切换宠物"), "紫灵").isChecked()
+
+
+def test_details_mode_marks_every_item_and_explains_only_question_area(
+    qtbot, monkeypatch
+):
+    catalog = AnimationCatalog.load_pet("nangongwan")
+    controller = MenuController(
+        lambda: AppSettings(menu_details_enabled=True),
+        lambda: False,
+        lambda command: None,
+        pet_choices_supplier=lambda: (("shiyi", "十一"), ("ziling", "紫灵")),
+        action_items_supplier=catalog.action_menu_items,
+        look_degrees_supplier=lambda: tuple(catalog.manual_look_degrees),
+        action_details_supplier=catalog.action_menu_details,
+        gaze_frame_count_supplier=lambda: len(catalog.look_degrees),
+        shortcut_labels_supplier=catalog.digit_shortcut_labels,
+    )
+    menu = controller.create_menu()
+    menu.aboutToShow.emit()
+
+    actions = tuple(_rendered_actions(menu))
+    assert actions
+    assert all("?" not in action.text() for action in actions)
+    assert all(action.toolTip() for action in actions)
+    assert all(not item.toolTipsVisible() for item in (menu, *[a.menu() for a in actions if a.menu()]))
+    def compact_tooltip(label):
+        return _rendered_action(menu, label).toolTip().replace("\n", "")
+
+    assert "WindowStaysOnTopHint" in compact_tooltip("始终置顶")
+    assert "8–18" in compact_tooltip("安静")
+    assert "64" in compact_tooltip("看向鼠标")
+    assert "5.625°" in compact_tooltip("看向鼠标")
+    assert "10" in compact_tooltip("遁光向右")
+    assert "50%" in compact_tooltip("遁光向右")
+    assert "45" in compact_tooltip("遁光向右")
+    assert "1=静立凝神" in compact_tooltip("悬停数字快捷键")
+    assert _rendered_action(menu, "显示详情").isChecked()
+
+    menu.ensurePolished()
+    menu.resize(menu.sizeHint())
+    action = _rendered_action(menu, "自动闲逛")
+    geometry = menu.actionGeometry(action)
+    circle = menu.detail_help_rect(action)
+    assert circle.width() >= 16
+    assert geometry.top() <= circle.center().y() <= geometry.bottom()
+    assert circle.right() < menu.width()
+    shown = []
+    hidden = []
+    monkeypatch.setattr(QToolTip, "showText", lambda *args: shown.append(args))
+    monkeypatch.setattr(QToolTip, "hideText", lambda: hidden.append(True))
+    monkeypatch.setattr(QToolTip, "isVisible", lambda: bool(shown) and not hidden)
+
+    immediate_event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(circle.center()),
+        QPointF(menu.mapToGlobal(circle.center())),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(menu, immediate_event)
+    assert shown
+
+    shown.clear()
+    hidden.clear()
+
+    left_event = QHelpEvent(
+        QEvent.Type.ToolTip,
+        QPoint(geometry.left() + 8, geometry.center().y()),
+        QPoint(10, 10),
+    )
+    QApplication.sendEvent(menu, left_event)
+    assert not shown
+    assert hidden
+
+    question_event = QHelpEvent(
+        QEvent.Type.ToolTip,
+        circle.center(),
+        QPoint(20, 20),
+    )
+    QApplication.sendEvent(menu, question_event)
+    assert shown
+
+    submenu_action = _rendered_action(menu, "闲逛强度")
+    submenu_geometry = menu.actionGeometry(submenu_action)
+    submenu_circle = menu.detail_help_rect(submenu_action)
+    before_submenu = len(shown)
+    submenu_question_event = QHelpEvent(
+        QEvent.Type.ToolTip,
+        submenu_circle.center(),
+        QPoint(30, 30),
+    )
+    QApplication.sendEvent(menu, submenu_question_event)
+    assert len(shown) == before_submenu + 1
+
+    arrow_event = QHelpEvent(
+        QEvent.Type.ToolTip,
+        QPoint(submenu_geometry.right() - 4, submenu_geometry.center().y()),
+        QPoint(40, 40),
+    )
+    QApplication.sendEvent(menu, arrow_event)
+    assert len(shown) == before_submenu + 1
+
+
+def test_details_mode_can_be_disabled_without_leaving_question_marks(qtbot):
+    state = {"settings": AppSettings(menu_details_enabled=True)}
+    controller = MenuController(
+        lambda: state["settings"],
+        lambda: False,
+        lambda command: None,
+        pet_choices_supplier=lambda: (("shiyi", "十一"),),
+    )
+    menu = controller.create_menu()
+    menu.aboutToShow.emit()
+    first_filter = menu._shiyi_detail_help_filter
+    assert first_filter is not None
+
+    state["settings"] = replace(state["settings"], menu_details_enabled=False)
+    menu.aboutToShow.emit()
+
+    assert getattr(menu, "_shiyi_detail_help_filter", None) is None
+    assert menu._detail_help_enabled is False
+    assert all("?" not in action.text() for action in _rendered_actions(menu))
+
+
+def test_every_declarative_menu_item_has_a_detail_description():
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        lambda command: None,
+        pet_choices_supplier=lambda: (("shiyi", "十一"),),
+    )
+
+    def all_items(items):
+        for item in items:
+            yield item
+            yield from all_items(item.children)
+
+    assert all(item.description.strip() for item in all_items(controller.items))
 
 
 def test_pet_choices_are_rebuilt_when_menu_opens(qtbot):
@@ -372,6 +531,7 @@ def test_command_model_has_complete_exact_payload_table():
         "hover_digits_enabled",
         "always_on_top",
         "startup_enabled",
+        "menu_details_enabled",
     ]
     assert all(command.value is None for command in toggle_commands)
     assert scale_commands == [MenuCommand("scale", value) for value in (75, 100, 125, 150)]

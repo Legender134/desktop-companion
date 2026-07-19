@@ -13,7 +13,7 @@ from .pet_registry import is_valid_pet_id
 from .product import DEFAULT_PET_ID
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 VALID_SCALES = frozenset({75, 100, 125, 150})
 VALID_SPEEDS = frozenset({"slow", "normal", "fast"})
 VALID_WANDER_INTENSITIES = frozenset({"quiet", "standard", "active"})
@@ -35,6 +35,7 @@ class AppSettings:
     autonomous_actions_enabled: bool = True
     hover_digits_enabled: bool = True
     always_on_top: bool = True
+    menu_details_enabled: bool = False
     scale_percent: int = 100
     animation_speed: str = "normal"
     movement_speed: str = "normal"
@@ -115,6 +116,9 @@ class SettingsStore:
             section, "hover_digits_enabled", defaults.hover_digits_enabled
         )
         values["always_on_top"] = self._read_bool(section, "always_on_top", defaults.always_on_top)
+        values["menu_details_enabled"] = self._read_bool(
+            section, "menu_details_enabled", defaults.menu_details_enabled
+        )
         scale = self._read_int(section, "scale_percent", defaults.scale_percent)
         values["scale_percent"] = scale if scale in VALID_SCALES else defaults.scale_percent
         animation_speed = section.get("animation_speed", defaults.animation_speed).lower()
@@ -194,6 +198,7 @@ class SettingsStore:
             autonomous_actions_enabled=bool(settings.autonomous_actions_enabled),
             hover_digits_enabled=bool(settings.hover_digits_enabled),
             always_on_top=bool(settings.always_on_top),
+            menu_details_enabled=bool(settings.menu_details_enabled),
             scale_percent=(
                 settings.scale_percent if settings.scale_percent in VALID_SCALES else AppSettings.scale_percent
             ),

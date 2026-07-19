@@ -8,6 +8,7 @@ from .constants import (
     CELL_HEIGHT,
     CELL_WIDTH,
     DEFAULT_PET_ACTIONS,
+    KEY_TO_ACTION,
     LOOK_DEGREES,
 )
 from .models import (
@@ -27,6 +28,44 @@ def _has_visible_pixel(image: QImage) -> bool:
         image.pixelColor(x, y).alpha() > 0
         for y in range(image.height())
         for x in range(image.width())
+    )
+
+
+def _seconds(milliseconds: int) -> str:
+    value = milliseconds / 1000.0
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _action_timing_text(spec: AnimationSpec) -> str:
+    durations = spec.durations
+    if len(set(durations)) == 1:
+        frame_text = (
+            f"{spec.frame_count} 帧，每帧 {durations[0]} 毫秒"
+            f"（约 {1000 / durations[0]:.1f} 帧/秒）"
+        )
+    else:
+        average = spec.cycle_ms / spec.frame_count
+        frame_text = (
+            f"{spec.frame_count} 帧，单帧 {min(durations)}–{max(durations)} 毫秒"
+            f"（平均 {average:.0f} 毫秒/帧，约 {1000 / average:.1f} 帧/秒）"
+        )
+    if spec.loops is None:
+        playback = f"单轮 {_seconds(spec.cycle_ms)} 秒并持续循环"
+    else:
+        total_ms = spec.cycle_ms * spec.loops + spec.hold_ms
+        playback = f"播放 {spec.loops} 轮，总时长约 {_seconds(total_ms)} 秒"
+        if spec.hold_ms:
+            playback += f"（其中末帧停留 {_seconds(spec.hold_ms)} 秒）"
+    return f"{frame_text}；{playback}"
+
+
+def _nominal_weight_text(weight: int, total: int, pool_name: str) -> str:
+    if weight <= 0:
+        return f"不会进入{pool_name}的自动候选池"
+    percentage = weight / max(1, total) * 100
+    return (
+        f"{pool_name}基础权重为 {weight}/{max(1, total)}"
+        f"（全部候选均可用时约 {percentage:.1f}%）"
     )
 
 
@@ -233,6 +272,107 @@ class AnimationCatalog:
             for definition in self._action_definitions
             if definition.show_in_menu and definition.role is not ActionRole.GAZE
         )
+
+    def action_menu_details(self) -> dict[ActionKey, str]:
+        """Build precise, pet-specific help text from validated action metadata."""
+        interaction_total = sum(
+            definition.autoplay_weight
+            for definition in self._action_definitions
+            if definition.role is ActionRole.INTERACTION
+            and definition.autoplay_weight > 0
+        )
+        movement_totals = {
+            direction: sum(
+                definition.autoplay_weight
+                for definition in self._action_definitions
+                if definition.role in {ActionRole.MOVE, ActionRole.BURST_MOVE}
+                and definition.direction == direction
+                and definition.autoplay_weight > 0
+            )
+            for direction in (-1, 1)
+        }
+        details: dict[ActionKey, str] = {}
+        for definition in self._action_definitions:
+            if not definition.show_in_menu or definition.role is ActionRole.GAZE:
+                continue
+            spec = self.spec(definition.action_id)
+            timing = _action_timing_text(spec)
+            speed_note = (
+                "以上时长按“正常”动画速度计算；慢速时长乘 1.25，快速时长乘 0.75。"
+            )
+            if definition.role is ActionRole.IDLE:
+                behavior = (
+                    "这是没有手动动作、闲逛或注视任务时使用的基础待机；"
+                    "从菜单选择它会立即结束当前手动动作并回到待机。"
+                )
+            elif definition.role is ActionRole.MOVE:
+                direction = "右" if definition.direction > 0 else "左"
+                weight = _nominal_weight_text(
+                    definition.autoplay_weight,
+                    movement_totals[definition.direction],
+                    "同方向闲逛动作",
+                )
+                behavior = (
+                    f"这是普通向{direction}移动。自动闲逛时，窗口按慢速 75、正常 120、"
+                    "快速 180 像素/秒移动；手动选择时，100% 大小每切换一帧横移 12 像素，"
+                    f"大小设置会同比缩放该距离。{weight}。"
+                )
+            elif definition.role is ActionRole.BURST_MOVE:
+                direction = "右" if definition.direction > 0 else "左"
+                start_frame = (definition.travel_start_frame or 0) + 1
+                end_frame = (
+                    definition.travel_end_frame
+                    if definition.travel_end_frame is not None
+                    else spec.frame_count - 1
+                ) + 1
+                ratio = definition.travel_distance_ratio or 0.0
+                vertical = definition.max_vertical_ratio or 0.0
+                weight = _nominal_weight_text(
+                    definition.autoplay_weight,
+                    movement_totals[definition.direction],
+                    "同方向闲逛动作",
+                )
+                behavior = (
+                    f"这是向{direction}遁光，位移集中在第 {start_frame}–{end_frame} 帧。"
+                    f"目标横向距离为屏幕可移动宽度的 {ratio * 100:.0f}%；自动闲逛只有距离至少"
+                    f" {definition.min_distance} 像素且边缘空间足够时才允许触发，垂直偏移最多为"
+                    f"可移动高度的 {vertical * 100:.0f}%。{weight}；单次触发后冷却"
+                    f" {_seconds(definition.cooldown_ms)} 秒。"
+                )
+            else:
+                weight = _nominal_weight_text(
+                    definition.autoplay_weight,
+                    interaction_total,
+                    "自主小动作",
+                )
+                behavior = f"{weight}"
+                if definition.cooldown_ms:
+                    behavior += (
+                        f"；播放一次后至少冷却 {_seconds(definition.cooldown_ms)} 秒，"
+                        "冷却期间随机动作不会再次选中它"
+                    )
+                if definition.autoplay_group:
+                    behavior += (
+                        f"；属于“{definition.autoplay_group}”特效组，程序会避免同组动作连续出现"
+                    )
+                behavior += "。"
+            details[definition.action_id] = f"{timing}。{behavior}{speed_note}"
+        return details
+
+    def digit_shortcut_labels(self) -> tuple[tuple[int, str], ...]:
+        """Return the current pet's resolved labels for the fixed 1–9/0 slots."""
+        labels: list[tuple[int, str]] = []
+        for digit in (*range(1, 10), 0):
+            requested = KEY_TO_ACTION[digit]
+            if requested is ActionId.RANDOM:
+                labels.append((digit, "按权重随机"))
+                continue
+            try:
+                action = self.resolve_action(requested)
+            except ValueError:
+                continue
+            labels.append((digit, self.definition(action).label))
+        return tuple(labels)
 
     def autoplay_actions(self) -> tuple[tuple[ActionKey, int], ...]:
         return tuple(
