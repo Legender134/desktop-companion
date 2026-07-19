@@ -1,7 +1,7 @@
 {
   "id": "nangongwan",
   "displayName": "南宫婉",
-  "description": "《凡人修仙传》最新蓝银造型的南宫婉桌面灵伴测试包，含十六向鼠标注视、静立凝神、左右御风、双向遁光、日常陪伴，以及由月轮、星流和紫白神光构成的七套特效动作。",
+  "description": "《凡人修仙传》最新蓝银造型的南宫婉桌面灵伴测试包，含六十四向伪连续鼠标注视、静立凝神、左右御风、双向遁光、日常陪伴，以及由月轮、星流和紫白神光构成的七套特效动作。",
   "spriteVersionNumber": 3,
   "spritesheetPath": "spritesheet.webp",
   "iconFrame": {
@@ -239,7 +239,7 @@
       "label": "随眸相望",
       "role": "gaze",
       "row": 19,
-      "frameCount": 16,
+      "frameCount": 64,
       "frameMs": 100,
       "showInMenu": false
     }

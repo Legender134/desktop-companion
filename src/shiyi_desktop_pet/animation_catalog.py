@@ -146,11 +146,16 @@ class AnimationCatalog:
                 for index in range(16)
             )
         elif gaze is not None:
-            self.look_degrees = LOOK_DEGREES
             self._look_frames = self._actions[gaze.action_id]
+            step = 360.0 / len(self._look_frames)
+            self.look_degrees = tuple(
+                index * step for index in range(len(self._look_frames))
+            )
         else:
             self.look_degrees = ()
             self._look_frames = ()
+        menu_stride = max(1, len(self.look_degrees) // 16)
+        self.manual_look_degrees = self.look_degrees[::menu_stride]
 
         self._icon_image = self._cell(*self.icon_frame)
         if not _has_visible_pixel(self._icon_image):
@@ -290,14 +295,15 @@ class AnimationCatalog:
         raise ValueError(f"unsupported action: {requested}")
 
     def look_frame(self, degrees: float) -> FrameAsset:
-        index = round(degrees / 22.5)
+        step = 360.0 / len(self._look_frames) if self._look_frames else 0.0
+        index = round(degrees / step) if step else 0
         if (
             not self.supports_gaze
             or not 0.0 <= degrees < 360.0
-            or abs(degrees - index * 22.5) > 1e-6
+            or abs(degrees - index * step) > 1e-6
         ):
-            raise ValueError("direction must be a supported 22.5-degree step")
-        return self._look_frames[index]
+            raise ValueError("direction must be a supported gaze step")
+        return self._look_frames[index % len(self._look_frames)]
 
     def nearest_look_frame(self, degrees: float) -> FrameAsset:
         """Return the nearest clear gaze keyframe for an arbitrary angle."""
@@ -308,7 +314,8 @@ class AnimationCatalog:
             or not 0.0 <= float(degrees) < 360.0
         ):
             raise ValueError("direction must be between 0 and 360 degrees")
-        index = round(float(degrees) / 22.5) % len(self._look_frames)
+        step = 360.0 / len(self._look_frames)
+        index = round(float(degrees) / step) % len(self._look_frames)
         return self._look_frames[index]
 
     def hit_test(self, frame: FrameAsset, x: float, y: float, scale: float) -> bool:

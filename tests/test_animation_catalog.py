@@ -214,7 +214,7 @@ def test_alpha_hit_test_rejects_invalid_scale_and_upper_bounds():
 
 
 def test_unknown_direction_is_rejected():
-    with pytest.raises(ValueError, match="22.5-degree"):
+    with pytest.raises(ValueError, match="supported gaze step"):
         AnimationCatalog.load_default().look_frame(13.0)
 
 
@@ -233,6 +233,18 @@ def test_nearest_gaze_accepts_continuous_angles_and_wraps_at_zero():
 
     with pytest.raises(ValueError, match="between 0 and 360"):
         catalog.nearest_look_frame(360.0)
+
+
+def test_sixty_four_direction_gaze_uses_fine_runtime_steps_and_compact_manual_menu():
+    catalog = AnimationCatalog.load_pet("nangongwan")
+
+    assert len(catalog.look_degrees) == 64
+    assert catalog.look_degrees[:3] == (0.0, 5.625, 11.25)
+    assert len(catalog.manual_look_degrees) == 16
+    assert catalog.manual_look_degrees[:3] == (0.0, 22.5, 45.0)
+    assert catalog.nearest_look_frame(2.8) is catalog.look_frame(0.0)
+    assert catalog.nearest_look_frame(2.9) is catalog.look_frame(5.625)
+    assert catalog.nearest_look_frame(357.5) is catalog.look_frame(0.0)
 
 
 def test_v3_catalog_supports_dynamic_frame_counts_roles_and_mirrored_actions():

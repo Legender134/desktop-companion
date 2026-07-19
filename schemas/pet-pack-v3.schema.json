@@ -124,6 +124,15 @@
             {"required": ["frameMs"], "not": {"required": ["frameDurations"]}},
             {"required": ["frameDurations"], "not": {"required": ["frameMs"]}}
           ]
+        },
+        {
+          "if": {
+            "properties": {"role": {"const": "gaze"}},
+            "required": ["role"]
+          },
+          "then": {
+            "properties": {"frameCount": {"enum": [16, 32, 64]}}
+          }
         }
       ],
       "unevaluatedProperties": false

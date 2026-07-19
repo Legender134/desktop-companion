@@ -307,7 +307,7 @@ class DesktopPetApplication:
             self.logger,
             pet_choices_supplier=lambda: self.pet_choices,
             action_items_supplier=lambda: self.catalog.action_menu_items(),
-            look_degrees_supplier=lambda: tuple(self.catalog.look_degrees),
+            look_degrees_supplier=lambda: tuple(self.catalog.manual_look_degrees),
         )
         self.body_menu = self.menu_controller.create_menu(self.window)
         self.tray = tray_factory(self.window, self.menu_controller)

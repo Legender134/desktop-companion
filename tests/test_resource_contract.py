@@ -83,7 +83,7 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert manifest["spriteVersionNumber"] == 3
     assert manifest["spritesheetPath"] == "spritesheet.webp"
     assert len(manifest["actions"]) == 20
-    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 190
+    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 238
     assert manifest["actions"]["idle"]["role"] == "idle"
     assert manifest["actions"]["moveRight"]["role"] == "move"
     assert manifest["actions"]["moveLeft"]["role"] == "move"
@@ -93,14 +93,14 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
         "label": "随眸相望",
         "role": "gaze",
         "row": 19,
-        "frameCount": 16,
+        "frameCount": 64,
         "frameMs": 100,
         "showInMenu": False,
     }
 
     atlas = QImage(str(resource_path(f"{root}/spritesheet.webp")))
     assert not atlas.isNull()
-    assert (atlas.width(), atlas.height()) == (3072, 4160)
+    assert (atlas.width(), atlas.height()) == (3072, 4784)
     assert atlas.hasAlphaChannel()
 
     columns = atlas.width() // 192
@@ -113,15 +113,19 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
 
     catalog = AnimationCatalog.load_pet("nangongwan")
     assert catalog.supports_gaze
-    assert len(catalog.look_degrees) == 16
+    assert len(catalog.look_degrees) == 64
     assert len(
         {
             catalog.look_frame(degrees).image.constBits().tobytes()
             for degrees in catalog.look_degrees
         }
-    ) == 16
+    ) == 64
     assert (catalog.look_frame(0.0).row, catalog.look_frame(0.0).column) == (19, 0)
     assert (catalog.look_frame(337.5).row, catalog.look_frame(337.5).column) == (
-        19,
+        22,
+        12,
+    )
+    assert (catalog.look_frame(354.375).row, catalog.look_frame(354.375).column) == (
+        22,
         15,
     )

@@ -287,6 +287,50 @@ def test_registry_loads_dynamic_v3_actions_timing_mirroring_and_burst_metadata(
     assert actions["hello"].autoplay_group == "quiet"
 
 
+def test_registry_accepts_supported_gaze_density_and_rejects_other_counts(
+    tmp_path: Path,
+):
+    bundled = tmp_path / "bundled"
+    user = tmp_path / "user"
+    for count in (16, 32, 64):
+        actions = _valid_v3_actions()
+        actions["gaze"] = {
+            "label": "随眸相望",
+            "role": "gaze",
+            "row": 5,
+            "frameCount": count,
+            "frameMs": 100,
+            "showInMenu": False,
+        }
+        _write_pack(
+            bundled,
+            f"gaze_{count}",
+            sprite_version=3,
+            actions=actions,
+        )
+
+    invalid = _valid_v3_actions()
+    invalid["gaze"] = {
+        "label": "方向数量错误",
+        "role": "gaze",
+        "row": 5,
+        "frameCount": 24,
+        "frameMs": 100,
+        "showInMenu": False,
+    }
+    _write_pack(user, "gaze_24", sprite_version=3, actions=invalid)
+
+    snapshot = PetRegistry(bundled, user).refresh()
+
+    assert snapshot.choices == (
+        ("gaze_16", "Gaze_16"),
+        ("gaze_32", "Gaze_32"),
+        ("gaze_64", "Gaze_64"),
+    )
+    assert len(snapshot.issues) == 1
+    assert "16, 32, or 64 frames" in snapshot.issues[0].message
+
+
 def test_registry_rejects_v3_without_required_capabilities_or_valid_timing(
     tmp_path: Path,
 ):

@@ -89,6 +89,9 @@ def test_pet_pack_v3_schema_and_template_describe_dynamic_actions(repo_root: Pat
     assert schema["properties"]["spriteVersionNumber"]["const"] == 3
     assert schema["properties"]["spritesheetPath"]["const"] == "spritesheet.webp"
     assert "autoplayGroup" in schema["$defs"]["common"]["properties"]
+    assert schema["$defs"]["direct"]["allOf"][2]["then"]["properties"][
+        "frameCount"
+    ]["enum"] == [16, 32, 64]
     assert template["spriteVersionNumber"] == 3
     assert {entry["role"] for entry in template["actions"].values()} >= {
         "idle",

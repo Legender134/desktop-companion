@@ -586,8 +586,10 @@ class PetRegistry:
             raise ValueError(f"actions.{key} finite action cannot loop forever")
         if role is ActionRole.BURST_MOVE and repeat_count != 1:
             raise ValueError(f"actions.{key} burstMove repeatCount must be 1")
-        if role is ActionRole.GAZE and frame_count != 16:
-            raise ValueError(f"actions.{key} gaze action must contain 16 frames")
+        if role is ActionRole.GAZE and frame_count not in {16, 32, 64}:
+            raise ValueError(
+                f"actions.{key} gaze action must contain 16, 32, or 64 frames"
+            )
 
         travel_start: int | None = None
         travel_end: int | None = None
