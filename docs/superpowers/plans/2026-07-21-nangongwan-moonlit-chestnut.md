@@ -257,12 +257,15 @@ git commit -m "test: cover moonlit chestnut playback"
 
 - Modify: `CHANGELOG.md`
 - Modify: `README.md`
+- Modify: `tests/test_documentation.py`
 - Create: `docs/manual-qa-v2.4.1.md`
 - Modify: `docs/superpowers/specs/2026-07-21-nangongwan-moonlit-chestnut-design.md`
 
 - [ ] **Step 1: Document the completed feature**
 
 Mark the design status approved/implemented. Add a `2.4.1（2026-07-21）` changelog entry describing the new 36-frame rooftop action, 1/20 nominal autonomous chance, 90-second cooldown, manual menu access, and retirement of the old short action into a future easter egg. Update README’s verification link to `docs/manual-qa-v2.4.1.md`.
+
+Also repair the pre-existing stale documentation assertion by changing the expected installer name in `tests/test_documentation.py` from `DesktopCompanion-2.3.0-Setup.exe` to the 2.4.1 name documented by README.
 
 - [ ] **Step 2: Run source tests and integrity checks**
 

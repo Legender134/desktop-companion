@@ -1,7 +1,7 @@
 {
   "id": "nangongwan",
   "displayName": "南宫婉",
-  "description": "《凡人修仙传》最新蓝银造型的南宫婉桌面灵伴测试包，含六十四向伪连续鼠标注视、静立凝神、左右御风、双向遁光、日常陪伴，以及由月轮、星流和紫白神光构成的七套特效动作。",
+  "description": "《凡人修仙传》最新蓝银造型的南宫婉桌面灵伴测试包，含六十四向伪连续鼠标注视、静立凝神、左右御风、双向遁光、日常陪伴，以及月下含栗在内的八套特效与剧情动作。",
   "spriteVersionNumber": 3,
   "spritesheetPath": "spritesheet.webp",
   "iconFrame": {
@@ -47,7 +47,7 @@
       "frameCount": 10,
       "frameDurations": [140, 160, 180, 160, 180, 160, 160, 550, 180, 220],
       "repeatCount": 1,
-      "autoplayWeight": 2,
+      "autoplayWeight": 6,
       "cooldownMs": 45000,
       "showInMenu": true
     },
@@ -92,7 +92,7 @@
       "frameCount": 8,
       "frameDurations": [180, 180, 180, 240, 180, 180, 450, 210],
       "repeatCount": 1,
-      "autoplayWeight": 5,
+      "autoplayWeight": 15,
       "cooldownMs": 15000,
       "showInMenu": true
     },
@@ -103,9 +103,8 @@
       "frameCount": 10,
       "frameDurations": [160, 180, 180, 180, 200, 350, 220, 180, 180, 250],
       "repeatCount": 1,
-      "autoplayWeight": 2,
       "cooldownMs": 35000,
-      "showInMenu": true
+      "showInMenu": false
     },
     "foldArms": {
       "label": "抱臂轻问",
@@ -114,7 +113,7 @@
       "frameCount": 8,
       "frameDurations": [170, 170, 200, 200, 400, 220, 170, 170],
       "repeatCount": 1,
-      "autoplayWeight": 3,
+      "autoplayWeight": 9,
       "cooldownMs": 22000,
       "showInMenu": true
     },
@@ -125,7 +124,7 @@
       "frameCount": 8,
       "frameDurations": [160, 180, 200, 220, 300, 160, 120, 160],
       "repeatCount": 1,
-      "autoplayWeight": 6,
+      "autoplayWeight": 18,
       "cooldownMs": 12000,
       "showInMenu": false
     },
@@ -136,7 +135,7 @@
       "frameCount": 8,
       "frameDurations": [180, 180, 200, 500, 120, 180, 240, 300],
       "repeatCount": 1,
-      "autoplayWeight": 4,
+      "autoplayWeight": 12,
       "cooldownMs": 18000,
       "showInMenu": true
     },
@@ -147,7 +146,7 @@
       "frameCount": 10,
       "frameDurations": [160, 180, 200, 220, 180, 450, 160, 220, 180, 250],
       "repeatCount": 1,
-      "autoplayWeight": 4,
+      "autoplayWeight": 12,
       "cooldownMs": 22000,
       "showInMenu": true
     },
@@ -158,7 +157,7 @@
       "frameCount": 9,
       "frameDurations": [160, 180, 180, 180, 200, 200, 320, 200, 280],
       "repeatCount": 1,
-      "autoplayWeight": 2,
+      "autoplayWeight": 6,
       "cooldownMs": 45000,
       "autoplayGroup": "spell",
       "showInMenu": true
@@ -170,7 +169,7 @@
       "frameCount": 10,
       "frameDurations": [160, 180, 180, 200, 220, 220, 220, 350, 220, 250],
       "repeatCount": 1,
-      "autoplayWeight": 1,
+      "autoplayWeight": 3,
       "cooldownMs": 60000,
       "autoplayGroup": "spell",
       "showInMenu": true
@@ -182,7 +181,7 @@
       "frameCount": 10,
       "frameDurations": [160, 160, 180, 180, 180, 350, 180, 180, 180, 250],
       "repeatCount": 1,
-      "autoplayWeight": 1,
+      "autoplayWeight": 3,
       "cooldownMs": 65000,
       "autoplayGroup": "spell",
       "showInMenu": true
@@ -194,7 +193,7 @@
       "frameCount": 9,
       "frameDurations": [160, 180, 180, 200, 220, 320, 220, 180, 240],
       "repeatCount": 1,
-      "autoplayWeight": 1,
+      "autoplayWeight": 3,
       "cooldownMs": 55000,
       "autoplayGroup": "spell",
       "showInMenu": true
@@ -206,7 +205,7 @@
       "frameCount": 10,
       "frameDurations": [160, 180, 180, 200, 220, 240, 400, 240, 220, 260],
       "repeatCount": 1,
-      "autoplayWeight": 1,
+      "autoplayWeight": 3,
       "cooldownMs": 75000,
       "autoplayGroup": "spell",
       "showInMenu": true
@@ -218,7 +217,7 @@
       "frameCount": 10,
       "frameDurations": [160, 180, 190, 210, 230, 250, 420, 240, 220, 280],
       "repeatCount": 1,
-      "autoplayWeight": 1,
+      "autoplayWeight": 3,
       "cooldownMs": 120000,
       "autoplayGroup": "spell",
       "showInMenu": true
@@ -230,9 +229,20 @@
       "frameCount": 10,
       "frameDurations": [180, 180, 200, 220, 240, 260, 550, 260, 260, 300],
       "repeatCount": 1,
-      "autoplayWeight": 1,
+      "autoplayWeight": 3,
       "cooldownMs": 180000,
       "autoplayGroup": "spell",
+      "showInMenu": true
+    },
+    "moonlitChestnut": {
+      "label": "月下含栗",
+      "role": "interaction",
+      "row": 23,
+      "frameCount": 36,
+      "frameDurations": [180, 180, 220, 300, 260, 300, 420, 500, 150, 150, 160, 170, 180, 220, 180, 220, 200, 240, 140, 150, 170, 190, 260, 140, 150, 170, 190, 260, 260, 350, 500, 450, 650, 220, 260, 360],
+      "repeatCount": 1,
+      "autoplayWeight": 5,
+      "cooldownMs": 90000,
       "showInMenu": true
     },
     "gaze": {

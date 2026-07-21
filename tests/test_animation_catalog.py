@@ -164,6 +164,23 @@ def test_catalog_builds_precise_action_help_and_current_digit_mapping():
     assert shortcuts[0] == "按权重随机"
 
 
+def test_nangongwan_exposes_new_signature_action_and_retires_legacy_cake():
+    catalog = AnimationCatalog.load_pet("nangongwan")
+    menu = dict(catalog.action_menu_items())
+    autoplay = dict(catalog.autoplay_actions())
+
+    assert menu["月下含栗"] == "moonlitChestnut"
+    assert "栗糕轻尝" not in menu
+    assert autoplay["moonlitChestnut"] == 5
+    assert "tasteCake" not in autoplay
+    assert "moonlitChestnut" in catalog.showcase_actions()
+    assert "tasteCake" not in catalog.showcase_actions()
+    assert len(catalog.frames("tasteCake")) == 10
+    assert autoplay["moonlitChestnut"] / sum(autoplay.values()) == pytest.approx(
+        5 / 101
+    )
+
+
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():
     shiyi = AnimationCatalog.load_pet("shiyi")
     ziling = AnimationCatalog.load_pet("ziling")

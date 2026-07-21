@@ -390,7 +390,12 @@ class AnimationCatalog:
         )
 
     def showcase_actions(self) -> tuple[ActionKey, ...]:
-        return self.interaction_actions()
+        return tuple(
+            definition.action_id
+            for definition in self._action_definitions
+            if definition.role is ActionRole.INTERACTION
+            and (definition.show_in_menu or definition.autoplay_weight > 0)
+        )
 
     def movement_actions(
         self, direction: int, *, include_burst: bool = True

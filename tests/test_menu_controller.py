@@ -232,6 +232,8 @@ def test_details_mode_marks_every_item_and_explains_only_question_area(
     assert "50%" in compact_tooltip("遁光向右")
     assert "45" in compact_tooltip("遁光向右")
     assert "1=静立凝神" in compact_tooltip("悬停数字快捷键")
+    assert "菜单可见或允许自主触发" in compact_tooltip("动作展示")
+    assert "休眠/彩蛋动作不会播放" in compact_tooltip("动作展示")
     assert _rendered_action(menu, "显示详情").isChecked()
 
     menu.ensurePolished()
