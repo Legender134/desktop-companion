@@ -64,7 +64,45 @@ CLIP_ORDER = (
 )
 
 RESIDENT_MOON_OPACITY = 0.78
-CHARACTER_ANCHOR_X = CELL_SIZE[0] // 2
+SEATED_TARGET_ANCHOR = (94, 133)
+
+# The source sheets were generated separately and do not share a canvas origin.
+# These points mark the centre of the same waist clasp in every seated panel.
+# The clasp is rigidly tied to the pelvis, so it is a dependable proxy for the
+# hidden butt/eave contact point.  Do not replace this with a silhouette centre:
+# moving hair, sleeves, and props are intentionally allowed to change bounds.
+RESIDENT_SEAT_ANCHORS = (
+    (232, 249),
+    (201, 249),
+    (191, 249),
+    (170, 249),
+    (230, 201),
+    (195, 203),
+    (190, 201),
+    (170, 201),
+)
+GLANCE_SEAT_ANCHORS = (
+    (275, 423),
+    (244, 423),
+    (231, 423),
+    (202, 423),
+)
+CHESTNUT_SEAT_ANCHORS = (
+    (231, 248),
+    (200, 248),
+    (194, 248),
+    (180, 248),
+    (231, 204),
+    (208, 204),
+    (190, 204),
+    (180, 204),
+)
+CHESTNUT_RETURN_SEAT_ANCHORS = (
+    (274, 426),
+    (247, 426),
+    (224, 426),
+    (202, 426),
+)
 
 
 def _head_anchor_x(source: Image.Image) -> float:
@@ -91,27 +129,41 @@ def _head_anchor_x(source: Image.Image) -> float:
 
 
 def _placed_sequence(
-    panels: tuple[Image.Image, ...], *, target_height: int
+    panels: tuple[Image.Image, ...],
+    *,
+    target_height: int,
+    source_anchors: tuple[tuple[float, float], ...] | None = None,
+    target_anchor: tuple[float, float] = SEATED_TARGET_ANCHOR,
 ) -> tuple[Image.Image, ...]:
-    """Place one generated sheet at a shared scale and foot baseline.
+    """Place one generated sheet at a shared scale and stable root.
 
     Generated sheets use different amounts of transparent padding.  Scaling
     the full cells independently makes the character pulse in size, while
-    cropping every pose independently makes her horizontal centre wobble.
-    This routine derives one scale from the tallest painted pose, locks each
-    panel's detected head centre to the same x coordinate, and locks every
-    pose to the same foot line.  Body, sleeves, and hair can still animate,
-    while the seated character herself no longer jumps across the desktop.
+    cropping every pose independently makes her horizontal centre wobble.  A
+    seated sequence supplies the same anatomical waist/pelvis point for every
+    source panel, which is locked in both x and y.  Head, sleeves, hands, hair,
+    and props can still animate without sliding the seated contact point.
+
+    Transition panels omit ``source_anchors`` and retain the older head-centre
+    plus foot-line placement because standing up and sitting down legitimately
+    move the pelvis.
     """
 
     sources = tuple(panel.convert("RGBA") for panel in panels)
+    if source_anchors is not None and len(source_anchors) != len(sources):
+        raise ValueError("every seated panel must have one source anchor")
+    if source_anchors is not None and any(
+        not (0 <= anchor[0] < source.width and 0 <= anchor[1] < source.height)
+        for source, anchor in zip(sources, source_anchors)
+    ):
+        raise ValueError("a seated source anchor lies outside its panel")
     boxes = tuple(source.getbbox() for source in sources)
     if any(box is None for box in boxes):
         raise ValueError("generated motion sheet contains an empty panel")
     painted_heights = tuple(box[3] - box[1] for box in boxes if box is not None)
     scale = target_height / max(painted_heights)
     placed: list[Image.Image] = []
-    for source, box in zip(sources, boxes):
+    for index, (source, box) in enumerate(zip(sources, boxes)):
         assert box is not None
         size = (
             max(1, round(source.width * scale)),
@@ -121,10 +173,23 @@ def _placed_sequence(
         resized_box = resized.getbbox()
         if resized_box is None:
             raise ValueError("resized motion panel is empty")
-        # Measure again after resampling so integer placement cannot reintroduce
-        # a two- or three-pixel lateral wobble.
-        x = round(CHARACTER_ANCHOR_X - _head_anchor_x(resized))
-        y = 204 - resized_box[3]
+        if source_anchors is None:
+            x = round(CELL_SIZE[0] / 2 - _head_anchor_x(resized))
+            y = 204 - resized_box[3]
+        else:
+            source_anchor = source_anchors[index]
+            scaled_anchor = (
+                source_anchor[0] * resized.width / source.width,
+                source_anchor[1] * resized.height / source.height,
+            )
+            x = round(target_anchor[0] - scaled_anchor[0])
+            y = round(target_anchor[1] - scaled_anchor[1])
+            mapped_anchor = (x + scaled_anchor[0], y + scaled_anchor[1])
+            if (
+                abs(mapped_anchor[0] - target_anchor[0]) > 0.51
+                or abs(mapped_anchor[1] - target_anchor[1]) > 0.51
+            ):
+                raise AssertionError("integer placement moved the seated root")
         frame = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
         frame.alpha_composite(resized, (x, y))
         placed.append(frame)
@@ -214,20 +279,6 @@ def _resident_scene_clip(
     )
 
 
-def _validate_character_anchor(
-    named_sequences: dict[str, tuple[Image.Image, ...]],
-) -> None:
-    """Reject source-placement drift before it reaches the pet atlas."""
-
-    for name, frames in named_sequences.items():
-        anchors = tuple(_head_anchor_x(frame) for frame in frames)
-        drift = max(anchors) - min(anchors)
-        if drift > 1.5:
-            raise ValueError(
-                f"{name} head anchor drifts by {drift:.1f}px after placement"
-            )
-
-
 def _validate_desktop_transparency(
     clips: dict[str, tuple[Image.Image, ...]],
 ) -> None:
@@ -267,6 +318,10 @@ def build_clips(
     chestnut_return_panels: tuple[Image.Image, ...],
     moon_source: Image.Image,
     roof_source: Image.Image,
+    *,
+    seated_source_anchors: dict[
+        str, tuple[tuple[float, float], ...]
+    ] | None = None,
 ) -> dict[str, tuple[Image.Image, ...]]:
     if len(idle_frames) < 3:
         raise ValueError("at least three idle frames are required")
@@ -280,23 +335,40 @@ def build_clips(
         raise ValueError("source sheets must contain 8/8/4/8/4 panels")
 
     idle = tuple(frame.convert("RGBA") for frame in idle_frames[:3])
+    anchors = (
+        seated_source_anchors
+        if seated_source_anchors is not None
+        else {
+            "resident": RESIDENT_SEAT_ANCHORS,
+            "glance": GLANCE_SEAT_ANCHORS,
+            "chestnut": CHESTNUT_SEAT_ANCHORS,
+            "chestnut-return": CHESTNUT_RETURN_SEAT_ANCHORS,
+        }
+    )
+    if set(anchors) != {"resident", "glance", "chestnut", "chestnut-return"}:
+        raise ValueError("seated source anchors must cover all resident sheets")
     moon = _prepared_local_moon(moon_source)
     roof = _prepared_local_roof(roof_source)
     transition = _placed_sequence(transition_panels, target_height=192)
-    resident = _placed_sequence(resident_panels, target_height=184)
-    glance = _placed_sequence(glance_panels, target_height=184)
-    chestnut = _placed_sequence(chestnut_panels, target_height=184)
-    chestnut_return = _placed_sequence(
-        chestnut_return_panels, target_height=184
+    resident = _placed_sequence(
+        resident_panels,
+        target_height=184,
+        source_anchors=anchors["resident"],
     )
-    _validate_character_anchor(
-        {
-            "transition": transition,
-            "resident": resident,
-            "glance": glance,
-            "chestnut": chestnut,
-            "chestnut-return": chestnut_return,
-        }
+    glance = _placed_sequence(
+        glance_panels,
+        target_height=184,
+        source_anchors=anchors["glance"],
+    )
+    chestnut = _placed_sequence(
+        chestnut_panels,
+        target_height=184,
+        source_anchors=anchors["chestnut"],
+    )
+    chestnut_return = _placed_sequence(
+        chestnut_return_panels,
+        target_height=184,
+        source_anchors=anchors["chestnut-return"],
     )
     boundary = _boundary(resident, moon, roof)
 
@@ -315,8 +387,8 @@ def build_clips(
         transition[7],
         _translated(transition[7], 0, -1),
         resident[0],
-        _translated(resident[0], 0, -2),
-        _translated(resident[0], 0, -1),
+        resident[0],
+        resident[0],
         resident[0],
     )
     for index, character in enumerate(transition_path, 1):
@@ -336,21 +408,21 @@ def build_clips(
 
     idle_path = (
         resident[0],
-        _translated(resident[0], 0, -1),
+        resident[0],
         resident[1],
-        _translated(resident[1], 0, -2),
+        resident[1],
         resident[2],
-        _translated(resident[1], 0, -2),
         resident[1],
-        _translated(resident[0], 0, -1),
+        resident[1],
+        resident[0],
         resident[0],
     )
     moon_gaze_path = (
         resident[0],
         resident[3],
-        _translated(resident[3], 0, -1),
+        resident[3],
         resident[6],
-        _translated(resident[6], 0, -1),
+        resident[6],
         resident[3],
         resident[0],
     )
@@ -358,7 +430,7 @@ def build_clips(
     rest_path = (
         resident[0],
         rest_peak,
-        _translated(rest_peak, 0, 1),
+        rest_peak,
         rest_peak,
         resident[0],
     )
@@ -366,7 +438,7 @@ def build_clips(
         resident[0],
         resident[1],
         resident[5],
-        _translated(resident[5], 0, -1),
+        resident[5],
         resident[5],
         resident[1],
         resident[0],
@@ -526,14 +598,14 @@ def main() -> None:
         raise AssertionError("builder changed atlas rows 0 through 22")
 
     atlas.save(ATLAS_PATH, "WEBP", lossless=True, quality=100, method=6, exact=True)
-    frame_dir = WORK_DIR / "frames-transparent-v5"
+    frame_dir = WORK_DIR / "frames-transparent-v6"
     frame_dir.mkdir(parents=True, exist_ok=True)
     for key in CLIP_ORDER:
         for index, frame in enumerate(clips[key], 1):
             frame.save(frame_dir / f"{key}-{index:02d}.png")
-    _write_audit(clips, WORK_DIR / "audit-87-transparent-v5.png")
+    _write_audit(clips, WORK_DIR / "audit-87-transparent-v6.png")
     print(f"wrote {sum(map(len, clips.values()))} state frames to {ATLAS_PATH}")
-    print(f"audit: {WORK_DIR / 'audit-87-transparent-v5.png'}")
+    print(f"audit: {WORK_DIR / 'audit-87-transparent-v6.png'}")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from tools.build_nangongwan_moonlit_chestnut import (
 )
 from tools.build_nangongwan_moonlit_rooftop_state import (
     CLIP_ORDER,
-    _head_anchor_x,
+    SEATED_TARGET_ANCHOR,
     _placed_sequence,
     _prepared_local_moon,
     build_clips as build_state_clips,
@@ -52,6 +52,23 @@ def _moon_and_roof() -> tuple[Image.Image, Image.Image]:
     roof = Image.new("RGBA", (256, 128), (0, 0, 0, 0))
     ImageDraw.Draw(roof).polygon(((8, 50), (248, 36), (248, 108), (20, 96)), fill=(25, 38, 78, 255))
     return moon, roof
+
+
+def _synthetic_seat_anchors(
+    resident: tuple[Image.Image, ...],
+    glance: tuple[Image.Image, ...],
+    chestnut: tuple[Image.Image, ...],
+    chestnut_return: tuple[Image.Image, ...],
+) -> dict[str, tuple[tuple[float, float], ...]]:
+    def anchors(panels: tuple[Image.Image, ...]) -> tuple[tuple[float, float], ...]:
+        return tuple((panel.width / 2, panel.height - 88) for panel in panels)
+
+    return {
+        "resident": anchors(resident),
+        "glance": anchors(glance),
+        "chestnut": anchors(chestnut),
+        "chestnut-return": anchors(chestnut_return),
+    }
 
 
 def _build_synthetic_frames() -> tuple[Image.Image, ...]:
@@ -114,15 +131,21 @@ def test_builder_fills_all_three_rows_and_preserves_the_prefix():
 def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_clip():
     moon, roof = _moon_and_roof()
     resident = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    glance = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    chestnut = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    chestnut_return = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
     clips = build_state_clips(
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         resident,
-        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
+        glance,
+        chestnut,
+        chestnut_return,
         moon,
         roof,
+        seated_source_anchors=_synthetic_seat_anchors(
+            resident, glance, chestnut, chestnut_return
+        ),
     )
 
     assert tuple(clips) == CLIP_ORDER
@@ -145,15 +168,22 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
 
 def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
     moon, roof = _moon_and_roof()
+    resident = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    glance = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    chestnut = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    chestnut_return = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
     clips = build_state_clips(
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
+        resident,
+        glance,
+        chestnut,
+        chestnut_return,
         moon,
         roof,
+        seated_source_anchors=_synthetic_seat_anchors(
+            resident, glance, chestnut, chestnut_return
+        ),
     )
     source = Image.new("RGBA", (ATLAS_WIDTH, 5408), (11, 17, 29, 255))
     prefix = source.crop((0, 0, ATLAS_WIDTH, 4784))
@@ -168,15 +198,22 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
 
 def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
     moon, roof = _moon_and_roof()
+    resident = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    glance = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    chestnut = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    chestnut_return = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
     clips = build_state_clips(
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
+        resident,
+        glance,
+        chestnut,
+        chestnut_return,
         moon,
         roof,
+        seated_source_anchors=_synthetic_seat_anchors(
+            resident, glance, chestnut, chestnut_return
+        ),
     )
 
     corners = ((0, 0), (191, 0), (0, 207), (191, 207))
@@ -187,24 +224,44 @@ def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
             assert sum(alpha.histogram()[8:]) <= 24000
 
 
-def test_seated_panels_lock_the_head_to_one_horizontal_anchor():
+def test_seated_panels_lock_the_pelvis_in_both_axes_while_heads_can_move():
     panels = []
-    for offset in (-54, -22, 18, 49):
+    source_anchors = []
+    for index, offset in enumerate((-54, -22, 18, 49)):
         panel = Image.new("RGBA", (320, 360), (0, 0, 0, 0))
         draw = ImageDraw.Draw(panel)
         centre = 160 + offset
-        draw.ellipse((centre - 42, 22, centre + 42, 112), fill=(220, 228, 244, 255))
+        head_centre = centre + index * 7
+        draw.ellipse(
+            (head_centre - 42, 22 + index * 3, head_centre + 42, 112 + index * 3),
+            fill=(220, 228, 244, 255),
+        )
         draw.polygon(
             ((centre - 36, 102), (centre + 36, 102), (centre + 78, 328), (centre - 64, 328)),
             fill=(35, 70, 130, 255),
         )
+        draw.rectangle((centre - 2, 198, centre + 2, 202), fill=(0, 255, 255, 255))
         panels.append(panel)
+        source_anchors.append((centre, 200))
 
-    placed = _placed_sequence(tuple(panels), target_height=184)
-    anchors = tuple(_head_anchor_x(frame) for frame in placed)
+    placed = _placed_sequence(
+        tuple(panels),
+        target_height=184,
+        source_anchors=tuple(source_anchors),
+    )
 
-    assert max(anchors) - min(anchors) <= 1.5
-    assert all(abs(anchor - 96) <= 1 for anchor in anchors)
+    for frame in placed:
+        target_x, target_y = SEATED_TARGET_ANCHOR
+        crop = frame.crop((target_x - 2, target_y - 2, target_x + 3, target_y + 3))
+        cyan_pixels = [
+            crop.getpixel((x, y))
+            for y in range(crop.height)
+            for x in range(crop.width)
+            if crop.getpixel((x, y))[1] > 180
+            and crop.getpixel((x, y))[2] > 180
+            and crop.getpixel((x, y))[0] < 80
+        ]
+        assert cyan_pixels
 
 
 def test_prepared_moon_is_large_bright_and_keeps_canvas_corners_clear():
