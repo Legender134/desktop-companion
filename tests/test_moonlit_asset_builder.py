@@ -8,49 +8,89 @@ from tools.build_nangongwan_moonlit_chestnut import (
     CELL_SIZE,
     build_frames,
     extend_atlas,
-    extract_keyframes,
+    extract_grid,
 )
 
 
-def _synthetic_storyboard() -> Image.Image:
-    storyboard = Image.new("RGBA", (400, 200), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(storyboard)
-    for index in range(8):
-        row, column = divmod(index, 4)
-        left = column * 100
-        top = row * 100
-        color = (40 + index * 20, 90 + index * 10, 180 - index * 12, 255)
-        draw.ellipse((left + 18, top + 12, left + 82, top + 92), fill=color)
-        draw.rectangle(
-            (left + 10 + index, top + 70, left + 45 + index, top + 94),
-            fill=(15, 25, 45, 255),
-        )
-    return storyboard
+def _panel_sheet(columns: int, rows: int, *, size: tuple[int, int]) -> Image.Image:
+    sheet = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sheet)
+    for index in range(columns * rows):
+        row, column = divmod(index, columns)
+        left = round(size[0] * column / columns)
+        right = round(size[0] * (column + 1) / columns)
+        top = round(size[1] * row / rows)
+        bottom = round(size[1] * (row + 1) / rows)
+        color = (40 + index * 18, 90 + index * 9, 180 - index * 10, 255)
+        draw.ellipse((left + 40, top + 24, right - 40, bottom - 32), fill=color)
+        draw.rectangle((left + 18, bottom - 90, right - 18, bottom - 28), fill=(20, 30, 70, 255))
+    return sheet
 
 
-def test_builder_creates_36_distinct_rgba_frames_from_eight_keyframes():
-    keyframes = extract_keyframes(_synthetic_storyboard())
+def _idle_frames() -> tuple[Image.Image, ...]:
+    frames = []
+    for index in range(3):
+        frame = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(frame)
+        draw.ellipse((48, 8 + index, 144, 112 + index), fill=(220, 228, 244, 255))
+        draw.rectangle((64, 92, 128, 204), fill=(35 + index, 70, 130, 255))
+        frames.append(frame)
+    return tuple(frames)
 
-    frames = build_frames(keyframes)
 
-    assert len(keyframes) == 8
-    assert len(frames) == 36
+def _moon_and_roof() -> tuple[Image.Image, Image.Image]:
+    moon = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    ImageDraw.Draw(moon).ellipse((-40, -30, 220, 230), fill=(195, 215, 250, 230))
+    roof = Image.new("RGBA", (256, 128), (0, 0, 0, 0))
+    ImageDraw.Draw(roof).polygon(((8, 50), (248, 36), (248, 108), (20, 96)), fill=(25, 38, 78, 255))
+    return moon, roof
+
+
+def _build_synthetic_frames() -> tuple[Image.Image, ...]:
+    moon, roof = _moon_and_roof()
+    return build_frames(
+        _idle_frames(),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(3, 1, size=(900, 400)), 3, 1),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        moon,
+        roof,
+    )
+
+
+def test_builder_creates_48_rgba_frames_with_exact_idle_boundaries():
+    idle = _idle_frames()
+    moon, roof = _moon_and_roof()
+    frames = build_frames(
+        idle,
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(3, 1, size=(900, 400)), 3, 1),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        moon,
+        roof,
+    )
+
+    assert len(frames) == 48
     assert all(frame.mode == "RGBA" and frame.size == CELL_SIZE for frame in frames)
     assert all(frame.getbbox() is not None for frame in frames)
+    assert frames[0].tobytes() == idle[0].tobytes()
+    assert frames[-1].tobytes() == idle[0].tobytes()
     hashes = [sha256(frame.tobytes()).digest() for frame in frames]
-    assert len(set(hashes)) == 36
     assert all(left != right for left, right in zip(hashes, hashes[1:]))
 
 
-def test_builder_appends_frames_and_leaves_unused_cells_transparent():
-    source = Image.new("RGBA", (ATLAS_WIDTH, 4784), (0, 0, 0, 0))
-    frames = build_frames(extract_keyframes(_synthetic_storyboard()))
+def test_builder_fills_all_three_rows_and_preserves_the_prefix():
+    source = Image.new("RGBA", (ATLAS_WIDTH, 4784), (11, 17, 29, 255))
+    prefix_hash = sha256(source.tobytes()).digest()
 
-    atlas = extend_atlas(source, frames)
+    atlas = extend_atlas(source, _build_synthetic_frames())
 
     assert atlas.mode == "RGBA"
     assert atlas.size == (ATLAS_WIDTH, ATLAS_HEIGHT)
-    for offset in range(36):
+    assert sha256(atlas.crop((0, 0, ATLAS_WIDTH, 4784)).tobytes()).digest() == prefix_hash
+    for offset in range(48):
         row, column = divmod(23 * 16 + offset, 16)
         cell = atlas.crop(
             (
@@ -61,13 +101,3 @@ def test_builder_appends_frames_and_leaves_unused_cells_transparent():
             )
         )
         assert cell.getbbox() is not None
-    for column in range(4, 16):
-        cell = atlas.crop(
-            (
-                column * CELL_SIZE[0],
-                25 * CELL_SIZE[1],
-                (column + 1) * CELL_SIZE[0],
-                26 * CELL_SIZE[1],
-            )
-        )
-        assert cell.getbbox() is None
