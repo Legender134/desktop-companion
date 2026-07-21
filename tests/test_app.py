@@ -1072,9 +1072,9 @@ def test_moonlit_chestnut_manual_play_ignores_its_autonomous_cooldown(qapp):
     assert controller._last_action_played_ms["moonlitChestnut"] == now[0]
 
     controller.timeline.started_ms = now[0]
-    controller._advance_manual(now[0] + 9_099)
+    controller._advance_manual(now[0] + 9_599)
     assert controller.current_action == "moonlitChestnut"
-    controller._advance_manual(now[0] + 9_100)
+    controller._advance_manual(now[0] + 9_600)
     assert controller.current_action == controller.catalog.idle_action
     controller.shutdown()
 

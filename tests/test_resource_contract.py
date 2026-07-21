@@ -84,7 +84,7 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert manifest["spriteVersionNumber"] == 3
     assert manifest["spritesheetPath"] == "spritesheet.webp"
     assert len(manifest["actions"]) == 21
-    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 274
+    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 286
     assert manifest["actions"]["idle"]["role"] == "idle"
     assert manifest["actions"]["moveRight"]["role"] == "move"
     assert manifest["actions"]["moveLeft"]["role"] == "move"
@@ -103,21 +103,23 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
         "label": "月下含栗",
         "role": "interaction",
         "row": 23,
-        "frameCount": 36,
+        "frameCount": 48,
         "frameDurations": [
-            180, 180, 220, 300, 260, 300, 420, 500,
-            150, 150, 160, 170, 180, 220,
-            180, 220, 200, 240,
-            140, 150, 170, 190, 260,
-            140, 150, 170, 190, 260,
-            260, 350, 500, 450, 650, 220, 260, 360,
+            140, 140, 150, 170,
+            150, 160, 170, 180, 190, 200,
+            170, 170, 180, 180, 190, 190, 200, 200, 210, 210,
+            170, 180, 190, 200, 210,
+            160, 170, 180, 190, 200, 210, 220, 220,
+            170, 180, 190, 210, 240, 260,
+            200, 220, 240, 260, 290, 340,
+            200, 250, 300,
         ],
         "repeatCount": 1,
         "autoplayWeight": 5,
         "cooldownMs": 90000,
         "showInMenu": True,
     }
-    assert sum(moonlit["frameDurations"]) == 9100
+    assert sum(moonlit["frameDurations"]) == 9600
 
     legacy = manifest["actions"]["tasteCake"]
     assert "autoplayWeight" not in legacy
@@ -136,9 +138,8 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
             cell = atlas.copy(column * 192, row * 208, 192, 208)
             assert alpha_count(cell) > 0
 
-    for column in range(4, 16):
-        unused = atlas.copy(column * 192, 25 * 208, 192, 208)
-        assert alpha_count(unused) == 0
+    final_moonlit = atlas.copy(15 * 192, 25 * 208, 192, 208)
+    assert alpha_count(final_moonlit) > 0
 
     catalog = AnimationCatalog.load_pet("nangongwan")
     assert catalog.supports_gaze

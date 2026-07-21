@@ -182,24 +182,24 @@ def test_nangongwan_exposes_new_signature_action_and_retires_legacy_cake():
     )
 
 
-def test_moonlit_chestnut_uses_all_36_cross_row_frames_once_for_9_1_seconds():
+def test_moonlit_chestnut_uses_all_48_cross_row_frames_once_for_9_6_seconds():
     catalog = AnimationCatalog.load_pet("nangongwan")
     action = "moonlitChestnut"
     spec = catalog.spec(action)
     frames = catalog.frames(action)
 
     assert [(frame.row, frame.column) for frame in frames] == [
-        divmod(23 * 16 + offset, 16) for offset in range(36)
+        divmod(23 * 16 + offset, 16) for offset in range(48)
     ]
-    assert spec.cycle_ms == 9100
+    assert spec.cycle_ms == 9600
     assert spec.loops == 1
 
     timeline = AnimationTimeline()
     timeline.start(action, 0)
-    assert timeline.advance(9099, spec).frame_index == 35
-    assert not timeline.advance(9099, spec).finished
-    assert timeline.advance(9100, spec).frame_index == 35
-    assert timeline.advance(9100, spec).finished
+    assert timeline.advance(9599, spec).frame_index == 47
+    assert not timeline.advance(9599, spec).finished
+    assert timeline.advance(9600, spec).frame_index == 47
+    assert timeline.advance(9600, spec).finished
 
 
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():
