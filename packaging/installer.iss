@@ -1,7 +1,7 @@
 [Setup]
 AppId={{024D8DE0-D8D7-46BD-B09D-CB89484282B4}
 AppName=桌面灵伴
-AppVersion=2.4.1
+AppVersion=2.4.2
 AppPublisher=桌面灵伴
 DefaultDirName={localappdata}\Programs\DesktopCompanion
 DefaultGroupName=桌面灵伴
@@ -15,7 +15,7 @@ CloseApplications=force
 RestartApplications=no
 UninstallDisplayIcon={app}\DesktopCompanion.exe
 SetupIconFile=..\src\shiyi_desktop_pet\resources\app.ico
-VersionInfoVersion=2.4.1.0
+VersionInfoVersion=2.4.2.0
 
 [Languages]
 Name: chinesesimplified; MessagesFile: "languages\ChineseSimplified.isl"

@@ -105,33 +105,33 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
         "row": 23,
         "frameCount": 18,
         "frameDurations": [
-            120, 110, 100, 100, 100, 110, 110, 120, 120,
-            130, 130, 140, 140, 150, 160, 170, 190, 260,
+            90, 90, 100, 90, 100, 90, 100, 90, 110,
+            110, 110, 110, 120, 120, 130, 140, 160, 220,
         ],
         "repeatCount": 1,
         "autoplayWeight": 5,
         "cooldownMs": 90000,
         "showInMenu": True,
     }
-    assert sum(moonlit["frameDurations"]) == 2460
+    assert sum(moonlit["frameDurations"]) == 2080
 
     assert manifest["states"]["moonlitRooftop"] == {
         "label": "月下屋檐",
         "enterAction": "moonlitChestnut",
         "residentActions": [
-            {"action": "rooftopIdle", "weight": 40},
+            {"action": "rooftopIdle", "weight": 25},
             {"action": "rooftopMoonGaze", "weight": 18},
-            {"action": "rooftopChestnut", "weight": 15},
+            {"action": "rooftopChestnut", "weight": 20},
             {"action": "rooftopRest", "weight": 10},
-            {"action": "rooftopBreeze", "weight": 10},
-            {"action": "rooftopGlance", "weight": 7},
+            {"action": "rooftopBreeze", "weight": 17},
+            {"action": "rooftopGlance", "weight": 10},
         ],
         "exitAction": "rooftopExit",
-        "minDurationMs": 30000,
-        "rampDurationMs": 30000,
-        "maxDurationMs": 90000,
-        "exitChanceAfterMin": 8,
-        "exitChanceAfterRamp": 22,
+        "minDurationMs": 20000,
+        "rampDurationMs": 20000,
+        "maxDurationMs": 60000,
+        "exitChanceAfterMin": 12,
+        "exitChanceAfterRamp": 30,
     }
 
     standing_cake = manifest["actions"]["tasteCake"]

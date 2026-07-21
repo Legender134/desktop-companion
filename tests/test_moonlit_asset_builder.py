@@ -114,7 +114,6 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
     clips = build_state_clips(
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         resident,
         extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
@@ -147,7 +146,6 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
@@ -163,3 +161,24 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
     assert sha256(atlas.crop((0, 0, ATLAS_WIDTH, 4784)).tobytes()).digest() == sha256(
         prefix.tobytes()
     ).digest()
+
+
+def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
+    moon, roof = _moon_and_roof()
+    clips = build_state_clips(
+        _idle_frames(),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
+        moon,
+        roof,
+    )
+
+    corners = ((0, 0), (191, 0), (0, 207), (191, 207))
+    for frames in clips.values():
+        for frame in frames:
+            alpha = frame.getchannel("A")
+            assert all(alpha.getpixel(point) == 0 for point in corners)
+            assert sum(alpha.histogram()[8:]) <= 24000

@@ -12,7 +12,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 try:
     from tools.build_nangongwan_moonlit_chestnut import (
@@ -21,8 +21,6 @@ try:
         ATLAS_WIDTH,
         SOURCE_ATLAS_HEIGHT,
         _atlas_frame,
-        _prepared_moon,
-        _prepared_roof,
         _scene,
         extract_grid,
     )
@@ -33,8 +31,6 @@ except ModuleNotFoundError:  # Direct ``python tools/<script>.py`` execution.
         ATLAS_WIDTH,
         SOURCE_ATLAS_HEIGHT,
         _atlas_frame,
-        _prepared_moon,
-        _prepared_roof,
         _scene,
         extract_grid,
     )
@@ -47,8 +43,7 @@ ATLAS_PATH = PET_ROOT / "spritesheet.webp"
 MANIFEST_PATH = PET_ROOT / "pet.json"
 WORK_DIR = ROOT / "work" / "moonlit-rooftop-state"
 
-TRANSITION_PATH = ASSET_DIR / "phase-transition-v2.png"
-TRANSITION_BRIDGES_PATH = ASSET_DIR / "phase-transition-bridges-v2.png"
+TRANSITION_PATH = ASSET_DIR / "phase-transition-v4.png"
 RESIDENT_PATH = ASSET_DIR / "phase-resident-v2.png"
 GLANCE_PATH = ASSET_DIR / "phase-glance-v2.png"
 CHESTNUT_PATH = ASSET_DIR / "phase-rooftop-chestnut-v2.png"
@@ -103,11 +98,61 @@ def _placed_sequence(
     return tuple(placed)
 
 
+def _prepared_local_moon(source: Image.Image) -> Image.Image:
+    """Create a softly masked local moon instead of exposing source crop edges."""
+
+    moon = source.convert("RGBA")
+    box = moon.getbbox()
+    if box is None:
+        raise ValueError("partial moon asset is empty")
+    width = box[2] - box[0]
+    height = box[3] - box[1]
+    side = max(1, round(min(width, height) * 0.70))
+    left = box[0] + round((width - side) * 0.16)
+    top = box[1] + round((height - side) * 0.16)
+    moon = moon.crop((left, top, left + side, top + side)).convert("RGB")
+    moon = moon.resize((76, 76), Image.Resampling.LANCZOS).convert("RGBA")
+    mask = Image.new("L", moon.size, 0)
+    ImageDraw.Draw(mask).ellipse((2, 2, 73, 73), fill=255)
+    moon.putalpha(mask.filter(ImageFilter.GaussianBlur(0.8)))
+    result = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    result.alpha_composite(moon, (108, 2))
+    return result
+
+
+def _prepared_local_roof(source: Image.Image) -> Image.Image:
+    """Place a compact eave under the pet without touching the canvas corners."""
+
+    roof = source.convert("RGBA")
+    box = roof.getbbox()
+    if box is None:
+        raise ValueError("roof asset is empty")
+    roof = roof.crop(box)
+    roof.thumbnail((176, 76), Image.Resampling.LANCZOS)
+    alpha = roof.getchannel("A")
+    fade = Image.new("L", roof.size, 255)
+    fade_draw = ImageDraw.Draw(fade)
+    fade_width = min(28, max(1, roof.width // 5))
+    for offset in range(fade_width):
+        value = round(255 * (fade_width - 1 - offset) / max(1, fade_width - 1))
+        x = roof.width - fade_width + offset
+        fade_draw.line((x, 0, x, roof.height), fill=value)
+    roof.putalpha(ImageChops.multiply(alpha, fade))
+    result = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    result.alpha_composite(roof, (8, 139))
+    return result
+
+
+def _smoothstep(value: float) -> float:
+    clamped = max(0.0, min(1.0, value))
+    return clamped * clamped * (3.0 - 2.0 * clamped)
+
+
 def _boundary(
     resident: tuple[Image.Image, ...], moon: Image.Image, roof: Image.Image
 ) -> Image.Image:
     return _scene(
-        resident[0], moon, roof, moon_opacity=0.60, roof_opacity=1.0
+        resident[0], moon, roof, moon_opacity=0.46, roof_opacity=1.0
     )
 
 
@@ -121,15 +166,44 @@ def _resident_scene_clip(
     characters: tuple[Image.Image, ...], moon: Image.Image, roof: Image.Image
 ) -> tuple[Image.Image, ...]:
     return tuple(
-        _scene(character, moon, roof, moon_opacity=0.60, roof_opacity=1.0)
+        _scene(character, moon, roof, moon_opacity=0.46, roof_opacity=1.0)
         for character in characters
     )
+
+
+def _validate_desktop_transparency(
+    clips: dict[str, tuple[Image.Image, ...]],
+) -> None:
+    """Reject scene-card frames before they can reach the installed app."""
+
+    corners = (
+        (0, 0),
+        (CELL_SIZE[0] - 1, 0),
+        (0, CELL_SIZE[1] - 1),
+        (CELL_SIZE[0] - 1, CELL_SIZE[1] - 1),
+    )
+    for action_id, frames in clips.items():
+        for index, frame in enumerate(frames, start=1):
+            alpha = frame.getchannel("A")
+            if any(alpha.getpixel(point) > 0 for point in corners):
+                raise ValueError(
+                    f"{action_id} frame {index} paints a canvas corner"
+                )
+            visible_pixels = sum(alpha.histogram()[8:])
+            if visible_pixels > 24000:
+                raise ValueError(
+                    f"{action_id} frame {index} covers too much of the desktop canvas: "
+                    f"{visible_pixels} pixels"
+                )
+            if alpha.getbbox() == (0, 0, *CELL_SIZE):
+                raise ValueError(
+                    f"{action_id} frame {index} forms a full-canvas scene card"
+                )
 
 
 def build_clips(
     idle_frames: tuple[Image.Image, ...],
     transition_panels: tuple[Image.Image, ...],
-    transition_bridge_panels: tuple[Image.Image, ...],
     resident_panels: tuple[Image.Image, ...],
     glance_panels: tuple[Image.Image, ...],
     chestnut_panels: tuple[Image.Image, ...],
@@ -141,47 +215,55 @@ def build_clips(
         raise ValueError("at least three idle frames are required")
     if (
         len(transition_panels) != 8
-        or len(transition_bridge_panels) != 8
         or len(resident_panels) != 8
         or len(glance_panels) != 4
         or len(chestnut_panels) != 8
         or len(chestnut_return_panels) != 4
     ):
-        raise ValueError("source sheets must contain 8/8/8/4/8/4 panels")
+        raise ValueError("source sheets must contain 8/8/4/8/4 panels")
 
     idle = tuple(frame.convert("RGBA") for frame in idle_frames[:3])
-    moon = _prepared_moon(moon_source)
-    roof = _prepared_roof(roof_source)
+    moon = _prepared_local_moon(moon_source)
+    roof = _prepared_local_roof(roof_source)
     transition = _placed_sequence(transition_panels, target_height=192)
-    transition_bridges = _placed_sequence(
-        transition_bridge_panels, target_height=192
-    )
-    resident = _placed_sequence(resident_panels, target_height=174)
-    glance = _placed_sequence(glance_panels, target_height=174)
-    chestnut = _placed_sequence(chestnut_panels, target_height=174)
+    resident = _placed_sequence(resident_panels, target_height=184)
+    glance = _placed_sequence(glance_panels, target_height=184)
+    chestnut = _placed_sequence(chestnut_panels, target_height=184)
     chestnut_return = _placed_sequence(
-        chestnut_return_panels, target_height=174
+        chestnut_return_panels, target_height=184
     )
     boundary = _boundary(resident, moon, roof)
 
-    enter: list[Image.Image] = [idle[0]]
+    enter: list[Image.Image] = [idle[0], idle[1]]
     transition_path = (
         transition[0],
+        _translated(transition[0], 0, -1),
         transition[1],
-        *transition_bridges[:4],
-        *transition[2:],
-        *transition_bridges[4:],
+        _translated(transition[1], 0, -1),
+        transition[2],
+        _translated(transition[2], 0, -1),
+        transition[3],
+        transition[4],
+        transition[5],
+        transition[6],
+        transition[7],
+        _translated(transition[7], 0, -1),
+        resident[0],
+        _translated(resident[0], 0, -2),
+        _translated(resident[0], 0, -1),
         resident[0],
     )
     for index, character in enumerate(transition_path, 1):
         progress = index / len(transition_path)
+        eased = _smoothstep(progress)
+        roof_progress = _smoothstep((progress - 0.05) / 0.60)
         enter.append(
             _scene(
                 character,
                 moon,
                 roof,
-                moon_opacity=0.05 + 0.55 * progress,
-                roof_opacity=0.03 + 0.97 * progress,
+                moon_opacity=0.46 * eased,
+                roof_opacity=roof_progress,
             )
         )
     enter[-1] = boundary
@@ -190,9 +272,9 @@ def build_clips(
         resident[0],
         _translated(resident[0], 0, -1),
         resident[1],
-        _translated(resident[1], 0, -1),
+        _translated(resident[1], 0, -2),
         resident[2],
-        _translated(resident[1], 0, -1),
+        _translated(resident[1], 0, -2),
         resident[1],
         _translated(resident[0], 0, -1),
         resident[0],
@@ -273,6 +355,7 @@ def build_clips(
         raise AssertionError("enter clip must end on the resident boundary")
     if clips["rooftopExit"][0].tobytes() != boundary.tobytes():
         raise AssertionError("exit clip must start on the resident boundary")
+    _validate_desktop_transparency(clips)
     return {key: clips[key] for key in CLIP_ORDER}
 
 
@@ -299,6 +382,14 @@ def _write_audit(clips: dict[str, tuple[Image.Image, ...]], path: Path) -> None:
     columns = 9
     label_height = 28
     rows = (len(frames) + columns - 1) // columns
+    checker = Image.new("RGBA", CELL_SIZE, (228, 233, 240, 255))
+    checker_draw = ImageDraw.Draw(checker)
+    for y in range(0, CELL_SIZE[1], 16):
+        for x in range(0, CELL_SIZE[0], 16):
+            if (x // 16 + y // 16) % 2:
+                checker_draw.rectangle(
+                    (x, y, x + 15, y + 15), fill=(186, 196, 209, 255)
+                )
     audit = Image.new(
         "RGB",
         (CELL_SIZE[0] * columns, (CELL_SIZE[1] + label_height) * rows),
@@ -309,7 +400,9 @@ def _write_audit(clips: dict[str, tuple[Image.Image, ...]], path: Path) -> None:
         row, column = divmod(offset, columns)
         x = column * CELL_SIZE[0]
         y = row * (CELL_SIZE[1] + label_height)
-        audit.paste(frame, (x, y), frame)
+        panel = checker.copy()
+        panel.alpha_composite(frame)
+        audit.paste(panel.convert("RGB"), (x, y))
         draw.text((x + 4, y + CELL_SIZE[1] + 4), f"{key} {index:02d}", fill=(18, 25, 36))
     path.parent.mkdir(parents=True, exist_ok=True)
     audit.save(path)
@@ -318,7 +411,6 @@ def _write_audit(clips: dict[str, tuple[Image.Image, ...]], path: Path) -> None:
 def main() -> None:
     required = (
         TRANSITION_PATH,
-        TRANSITION_BRIDGES_PATH,
         RESIDENT_PATH,
         GLANCE_PATH,
         CHESTNUT_PATH,
@@ -343,7 +435,6 @@ def main() -> None:
         )
         with (
             Image.open(TRANSITION_PATH) as transition_sheet,
-            Image.open(TRANSITION_BRIDGES_PATH) as transition_bridges_sheet,
             Image.open(RESIDENT_PATH) as resident_sheet,
             Image.open(GLANCE_PATH) as glance_sheet,
             Image.open(CHESTNUT_PATH) as chestnut_sheet,
@@ -354,7 +445,6 @@ def main() -> None:
             clips = build_clips(
                 idle_frames,
                 extract_grid(transition_sheet, 4, 2, inset=4),
-                extract_grid(transition_bridges_sheet, 4, 2, inset=4),
                 extract_grid(resident_sheet, 4, 2, inset=4),
                 extract_grid(glance_sheet, 4, 1, inset=4),
                 extract_grid(chestnut_sheet, 4, 2, inset=4),
@@ -370,14 +460,14 @@ def main() -> None:
         raise AssertionError("builder changed atlas rows 0 through 22")
 
     atlas.save(ATLAS_PATH, "WEBP", lossless=True, quality=100, method=6, exact=True)
-    frame_dir = WORK_DIR / "frames-smooth-v3"
+    frame_dir = WORK_DIR / "frames-transparent-v4"
     frame_dir.mkdir(parents=True, exist_ok=True)
     for key in CLIP_ORDER:
         for index, frame in enumerate(clips[key], 1):
             frame.save(frame_dir / f"{key}-{index:02d}.png")
-    _write_audit(clips, WORK_DIR / "audit-87.png")
+    _write_audit(clips, WORK_DIR / "audit-87-transparent-v4.png")
     print(f"wrote {sum(map(len, clips.values()))} state frames to {ATLAS_PATH}")
-    print(f"audit: {WORK_DIR / 'audit-87.png'}")
+    print(f"audit: {WORK_DIR / 'audit-87-transparent-v4.png'}")
 
 
 if __name__ == "__main__":

@@ -185,12 +185,12 @@ def test_nangongwan_exposes_persistent_rooftop_state_and_standing_cake_action():
     assert state.label == "月下屋檐"
     assert state.exit_action == "rooftopExit"
     assert [(choice.action_id, choice.weight) for choice in state.resident_actions] == [
-        ("rooftopIdle", 40),
+        ("rooftopIdle", 25),
         ("rooftopMoonGaze", 18),
-        ("rooftopChestnut", 15),
+        ("rooftopChestnut", 20),
         ("rooftopRest", 10),
-        ("rooftopBreeze", 10),
-        ("rooftopGlance", 7),
+        ("rooftopBreeze", 17),
+        ("rooftopGlance", 10),
     ]
 
 
@@ -203,7 +203,7 @@ def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
     assert [(frame.row, frame.column) for frame in frames] == [
         divmod(23 * 16 + offset, 16) for offset in range(18)
     ]
-    assert spec.cycle_ms == 2460
+    assert spec.cycle_ms == 2080
     assert spec.loops == 1
 
     boundary = frames[-1].image.constBits().tobytes()
@@ -222,10 +222,10 @@ def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
 
     timeline = AnimationTimeline()
     timeline.start(action, 0)
-    assert timeline.advance(2459, spec).frame_index == 17
-    assert not timeline.advance(2459, spec).finished
-    assert timeline.advance(2460, spec).frame_index == 17
-    assert timeline.advance(2460, spec).finished
+    assert timeline.advance(2079, spec).frame_index == 17
+    assert not timeline.advance(2079, spec).finished
+    assert timeline.advance(2080, spec).frame_index == 17
+    assert timeline.advance(2080, spec).finished
 
 
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():
