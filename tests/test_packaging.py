@@ -26,3 +26,23 @@ def test_product_and_installer_versions_are_2_4_1():
     assert project["project"]["version"] == "2.4.1"
     assert "AppVersion=2.4.1" in installer
     assert "VersionInfoVersion=2.4.1.0" in installer
+
+
+def test_pyinstaller_collects_the_legacy_moonlit_atlas_with_pet_resources():
+    root = Path(__file__).resolve().parents[1]
+    spec = (root / "packaging" / "DesktopCompanion.spec").read_text(
+        encoding="utf-8"
+    )
+    legacy = (
+        root
+        / "src"
+        / "shiyi_desktop_pet"
+        / "resources"
+        / "pets"
+        / "nangongwan"
+        / "spritesheet-moonlit-chestnut-v2.4.1-legacy.webp"
+    )
+
+    assert '(str(resource_root), "resources")' in spec
+    assert legacy.is_file()
+    assert legacy.is_relative_to(root / "src" / "shiyi_desktop_pet" / "resources")

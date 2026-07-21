@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 
 from PySide6.QtGui import QImage
 
@@ -156,4 +157,18 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert (catalog.look_frame(354.375).row, catalog.look_frame(354.375).column) == (
         22,
         15,
+    )
+
+
+def test_nangongwan_legacy_moonlit_atlas_is_preserved_byte_for_byte():
+    root = resource_path("pets/nangongwan/pet.json").parent
+    manifest = json.loads((root / "pet.json").read_text(encoding="utf-8"))
+    legacy = root / "spritesheet-moonlit-chestnut-v2.4.1-legacy.webp"
+
+    assert manifest["spritesheetPath"] == "spritesheet.webp"
+    assert legacy.is_file()
+    payload = legacy.read_bytes()
+    assert len(payload) == 8_634_008
+    assert sha256(payload).hexdigest().upper() == (
+        "990D1EE9DB3632102E9F07984301519606A9CC3591585E8EF892D0BA975A9D3E"
     )
