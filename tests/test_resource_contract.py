@@ -84,7 +84,7 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert manifest["spriteVersionNumber"] == 3
     assert manifest["spritesheetPath"] == "spritesheet.webp"
     assert len(manifest["actions"]) == 28
-    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 325
+    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 339
     assert manifest["actions"]["idle"]["role"] == "idle"
     assert manifest["actions"]["moveRight"]["role"] == "move"
     assert manifest["actions"]["moveLeft"]["role"] == "move"
@@ -115,6 +115,11 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     }
     assert sum(moonlit["frameDurations"]) == 2080
 
+    rooftop_chestnut = manifest["actions"]["rooftopChestnut"]
+    assert rooftop_chestnut["frameCount"] == 28
+    assert len(rooftop_chestnut["frameDurations"]) == 28
+    assert sum(rooftop_chestnut["frameDurations"]) == 4320
+
     assert manifest["states"]["moonlitRooftop"] == {
         "label": "月下屋檐",
         "enterAction": "moonlitChestnut",
@@ -143,7 +148,7 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
 
     atlas = QImage(str(resource_path(f"{root}/spritesheet.webp")))
     assert not atlas.isNull()
-    assert (atlas.width(), atlas.height()) == (3072, 6032)
+    assert (atlas.width(), atlas.height()) == (3072, 6240)
     assert atlas.hasAlphaChannel()
 
     columns = atlas.width() // 192

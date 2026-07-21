@@ -11,8 +11,11 @@ from tools.build_nangongwan_moonlit_chestnut import (
     extract_grid,
 )
 from tools.build_nangongwan_moonlit_rooftop_state import (
+    CHESTNUT_HAND_TARGET,
     CLIP_ORDER,
+    LOWER_BODY_LOCK_Y,
     SEATED_TARGET_ANCHOR,
+    _chestnut_flight_frame,
     _placed_sequence,
     _prepared_local_moon,
     build_clips as build_state_clips,
@@ -153,7 +156,7 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
         "moonlitChestnut": 18,
         "rooftopIdle": 9,
         "rooftopMoonGaze": 7,
-        "rooftopChestnut": 14,
+        "rooftopChestnut": 28,
         "rooftopRest": 5,
         "rooftopBreeze": 7,
         "rooftopGlance": 9,
@@ -190,7 +193,7 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
 
     atlas = extend_state_atlas(source, clips)
 
-    assert atlas.size == (ATLAS_WIDTH, 6032)
+    assert atlas.size == (ATLAS_WIDTH, 6240)
     assert sha256(atlas.crop((0, 0, ATLAS_WIDTH, 4784)).tobytes()).digest() == sha256(
         prefix.tobytes()
     ).digest()
@@ -222,6 +225,65 @@ def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
             alpha = frame.getchannel("A")
             assert all(alpha.getpixel(point) == 0 for point in corners)
             assert sum(alpha.histogram()[8:]) <= 24000
+
+
+def test_every_resident_action_keeps_the_complete_lower_body_pixel_identical():
+    moon, roof = _moon_and_roof()
+    resident = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    glance = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    chestnut = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    chestnut_return = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    clips = build_state_clips(
+        _idle_frames(),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        resident,
+        glance,
+        chestnut,
+        chestnut_return,
+        moon,
+        roof,
+        seated_source_anchors=_synthetic_seat_anchors(
+            resident, glance, chestnut, chestnut_return
+        ),
+    )
+
+    boundary_lower_body = clips["moonlitChestnut"][-1].crop(
+        (0, LOWER_BODY_LOCK_Y, CELL_SIZE[0], CELL_SIZE[1])
+    ).tobytes()
+    for action_id in CLIP_ORDER[1:-1]:
+        for frame in clips[action_id]:
+            assert frame.crop(
+                (0, LOWER_BODY_LOCK_Y, CELL_SIZE[0], CELL_SIZE[1])
+            ).tobytes() == boundary_lower_body
+
+
+def test_chestnut_flies_from_the_far_left_and_decelerates_at_the_open_hand():
+    open_hand = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    flight = tuple(
+        _chestnut_flight_frame(open_hand, index / 9) for index in range(10)
+    )
+
+    def golden_centre(frame: Image.Image) -> tuple[float, float]:
+        points = []
+        for y in range(frame.height):
+            for x in range(frame.width):
+                red, green, blue, alpha = frame.getpixel((x, y))
+                if alpha >= 220 and red >= 180 and 70 <= green <= 210 and blue < 100:
+                    points.append((x, y))
+        assert points
+        return (
+            sum(point[0] for point in points) / len(points),
+            sum(point[1] for point in points) / len(points),
+        )
+
+    centres = tuple(golden_centre(frame) for frame in flight)
+    assert centres[0][0] <= 4
+    assert all(left[0] <= right[0] for left, right in zip(centres, centres[1:]))
+    assert abs(centres[-1][0] - CHESTNUT_HAND_TARGET[0]) <= 1.5
+    assert abs(centres[-1][1] - CHESTNUT_HAND_TARGET[1]) <= 1.5
+    early_step = centres[2][0] - centres[1][0]
+    late_step = centres[-1][0] - centres[-2][0]
+    assert early_step > late_step
 
 
 def test_seated_panels_lock_the_pelvis_in_both_axes_while_heads_can_move():
