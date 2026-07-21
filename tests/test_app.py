@@ -1042,6 +1042,43 @@ def test_action_showcase_plays_every_in_place_action_once(qapp):
     controller.shutdown()
 
 
+def test_moonlit_chestnut_manual_play_ignores_its_autonomous_cooldown(qapp):
+    class PickLast:
+        @staticmethod
+        def randint(lower, upper):
+            del lower
+            return upper
+
+    settings = replace(AppSettings(), pet_id="nangongwan", gaze_enabled=False)
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=settings,
+        catalog_factory=lambda: AnimationCatalog.load_pet("nangongwan"),
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [200_000]
+    controller._now_ms = lambda: now[0]
+    controller._rng = PickLast()
+
+    controller._last_action_played_ms.clear()
+    assert controller._choose_random_action() == "moonlitChestnut"
+    controller._last_action_played_ms["moonlitChestnut"] = now[0]
+    assert controller._choose_random_action() != "moonlitChestnut"
+
+    controller.dispatch_menu(MenuCommand("action", "moonlitChestnut"))
+    assert controller.current_action == "moonlitChestnut"
+    assert controller._last_action_played_ms["moonlitChestnut"] == now[0]
+
+    controller.timeline.started_ms = now[0]
+    controller._advance_manual(now[0] + 9_099)
+    assert controller.current_action == "moonlitChestnut"
+    controller._advance_manual(now[0] + 9_100)
+    assert controller.current_action == controller.catalog.idle_action
+    controller.shutdown()
+
+
 def test_dynamic_pet_pack_refresh_switch_and_open_directory(tmp_path, qapp):
     user_root = tmp_path / "pets"
     opened = []

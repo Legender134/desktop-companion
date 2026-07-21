@@ -2,6 +2,7 @@ import pytest
 from PySide6.QtGui import QColor, QImage
 
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
+from shiyi_desktop_pet.animation_player import AnimationTimeline
 from shiyi_desktop_pet.models import ActionId, ActionRole, FrameAsset
 from shiyi_desktop_pet.pet_registry import PetRegistry
 
@@ -179,6 +180,26 @@ def test_nangongwan_exposes_new_signature_action_and_retires_legacy_cake():
     assert autoplay["moonlitChestnut"] / sum(autoplay.values()) == pytest.approx(
         5 / 101
     )
+
+
+def test_moonlit_chestnut_uses_all_36_cross_row_frames_once_for_9_1_seconds():
+    catalog = AnimationCatalog.load_pet("nangongwan")
+    action = "moonlitChestnut"
+    spec = catalog.spec(action)
+    frames = catalog.frames(action)
+
+    assert [(frame.row, frame.column) for frame in frames] == [
+        divmod(23 * 16 + offset, 16) for offset in range(36)
+    ]
+    assert spec.cycle_ms == 9100
+    assert spec.loops == 1
+
+    timeline = AnimationTimeline()
+    timeline.start(action, 0)
+    assert timeline.advance(9099, spec).frame_index == 35
+    assert not timeline.advance(9099, spec).finished
+    assert timeline.advance(9100, spec).frame_index == 35
+    assert timeline.advance(9100, spec).finished
 
 
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():
