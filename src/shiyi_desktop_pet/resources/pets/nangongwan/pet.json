@@ -103,8 +103,9 @@
       "frameCount": 10,
       "frameDurations": [160, 180, 180, 180, 200, 350, 220, 180, 180, 250],
       "repeatCount": 1,
+      "autoplayWeight": 2,
       "cooldownMs": 35000,
-      "showInMenu": false
+      "showInMenu": true
     },
     "foldArms": {
       "label": "抱臂轻问",

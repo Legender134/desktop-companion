@@ -134,9 +134,12 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
         "exitChanceAfterRamp": 22,
     }
 
-    legacy = manifest["actions"]["tasteCake"]
-    assert "autoplayWeight" not in legacy
-    assert legacy["showInMenu"] is False
+    standing_cake = manifest["actions"]["tasteCake"]
+    assert standing_cake["label"] == "栗糕轻尝"
+    assert standing_cake["frameCount"] == 10
+    assert standing_cake["autoplayWeight"] == 2
+    assert standing_cake["cooldownMs"] == 35000
+    assert standing_cake["showInMenu"] is True
 
     atlas = QImage(str(resource_path(f"{root}/spritesheet.webp")))
     assert not atlas.isNull()

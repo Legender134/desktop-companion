@@ -165,20 +165,20 @@ def test_catalog_builds_precise_action_help_and_current_digit_mapping():
     assert shortcuts[0] == "按权重随机"
 
 
-def test_nangongwan_exposes_persistent_rooftop_state_and_retires_legacy_cake():
+def test_nangongwan_exposes_persistent_rooftop_state_and_standing_cake_action():
     catalog = AnimationCatalog.load_pet("nangongwan")
     menu = dict(catalog.action_menu_items())
     autoplay = dict(catalog.autoplay_actions())
 
     assert menu["月下屋檐"] == "moonlitChestnut"
-    assert "栗糕轻尝" not in menu
+    assert menu["栗糕轻尝"] == "tasteCake"
     assert autoplay["moonlitChestnut"] == 5
-    assert "tasteCake" not in autoplay
+    assert autoplay["tasteCake"] == 2
     assert "moonlitChestnut" not in catalog.showcase_actions()
-    assert "tasteCake" not in catalog.showcase_actions()
+    assert "tasteCake" in catalog.showcase_actions()
     assert len(catalog.frames("tasteCake")) == 10
     assert autoplay["moonlitChestnut"] / sum(autoplay.values()) == pytest.approx(
-        5 / 101
+        5 / 103
     )
     state = catalog.state_for_enter_action("moonlitChestnut")
     assert state.key == "moonlitRooftop"
