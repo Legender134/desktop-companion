@@ -8,6 +8,7 @@ __pycache__/
 artifacts/
 outputs/
 work/
+.worktrees/
 .coverage
 
 # Copyrighted visual references kept for local study only.
