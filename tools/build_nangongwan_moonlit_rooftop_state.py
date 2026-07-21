@@ -21,7 +21,6 @@ try:
         ATLAS_WIDTH,
         SOURCE_ATLAS_HEIGHT,
         _atlas_frame,
-        _placed_panel,
         _prepared_moon,
         _prepared_roof,
         _scene,
@@ -34,7 +33,6 @@ except ModuleNotFoundError:  # Direct ``python tools/<script>.py`` execution.
         ATLAS_WIDTH,
         SOURCE_ATLAS_HEIGHT,
         _atlas_frame,
-        _placed_panel,
         _prepared_moon,
         _prepared_roof,
         _scene,
@@ -49,11 +47,12 @@ ATLAS_PATH = PET_ROOT / "spritesheet.webp"
 MANIFEST_PATH = PET_ROOT / "pet.json"
 WORK_DIR = ROOT / "work" / "moonlit-rooftop-state"
 
-SIT_PATH = ASSET_DIR / "phase-sit.png"
-TASTE_PATH = ASSET_DIR / "phase-taste.png"
-RECOVER_PATH = ASSET_DIR / "phase-recover.png"
-STAND_PATH = ASSET_DIR / "phase-stand-v2.png"
-RESIDENT_PATH = ASSET_DIR / "phase-resident-v1.png"
+TRANSITION_PATH = ASSET_DIR / "phase-transition-v2.png"
+TRANSITION_BRIDGES_PATH = ASSET_DIR / "phase-transition-bridges-v2.png"
+RESIDENT_PATH = ASSET_DIR / "phase-resident-v2.png"
+GLANCE_PATH = ASSET_DIR / "phase-glance-v2.png"
+CHESTNUT_PATH = ASSET_DIR / "phase-rooftop-chestnut-v2.png"
+CHESTNUT_RETURN_PATH = ASSET_DIR / "phase-rooftop-chestnut-return-v2.png"
 MOON_PATH = ASSET_DIR / "moon-partial.png"
 ROOF_PATH = ASSET_DIR / "roof-eave.png"
 
@@ -70,189 +69,193 @@ CLIP_ORDER = (
 )
 
 
-def _resident_panel(panel: Image.Image) -> Image.Image:
-    """Use one fixed source canvas and baseline for all generated key poses."""
+def _placed_sequence(
+    panels: tuple[Image.Image, ...], *, target_height: int
+) -> tuple[Image.Image, ...]:
+    """Place one generated sheet at a shared scale and foot baseline.
 
-    return _placed_panel(panel, scale=0.50, source_foot_y=426)
+    Generated sheets use different amounts of transparent padding.  Scaling
+    the full cells independently makes the character pulse in size, while
+    cropping every pose independently makes her horizontal centre wobble.
+    This routine derives one scale from the tallest painted pose, preserves
+    each cell's source alignment, and locks every pose to the same foot line.
+    """
+
+    sources = tuple(panel.convert("RGBA") for panel in panels)
+    boxes = tuple(source.getbbox() for source in sources)
+    if any(box is None for box in boxes):
+        raise ValueError("generated motion sheet contains an empty panel")
+    painted_heights = tuple(box[3] - box[1] for box in boxes if box is not None)
+    scale = target_height / max(painted_heights)
+    placed: list[Image.Image] = []
+    for source, box in zip(sources, boxes):
+        assert box is not None
+        size = (
+            max(1, round(source.width * scale)),
+            max(1, round(source.height * scale)),
+        )
+        resized = source.resize(size, Image.Resampling.LANCZOS)
+        x = round(CELL_SIZE[0] / 2 - source.width * scale / 2)
+        y = round(204 - box[3] * scale)
+        frame = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+        frame.alpha_composite(resized, (x, y))
+        placed.append(frame)
+    return tuple(placed)
 
 
 def _boundary(
     resident: tuple[Image.Image, ...], moon: Image.Image, roof: Image.Image
 ) -> Image.Image:
-    del roof
-    return _scene(resident[0], moon, Image.new("RGBA", CELL_SIZE), moon_opacity=0.58)
-
-
-def _resident_clip(
-    boundary: Image.Image,
-    resident: tuple[Image.Image, ...],
-    moon: Image.Image,
-    indices: tuple[int, ...],
-    moon_levels: tuple[float, ...],
-) -> tuple[Image.Image, ...]:
-    if len(indices) != len(moon_levels):
-        raise ValueError("resident clip indices and moon levels must match")
-    middle = tuple(
-        _scene(
-            resident[index],
-            moon,
-            Image.new("RGBA", CELL_SIZE),
-            moon_opacity=moon_alpha,
-        )
-        for index, moon_alpha in zip(indices, moon_levels)
+    return _scene(
+        resident[0], moon, roof, moon_opacity=0.60, roof_opacity=1.0
     )
-    return (boundary, *middle, boundary)
+
+
+def _translated(image: Image.Image, dx: int, dy: int) -> Image.Image:
+    result = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    result.alpha_composite(image.convert("RGBA"), (dx, dy))
+    return result
+
+
+def _resident_scene_clip(
+    characters: tuple[Image.Image, ...], moon: Image.Image, roof: Image.Image
+) -> tuple[Image.Image, ...]:
+    return tuple(
+        _scene(character, moon, roof, moon_opacity=0.60, roof_opacity=1.0)
+        for character in characters
+    )
 
 
 def build_clips(
     idle_frames: tuple[Image.Image, ...],
-    sit_panels: tuple[Image.Image, ...],
-    taste_panels: tuple[Image.Image, ...],
-    recover_panels: tuple[Image.Image, ...],
-    stand_panels: tuple[Image.Image, ...],
+    transition_panels: tuple[Image.Image, ...],
+    transition_bridge_panels: tuple[Image.Image, ...],
     resident_panels: tuple[Image.Image, ...],
+    glance_panels: tuple[Image.Image, ...],
+    chestnut_panels: tuple[Image.Image, ...],
+    chestnut_return_panels: tuple[Image.Image, ...],
     moon_source: Image.Image,
     roof_source: Image.Image,
 ) -> dict[str, tuple[Image.Image, ...]]:
     if len(idle_frames) < 3:
         raise ValueError("at least three idle frames are required")
     if (
-        len(sit_panels) != 8
-        or len(taste_panels) != 8
-        or len(recover_panels) != 3
-        or len(stand_panels) != 8
+        len(transition_panels) != 8
+        or len(transition_bridge_panels) != 8
         or len(resident_panels) != 8
+        or len(glance_panels) != 4
+        or len(chestnut_panels) != 8
+        or len(chestnut_return_panels) != 4
     ):
-        raise ValueError("source sheets must contain 8/8/3/8/8 panels")
+        raise ValueError("source sheets must contain 8/8/8/4/8/4 panels")
 
     idle = tuple(frame.convert("RGBA") for frame in idle_frames[:3])
     moon = _prepared_moon(moon_source)
     roof = _prepared_roof(roof_source)
-    resident = tuple(_resident_panel(panel) for panel in resident_panels)
+    transition = _placed_sequence(transition_panels, target_height=192)
+    transition_bridges = _placed_sequence(
+        transition_bridge_panels, target_height=192
+    )
+    resident = _placed_sequence(resident_panels, target_height=174)
+    glance = _placed_sequence(glance_panels, target_height=174)
+    chestnut = _placed_sequence(chestnut_panels, target_height=174)
+    chestnut_return = _placed_sequence(
+        chestnut_return_panels, target_height=174
+    )
     boundary = _boundary(resident, moon, roof)
 
-    sit_scales = (0.64, 0.63, 0.62, 0.61, 0.60, 0.59, 0.59, 0.59)
-    sit_feet = (369, 377, 379, 383, 384, 392, 391, 395)
-    sit = tuple(
-        _placed_panel(panel, scale=scale, source_foot_y=foot)
-        for panel, scale, foot in zip(sit_panels, sit_scales, sit_feet)
+    enter: list[Image.Image] = [idle[0]]
+    transition_path = (
+        transition[0],
+        transition[1],
+        *transition_bridges[:4],
+        *transition[2:],
+        *transition_bridges[4:],
+        resident[0],
     )
-    taste = tuple(
-        _placed_panel(panel, scale=0.59, source_foot_y=390)
-        for panel in taste_panels
-    )
-    recover = tuple(
-        _placed_panel(panel, scale=0.37, source_foot_y=630)
-        for panel in recover_panels
-    )
-    stand = tuple(
-        _placed_panel(panel, scale=0.54, source_foot_y=395)
-        for panel in stand_panels
-    )
-
-    enter: list[Image.Image] = [idle[0], idle[1], idle[2], idle[0]]
-    for character, moon_alpha, roof_alpha in zip(
-        (idle[1], idle[2], idle[0], idle[1], idle[2], idle[0]),
-        (0.06, 0.12, 0.20, 0.29, 0.39, 0.49),
-        (0.05, 0.12, 0.22, 0.34, 0.47, 0.60),
-    ):
+    for index, character in enumerate(transition_path, 1):
+        progress = index / len(transition_path)
         enter.append(
             _scene(
                 character,
                 moon,
                 roof,
-                moon_opacity=moon_alpha,
-                roof_opacity=roof_alpha,
+                moon_opacity=0.05 + 0.55 * progress,
+                roof_opacity=0.03 + 0.97 * progress,
             )
         )
-    for panel_index, roof_alpha, moon_alpha in zip(
-        range(8),
-        (0.68, 0.62, 0.54, 0.42, 0.28, 0.14, 0.04, 0.0),
-        (0.50, 0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57),
-    ):
-        enter.append(
-            _scene(
-                sit[panel_index],
-                moon,
-                roof,
-                moon_opacity=moon_alpha,
-                roof_opacity=roof_alpha,
-            )
-        )
-    enter.extend((boundary, boundary))
+    enter[-1] = boundary
+
+    idle_path = (
+        resident[0],
+        _translated(resident[0], 0, -1),
+        resident[1],
+        _translated(resident[1], 0, -1),
+        resident[2],
+        _translated(resident[1], 0, -1),
+        resident[1],
+        _translated(resident[0], 0, -1),
+        resident[0],
+    )
+    moon_gaze_path = (
+        resident[0],
+        resident[3],
+        _translated(resident[3], 0, -1),
+        resident[6],
+        _translated(resident[6], 0, -1),
+        resident[3],
+        resident[0],
+    )
+    rest_peak = resident[4]
+    rest_path = (
+        resident[0],
+        rest_peak,
+        _translated(rest_peak, 0, 1),
+        rest_peak,
+        resident[0],
+    )
+    breeze_path = (
+        resident[0],
+        resident[1],
+        resident[5],
+        _translated(resident[5], 0, -1),
+        resident[5],
+        resident[1],
+        resident[0],
+    )
+    glance_path = (
+        resident[0],
+        *glance,
+        *tuple(reversed(glance[:-1])),
+        resident[0],
+    )
+    chestnut_path = (
+        resident[0],
+        *chestnut,
+        *chestnut_return,
+        resident[0],
+    )
 
     clips: dict[str, tuple[Image.Image, ...]] = {
         "moonlitChestnut": tuple(enter),
-        "rooftopIdle": _resident_clip(
-            boundary,
-            resident,
-            moon,
-            (1, 0, 1, 0, 1, 0),
-            (0.59, 0.60, 0.59, 0.57, 0.58, 0.59),
-        ),
-        "rooftopMoonGaze": _resident_clip(
-            boundary,
-            resident,
-            moon,
-            (2, 3, 3, 3, 2, 0),
-            (0.60, 0.62, 0.64, 0.63, 0.61, 0.59),
-        ),
-        "rooftopRest": _resident_clip(
-            boundary,
-            resident,
-            moon,
-            (4, 4, 4, 4, 4, 0),
-            (0.58, 0.57, 0.56, 0.57, 0.58, 0.59),
-        ),
-        "rooftopBreeze": _resident_clip(
-            boundary,
-            resident,
-            moon,
-            (5, 5, 5, 5, 1, 0),
-            (0.60, 0.61, 0.62, 0.61, 0.60, 0.59),
-        ),
-        "rooftopGlance": _resident_clip(
-            boundary,
-            resident,
-            moon,
-            (6, 6, 7, 7, 6, 0),
-            (0.59, 0.60, 0.60, 0.59, 0.58, 0.59),
-        ),
+        "rooftopIdle": _resident_scene_clip(idle_path, moon, roof),
+        "rooftopMoonGaze": _resident_scene_clip(moon_gaze_path, moon, roof),
+        "rooftopChestnut": _resident_scene_clip(chestnut_path, moon, roof),
+        "rooftopRest": _resident_scene_clip(rest_path, moon, roof),
+        "rooftopBreeze": _resident_scene_clip(breeze_path, moon, roof),
+        "rooftopGlance": _resident_scene_clip(glance_path, moon, roof),
+        "rooftopExit": tuple(reversed(enter)),
     }
 
-    chestnut_middle: list[Image.Image] = []
-    for panel_index, moon_alpha in zip(
-        (0, 1, 2, 3, 4, 5, 6, 7),
-        (0.58, 0.59, 0.60, 0.61, 0.60, 0.61, 0.62, 0.60),
-    ):
-        chestnut_middle.append(
-            _scene(taste[panel_index], moon, roof, moon_opacity=moon_alpha)
-        )
-    for panel_index, moon_alpha in zip((0, 1), (0.59, 0.58)):
-        chestnut_middle.append(
-            _scene(recover[panel_index], moon, roof, moon_opacity=moon_alpha)
-        )
-    clips["rooftopChestnut"] = (boundary, *chestnut_middle, boundary)
-
-    exit_frames: list[Image.Image] = [boundary]
-    for panel_index, moon_alpha in zip(
-        range(1, 8), (0.55, 0.52, 0.49, 0.45, 0.40, 0.32, 0.22)
-    ):
-        exit_frames.append(
-            _scene(stand[panel_index], moon, roof, moon_opacity=moon_alpha)
-        )
-    exit_frames.append(idle[0])
-    clips["rooftopExit"] = tuple(exit_frames)
-
     expected = {
-        "moonlitChestnut": 20,
-        "rooftopIdle": 8,
-        "rooftopMoonGaze": 8,
-        "rooftopChestnut": 12,
-        "rooftopRest": 8,
-        "rooftopBreeze": 8,
-        "rooftopGlance": 8,
-        "rooftopExit": 9,
+        "moonlitChestnut": 18,
+        "rooftopIdle": 9,
+        "rooftopMoonGaze": 7,
+        "rooftopChestnut": 14,
+        "rooftopRest": 5,
+        "rooftopBreeze": 7,
+        "rooftopGlance": 9,
+        "rooftopExit": 18,
     }
     if {key: len(value) for key, value in clips.items()} != expected:
         raise AssertionError("persistent rooftop clips have an invalid frame count")
@@ -314,11 +317,12 @@ def _write_audit(clips: dict[str, tuple[Image.Image, ...]], path: Path) -> None:
 
 def main() -> None:
     required = (
-        SIT_PATH,
-        TASTE_PATH,
-        RECOVER_PATH,
-        STAND_PATH,
+        TRANSITION_PATH,
+        TRANSITION_BRIDGES_PATH,
         RESIDENT_PATH,
+        GLANCE_PATH,
+        CHESTNUT_PATH,
+        CHESTNUT_RETURN_PATH,
         MOON_PATH,
         ROOF_PATH,
         ATLAS_PATH,
@@ -338,21 +342,23 @@ def main() -> None:
             _atlas_frame(source_rgba, manifest, "idle", index) for index in range(3)
         )
         with (
-            Image.open(SIT_PATH) as sit_sheet,
-            Image.open(TASTE_PATH) as taste_sheet,
-            Image.open(RECOVER_PATH) as recover_sheet,
-            Image.open(STAND_PATH) as stand_sheet,
+            Image.open(TRANSITION_PATH) as transition_sheet,
+            Image.open(TRANSITION_BRIDGES_PATH) as transition_bridges_sheet,
             Image.open(RESIDENT_PATH) as resident_sheet,
+            Image.open(GLANCE_PATH) as glance_sheet,
+            Image.open(CHESTNUT_PATH) as chestnut_sheet,
+            Image.open(CHESTNUT_RETURN_PATH) as chestnut_return_sheet,
             Image.open(MOON_PATH) as moon_source,
             Image.open(ROOF_PATH) as roof_source,
         ):
             clips = build_clips(
                 idle_frames,
-                extract_grid(sit_sheet, 4, 2),
-                extract_grid(taste_sheet, 4, 2),
-                extract_grid(recover_sheet, 3, 1),
-                extract_grid(stand_sheet, 4, 2),
-                extract_grid(resident_sheet, 4, 2, inset=8),
+                extract_grid(transition_sheet, 4, 2, inset=4),
+                extract_grid(transition_bridges_sheet, 4, 2, inset=4),
+                extract_grid(resident_sheet, 4, 2, inset=4),
+                extract_grid(glance_sheet, 4, 1, inset=4),
+                extract_grid(chestnut_sheet, 4, 2, inset=4),
+                extract_grid(chestnut_return_sheet, 4, 1, inset=4),
                 moon_source,
                 roof_source,
             )
@@ -364,14 +370,14 @@ def main() -> None:
         raise AssertionError("builder changed atlas rows 0 through 22")
 
     atlas.save(ATLAS_PATH, "WEBP", lossless=True, quality=100, method=6, exact=True)
-    frame_dir = WORK_DIR / "frames"
+    frame_dir = WORK_DIR / "frames-smooth-v3"
     frame_dir.mkdir(parents=True, exist_ok=True)
     for key in CLIP_ORDER:
         for index, frame in enumerate(clips[key], 1):
             frame.save(frame_dir / f"{key}-{index:02d}.png")
-    _write_audit(clips, WORK_DIR / "audit-81.png")
+    _write_audit(clips, WORK_DIR / "audit-87.png")
     print(f"wrote {sum(map(len, clips.values()))} state frames to {ATLAS_PATH}")
-    print(f"audit: {WORK_DIR / 'audit-81.png'}")
+    print(f"audit: {WORK_DIR / 'audit-87.png'}")
 
 
 if __name__ == "__main__":

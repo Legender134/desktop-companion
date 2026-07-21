@@ -84,7 +84,7 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert manifest["spriteVersionNumber"] == 3
     assert manifest["spritesheetPath"] == "spritesheet.webp"
     assert len(manifest["actions"]) == 28
-    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 319
+    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 325
     assert manifest["actions"]["idle"]["role"] == "idle"
     assert manifest["actions"]["moveRight"]["role"] == "move"
     assert manifest["actions"]["moveLeft"]["role"] == "move"
@@ -103,17 +103,17 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
         "label": "月下屋檐",
         "role": "interaction",
         "row": 23,
-        "frameCount": 20,
+        "frameCount": 18,
         "frameDurations": [
-            140, 140, 150, 170, 150, 160, 170, 180, 190, 200,
-            170, 170, 180, 180, 190, 190, 200, 220, 220, 320,
+            120, 110, 100, 100, 100, 110, 110, 120, 120,
+            130, 130, 140, 140, 150, 160, 170, 190, 260,
         ],
         "repeatCount": 1,
         "autoplayWeight": 5,
         "cooldownMs": 90000,
         "showInMenu": True,
     }
-    assert sum(moonlit["frameDurations"]) == 3690
+    assert sum(moonlit["frameDurations"]) == 2460
 
     assert manifest["states"]["moonlitRooftop"] == {
         "label": "月下屋檐",

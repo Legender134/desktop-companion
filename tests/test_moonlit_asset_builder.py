@@ -115,23 +115,24 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(3, 1, size=(900, 400)), 3, 1),
-        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         resident,
+        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
         moon,
         roof,
     )
 
     assert tuple(clips) == CLIP_ORDER
     assert {key: len(value) for key, value in clips.items()} == {
-        "moonlitChestnut": 20,
-        "rooftopIdle": 8,
-        "rooftopMoonGaze": 8,
-        "rooftopChestnut": 12,
-        "rooftopRest": 8,
-        "rooftopBreeze": 8,
-        "rooftopGlance": 8,
-        "rooftopExit": 9,
+        "moonlitChestnut": 18,
+        "rooftopIdle": 9,
+        "rooftopMoonGaze": 7,
+        "rooftopChestnut": 14,
+        "rooftopRest": 5,
+        "rooftopBreeze": 7,
+        "rooftopGlance": 9,
+        "rooftopExit": 18,
     }
     boundary = clips["moonlitChestnut"][-1].tobytes()
     for key in CLIP_ORDER[1:-1]:
@@ -146,9 +147,10 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
-        extract_grid(_panel_sheet(3, 1, size=(900, 400)), 3, 1),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1),
         moon,
         roof,
     )

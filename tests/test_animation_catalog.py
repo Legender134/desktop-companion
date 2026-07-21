@@ -201,9 +201,9 @@ def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
     frames = catalog.frames(action)
 
     assert [(frame.row, frame.column) for frame in frames] == [
-        divmod(23 * 16 + offset, 16) for offset in range(20)
+        divmod(23 * 16 + offset, 16) for offset in range(18)
     ]
-    assert spec.cycle_ms == 3690
+    assert spec.cycle_ms == 2460
     assert spec.loops == 1
 
     boundary = frames[-1].image.constBits().tobytes()
@@ -222,10 +222,10 @@ def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
 
     timeline = AnimationTimeline()
     timeline.start(action, 0)
-    assert timeline.advance(3689, spec).frame_index == 19
-    assert not timeline.advance(3689, spec).finished
-    assert timeline.advance(3690, spec).frame_index == 19
-    assert timeline.advance(3690, spec).finished
+    assert timeline.advance(2459, spec).frame_index == 17
+    assert not timeline.advance(2459, spec).finished
+    assert timeline.advance(2460, spec).frame_index == 17
+    assert timeline.advance(2460, spec).finished
 
 
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():

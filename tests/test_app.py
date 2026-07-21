@@ -1239,7 +1239,7 @@ def test_moonlit_rooftop_manual_start_ignores_cooldown_and_can_exit(qapp):
     assert controller.active_state.key == "moonlitRooftop"
     assert controller._last_action_played_ms["moonlitChestnut"] == now[0]
 
-    now[0] += 3690
+    now[0] += 2460
     controller._advance_manual(now[0])
     assert controller.current_action == "rooftopGlance"
 
@@ -1248,7 +1248,7 @@ def test_moonlit_rooftop_manual_start_ignores_cooldown_and_can_exit(qapp):
     now[0] += 2100
     controller._advance_manual(now[0])
     assert controller.current_action == "rooftopExit"
-    now[0] += 1930
+    now[0] += 2460
     controller._advance_manual(now[0])
     assert controller.current_action == controller.catalog.idle_action
     assert controller.active_state is None

@@ -65,15 +65,15 @@ def main() -> None:
 
     preview = tuple(_desktop_preview(frame) for frame in frames)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    gif_path = WORK_DIR / "moonlit-rooftop-all-actions.gif"
-    mp4_path = WORK_DIR / "moonlit-rooftop-all-actions.mp4"
-    report_path = WORK_DIR / "preview-sequence.json"
+    gif_path = WORK_DIR / "moonlit-rooftop-smooth-v3.gif"
+    mp4_path = WORK_DIR / "moonlit-rooftop-smooth-v3.mp4"
+    report_path = WORK_DIR / "preview-sequence-v3.json"
     _write_gif(preview, durations, gif_path)
     _write_mp4(preview, durations, mp4_path)
     report_path.write_text(
         json.dumps(
             {
-                "note": "This deterministic preview shows every resident action once; runtime randomizes and remains resident for 30-90 seconds.",
+                "note": "Smooth v3 preview: hand-drawn transition bridges, fixed roof/moon, reversible enter/exit, and every resident action once.",
                 "sequence": list(SEQUENCE),
                 "frameCount": len(frames),
                 "durationMs": sum(durations),
