@@ -1,7 +1,7 @@
 {
   "id": "nangongwan",
   "displayName": "南宫婉",
-  "description": "《凡人修仙传》最新蓝银造型的南宫婉桌面灵伴测试包，含六十四向伪连续鼠标注视、静立凝神、左右御风、双向遁光、日常陪伴，以及月下含栗在内的八套特效与剧情动作。",
+  "description": "《凡人修仙传》蓝银造型的南宫婉桌面灵伴，含六十四向伪连续鼠标注视、左右御风、双向遁光、日常与术法动作，以及可持续三十至九十秒、随机切换六种坐姿小动作的月下屋檐状态。",
   "spriteVersionNumber": 3,
   "spritesheetPath": "spritesheet.webp",
   "iconFrame": {
@@ -235,15 +235,83 @@
       "showInMenu": true
     },
     "moonlitChestnut": {
-      "label": "月下含栗",
+      "label": "月下屋檐",
       "role": "interaction",
       "row": 23,
-      "frameCount": 48,
-      "frameDurations": [140, 140, 150, 170, 150, 160, 170, 180, 190, 200, 170, 170, 180, 180, 190, 190, 200, 200, 210, 210, 170, 180, 190, 200, 210, 160, 170, 180, 190, 200, 210, 220, 220, 170, 180, 190, 210, 240, 260, 200, 220, 240, 260, 290, 340, 200, 250, 300],
+      "frameCount": 20,
+      "frameDurations": [140, 140, 150, 170, 150, 160, 170, 180, 190, 200, 170, 170, 180, 180, 190, 190, 200, 220, 220, 320],
       "repeatCount": 1,
       "autoplayWeight": 5,
       "cooldownMs": 90000,
       "showInMenu": true
+    },
+    "rooftopIdle": {
+      "label": "屋檐静坐",
+      "role": "interaction",
+      "row": 24,
+      "startColumn": 4,
+      "frameCount": 8,
+      "frameDurations": [320, 300, 360, 320, 360, 320, 360, 520],
+      "repeatCount": 1,
+      "showInMenu": false
+    },
+    "rooftopMoonGaze": {
+      "label": "仰望月色",
+      "role": "interaction",
+      "row": 24,
+      "startColumn": 12,
+      "frameCount": 8,
+      "frameDurations": [180, 180, 220, 550, 420, 220, 180, 300],
+      "repeatCount": 1,
+      "showInMenu": false
+    },
+    "rooftopChestnut": {
+      "label": "月下含栗",
+      "role": "interaction",
+      "row": 25,
+      "startColumn": 4,
+      "frameCount": 12,
+      "frameDurations": [220, 180, 180, 200, 220, 260, 420, 260, 200, 180, 220, 320],
+      "repeatCount": 1,
+      "showInMenu": false
+    },
+    "rooftopRest": {
+      "label": "闭目小憩",
+      "role": "interaction",
+      "row": 26,
+      "frameCount": 8,
+      "frameDurations": [220, 180, 240, 650, 650, 240, 180, 320],
+      "repeatCount": 1,
+      "showInMenu": false
+    },
+    "rooftopBreeze": {
+      "label": "夜风拂袖",
+      "role": "interaction",
+      "row": 26,
+      "startColumn": 8,
+      "frameCount": 8,
+      "frameDurations": [180, 160, 180, 420, 360, 220, 180, 300],
+      "repeatCount": 1,
+      "showInMenu": false
+    },
+    "rooftopGlance": {
+      "label": "侧眸相望",
+      "role": "interaction",
+      "row": 27,
+      "frameCount": 8,
+      "frameDurations": [180, 180, 220, 460, 360, 220, 180, 300],
+      "repeatCount": 1,
+      "showInMenu": false
+    },
+    "rooftopExit": {
+      "label": "离开屋檐",
+      "role": "interaction",
+      "row": 27,
+      "startColumn": 8,
+      "frameCount": 9,
+      "frameDurations": [180, 180, 180, 190, 200, 210, 220, 250, 320],
+      "repeatCount": 1,
+      "showInMenu": false
     },
     "gaze": {
       "label": "随眸相望",
@@ -252,6 +320,26 @@
       "frameCount": 64,
       "frameMs": 100,
       "showInMenu": false
+    }
+  },
+  "states": {
+    "moonlitRooftop": {
+      "label": "月下屋檐",
+      "enterAction": "moonlitChestnut",
+      "residentActions": [
+        {"action": "rooftopIdle", "weight": 40},
+        {"action": "rooftopMoonGaze", "weight": 18},
+        {"action": "rooftopChestnut", "weight": 15},
+        {"action": "rooftopRest", "weight": 10},
+        {"action": "rooftopBreeze", "weight": 10},
+        {"action": "rooftopGlance", "weight": 7}
+      ],
+      "exitAction": "rooftopExit",
+      "minDurationMs": 30000,
+      "rampDurationMs": 30000,
+      "maxDurationMs": 90000,
+      "exitChanceAfterMin": 8,
+      "exitChanceAfterRamp": 22
     }
   }
 }

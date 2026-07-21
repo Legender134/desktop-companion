@@ -87,6 +87,47 @@ v3 不固定动作 ID 和中文名称，但运行时会检查以下能力：
 
 普通移动权重为 19、遁光权重为 1 时，在距离和冷却都允许的情况下，遁光约占移动选择的 5%，即平均约每 20 次移动出现一次。
 
+## 常驻状态（可选）
+
+`states` 用于“先进入一个场景，在场景内随机生活一段时间，再自然退出”的长行为。例如坐到屋檐、趴进窝里、进入睡眠或坐上秋千。它不是把一个动作循环九十秒，而是把多个有限动作组合成状态：
+
+```json
+"states": {
+  "moonlitRooftop": {
+    "label": "月下屋檐",
+    "enterAction": "rooftopEnter",
+    "residentActions": [
+      {"action": "rooftopIdle", "weight": 40},
+      {"action": "rooftopMoonGaze", "weight": 18},
+      {"action": "rooftopChestnut", "weight": 15},
+      {"action": "rooftopRest", "weight": 10},
+      {"action": "rooftopBreeze", "weight": 10},
+      {"action": "rooftopGlance", "weight": 7}
+    ],
+    "exitAction": "rooftopExit",
+    "minDurationMs": 30000,
+    "rampDurationMs": 30000,
+    "maxDurationMs": 90000,
+    "exitChanceAfterMin": 8,
+    "exitChanceAfterRamp": 22
+  }
+}
+```
+
+- `enterAction`：状态入口，也是右键菜单和自主动作候选。必须是有限的 `interaction`；它自己的 `showInMenu`、`autoplayWeight` 和 `cooldownMs` 决定能否手动/自动开始及开始频率。状态开启后，再次点击这项会请求自然退出。
+- `residentActions`：状态内随机播放 2–16 个有限 `interaction`，每项权重为 1–100。程序尽量不连续重复同一项。它们必须全部 `showInMenu: false` 且 `autoplayWeight: 0`，避免绕过状态单独播放。
+- `exitAction`：专用退出动作，同样必须隐藏且自动权重为 0。
+- `minDurationMs`：进入动作完成后，至少保持状态的真实时间，范围 5000–300000 毫秒。
+- `rampDurationMs`：达到最短时间后，退出概率由 `exitChanceAfterMin` 线性提高到 `exitChanceAfterRamp` 所用的时间，范围 0–300000 毫秒。
+- `maxDurationMs`：强制退出上限，范围 10000–600000 毫秒，且不能小于最短时间加爬升时间。
+- 两个退出概率均为 0–100 的整数，后者不能小于前者。程序只在一个状态内动作完整结束时抽取退出概率，保证不会从半帧直接跳到起身。
+
+最关键的美术契约是：所有 `residentActions` 的首帧和末帧应使用同一个标准姿势，`enterAction` 的末帧及 `exitAction` 的首帧也应与它完全一致。运行时不会强制逐像素相等，但不满足这条会在随机切换时出现位置、大小或姿势闪跳。
+
+状态激活时会暂停普通注视、自动闲逛和其他自主动作。拖动、切换宠物或退出程序会立即清理状态；从右键菜单手动结束时，会先让当前状态内动作自然收尾，再播放退出动作。状态入口不会加入“动作展示”，避免一次展示被 30–90 秒的长状态占住。
+
+运行时还会检查：状态引用的动作必须存在；入口、状态内动作和退出动作互不重复；同一动作不能被多个状态占用。JSON Schema 能检查字段形状和数值范围，但跨字段的动作存在性及这些关系由程序在扫描宠物包时复核。
+
 ## 避免同类动作连续播放
 
 多个动作可以使用相同的 `autoplayGroup`。例如把所有术法动作写成：

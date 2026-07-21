@@ -10,6 +10,11 @@ from tools.build_nangongwan_moonlit_chestnut import (
     extend_atlas,
     extract_grid,
 )
+from tools.build_nangongwan_moonlit_rooftop_state import (
+    CLIP_ORDER,
+    build_clips as build_state_clips,
+    extend_atlas as extend_state_atlas,
+)
 
 
 def _panel_sheet(columns: int, rows: int, *, size: tuple[int, int]) -> Image.Image:
@@ -101,3 +106,58 @@ def test_builder_fills_all_three_rows_and_preserves_the_prefix():
             )
         )
         assert cell.getbbox() is not None
+
+
+def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_clip():
+    moon, roof = _moon_and_roof()
+    resident = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    clips = build_state_clips(
+        _idle_frames(),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(3, 1, size=(900, 400)), 3, 1),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        resident,
+        moon,
+        roof,
+    )
+
+    assert tuple(clips) == CLIP_ORDER
+    assert {key: len(value) for key, value in clips.items()} == {
+        "moonlitChestnut": 20,
+        "rooftopIdle": 8,
+        "rooftopMoonGaze": 8,
+        "rooftopChestnut": 12,
+        "rooftopRest": 8,
+        "rooftopBreeze": 8,
+        "rooftopGlance": 8,
+        "rooftopExit": 9,
+    }
+    boundary = clips["moonlitChestnut"][-1].tobytes()
+    for key in CLIP_ORDER[1:-1]:
+        assert clips[key][0].tobytes() == boundary
+        assert clips[key][-1].tobytes() == boundary
+    assert clips["rooftopExit"][0].tobytes() == boundary
+
+
+def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
+    moon, roof = _moon_and_roof()
+    clips = build_state_clips(
+        _idle_frames(),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(3, 1, size=(900, 400)), 3, 1),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
+        moon,
+        roof,
+    )
+    source = Image.new("RGBA", (ATLAS_WIDTH, 5408), (11, 17, 29, 255))
+    prefix = source.crop((0, 0, ATLAS_WIDTH, 4784))
+
+    atlas = extend_state_atlas(source, clips)
+
+    assert atlas.size == (ATLAS_WIDTH, 6032)
+    assert sha256(atlas.crop((0, 0, ATLAS_WIDTH, 4784)).tobytes()).digest() == sha256(
+        prefix.tobytes()
+    ).digest()

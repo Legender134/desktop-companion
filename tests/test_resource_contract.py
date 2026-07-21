@@ -83,8 +83,8 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert manifest["displayName"] == "南宫婉"
     assert manifest["spriteVersionNumber"] == 3
     assert manifest["spritesheetPath"] == "spritesheet.webp"
-    assert len(manifest["actions"]) == 21
-    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 286
+    assert len(manifest["actions"]) == 28
+    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 319
     assert manifest["actions"]["idle"]["role"] == "idle"
     assert manifest["actions"]["moveRight"]["role"] == "move"
     assert manifest["actions"]["moveLeft"]["role"] == "move"
@@ -100,26 +100,39 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     }
     moonlit = manifest["actions"]["moonlitChestnut"]
     assert moonlit == {
-        "label": "月下含栗",
+        "label": "月下屋檐",
         "role": "interaction",
         "row": 23,
-        "frameCount": 48,
+        "frameCount": 20,
         "frameDurations": [
-            140, 140, 150, 170,
-            150, 160, 170, 180, 190, 200,
-            170, 170, 180, 180, 190, 190, 200, 200, 210, 210,
-            170, 180, 190, 200, 210,
-            160, 170, 180, 190, 200, 210, 220, 220,
-            170, 180, 190, 210, 240, 260,
-            200, 220, 240, 260, 290, 340,
-            200, 250, 300,
+            140, 140, 150, 170, 150, 160, 170, 180, 190, 200,
+            170, 170, 180, 180, 190, 190, 200, 220, 220, 320,
         ],
         "repeatCount": 1,
         "autoplayWeight": 5,
         "cooldownMs": 90000,
         "showInMenu": True,
     }
-    assert sum(moonlit["frameDurations"]) == 9600
+    assert sum(moonlit["frameDurations"]) == 3690
+
+    assert manifest["states"]["moonlitRooftop"] == {
+        "label": "月下屋檐",
+        "enterAction": "moonlitChestnut",
+        "residentActions": [
+            {"action": "rooftopIdle", "weight": 40},
+            {"action": "rooftopMoonGaze", "weight": 18},
+            {"action": "rooftopChestnut", "weight": 15},
+            {"action": "rooftopRest", "weight": 10},
+            {"action": "rooftopBreeze", "weight": 10},
+            {"action": "rooftopGlance", "weight": 7},
+        ],
+        "exitAction": "rooftopExit",
+        "minDurationMs": 30000,
+        "rampDurationMs": 30000,
+        "maxDurationMs": 90000,
+        "exitChanceAfterMin": 8,
+        "exitChanceAfterRamp": 22,
+    }
 
     legacy = manifest["actions"]["tasteCake"]
     assert "autoplayWeight" not in legacy
@@ -127,7 +140,7 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
 
     atlas = QImage(str(resource_path(f"{root}/spritesheet.webp")))
     assert not atlas.isNull()
-    assert (atlas.width(), atlas.height()) == (3072, 5408)
+    assert (atlas.width(), atlas.height()) == (3072, 6032)
     assert atlas.hasAlphaChannel()
 
     columns = atlas.width() // 192
@@ -138,8 +151,8 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
             cell = atlas.copy(column * 192, row * 208, 192, 208)
             assert alpha_count(cell) > 0
 
-    final_moonlit = atlas.copy(15 * 192, 25 * 208, 192, 208)
-    assert alpha_count(final_moonlit) > 0
+    final_rooftop = atlas.copy(0, 28 * 208, 192, 208)
+    assert alpha_count(final_rooftop) > 0
 
     catalog = AnimationCatalog.load_pet("nangongwan")
     assert catalog.supports_gaze

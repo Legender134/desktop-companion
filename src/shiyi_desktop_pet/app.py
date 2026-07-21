@@ -31,7 +31,14 @@ from .geometry import Point, Rect, Size, clamp_position
 from .keyboard_hook import LowLevelKeyboardHook
 from .logging_setup import configure_logging, install_exception_hook
 from .menu_controller import MenuCommand, MenuController
-from .models import ActionId, ActionKey, ActionRole, FrameAsset, PetActionDefinition
+from .models import (
+    ActionId,
+    ActionKey,
+    ActionRole,
+    FrameAsset,
+    PetActionDefinition,
+    PetStateDefinition,
+)
 from .pet_registry import PetDefinition, PetRegistry
 from .pet_window import PetWindow
 from .product import (
@@ -291,6 +298,11 @@ class DesktopPetApplication:
         self._last_action_played_ms: dict[ActionKey, int] = {}
         self._showcase_active = False
         self._showcase_queue: list[ActionKey] = []
+        self._active_state: PetStateDefinition | None = None
+        self._state_phase: str | None = None
+        self._state_active_started_ms: int | None = None
+        self._state_last_action: ActionKey | None = None
+        self._state_exit_requested = False
 
         self._clock = QElapsedTimer()
         self._clock.start()
@@ -306,9 +318,9 @@ class DesktopPetApplication:
             self.dispatch_menu,
             self.logger,
             pet_choices_supplier=lambda: self.pet_choices,
-            action_items_supplier=lambda: self.catalog.action_menu_items(),
+            action_items_supplier=self._action_menu_items,
             look_degrees_supplier=lambda: tuple(self.catalog.manual_look_degrees),
-            action_details_supplier=lambda: self.catalog.action_menu_details(),
+            action_details_supplier=self._action_menu_details,
             gaze_frame_count_supplier=lambda: len(self.catalog.look_degrees),
             shortcut_labels_supplier=lambda: self.catalog.digit_shortcut_labels(),
         )
@@ -468,6 +480,15 @@ class DesktopPetApplication:
     def _play_action(self, action: ActionKey, *, defer_autonomous: bool) -> None:
         if action not in self.catalog.action_ids:
             raise ValueError(f"unsupported action: {action}")
+        state = self.catalog.state_for_enter_action(action)
+        if self._active_state is not None:
+            if state is not None and state.key == self._active_state.key:
+                self._request_state_exit()
+                return
+            self._cancel_active_state()
+        if state is not None:
+            self._start_state(state, defer_autonomous=defer_autonomous)
+            return
         definition = self.catalog.definition(action)
         if (
             definition.role is ActionRole.BURST_MOVE
@@ -491,6 +512,158 @@ class DesktopPetApplication:
         if definition.role is ActionRole.IDLE:
             self.behavior.manual_finished()
             self._resume_base_mode()
+
+    @property
+    def active_state(self) -> PetStateDefinition | None:
+        return self._active_state
+
+    def _action_menu_items(self) -> tuple[tuple[str, ActionKey], ...]:
+        items = list(self.catalog.action_menu_items())
+        state = self._active_state
+        if state is None:
+            return tuple(items)
+        replacement = (
+            f"正在结束{state.label}"
+            if self._state_exit_requested
+            else f"结束{state.label}"
+        )
+        return tuple(
+            (replacement if action == state.enter_action else label, action)
+            for label, action in items
+        )
+
+    def _action_menu_details(self) -> dict[ActionKey, str]:
+        details = self.catalog.action_menu_details()
+        state = self._active_state
+        if state is None:
+            return details
+        if self._state_exit_requested:
+            details[state.enter_action] = (
+                f"“{state.label}”已收到结束请求。为避免人物从半个动作突然跳到起身姿势，"
+                "程序会先播放完当前坐姿小动作，再接专用起身动画并恢复待机、注视或闲逛。"
+            )
+        else:
+            details[state.enter_action] = (
+                f"结束当前“{state.label}”状态。程序会让正在播放的坐姿小动作自然收尾，"
+                "随后播放专用起身动画；通常只需等待当前小动作剩余的几秒，不会等到自动"
+                f"上限 {state.max_duration_ms / 1000:g} 秒。"
+            )
+        return details
+
+    def _start_state(
+        self, state: PetStateDefinition, *, defer_autonomous: bool
+    ) -> None:
+        self.autonomous_timer.stop()
+        if defer_autonomous:
+            self._defer_autonomous()
+        self._fixed_look_degrees = None
+        self._interrupt_wander(reschedule=False)
+        self._active_state = state
+        self._state_phase = "enter"
+        self._state_active_started_ms = None
+        self._state_last_action = None
+        self._state_exit_requested = False
+        self._play_state_action(state.enter_action)
+        self._last_action_played_ms[state.enter_action] = self._now_ms()
+
+    def _play_state_action(self, action: ActionKey) -> None:
+        self.behavior.trigger_manual(action)
+        self.timeline.start(action, self._now_ms())
+        self._last_frame_index = None
+        self._manual_burst_start = None
+        self._manual_burst_target = None
+
+    def _request_state_exit(self) -> None:
+        if self._active_state is None or self._state_phase == "exit":
+            return
+        self._state_exit_requested = True
+
+    def _cancel_active_state(self) -> bool:
+        if self._active_state is None:
+            return False
+        self._active_state = None
+        self._state_phase = None
+        self._state_active_started_ms = None
+        self._state_last_action = None
+        self._state_exit_requested = False
+        if self.behavior.current_action is not None:
+            self.behavior.manual_finished()
+        self._manual_burst_start = None
+        self._manual_burst_target = None
+        return True
+
+    def _choose_state_action(self, state: PetStateDefinition) -> ActionKey:
+        weighted = list(state.resident_actions)
+        if len(weighted) > 1 and self._state_last_action is not None:
+            without_repeat = [
+                choice
+                for choice in weighted
+                if choice.action_id != self._state_last_action
+            ]
+            if without_repeat:
+                weighted = without_repeat
+        target = self._rng.randint(1, sum(choice.weight for choice in weighted))
+        for choice in weighted:
+            target -= choice.weight
+            if target <= 0:
+                self._state_last_action = choice.action_id
+                return choice.action_id
+        raise RuntimeError("could not choose a resident state action")
+
+    def _state_should_exit(self, state: PetStateDefinition, now_ms: int) -> bool:
+        started = self._state_active_started_ms
+        if started is None:
+            return False
+        elapsed = max(0, now_ms - started)
+        if elapsed < state.min_duration_ms:
+            return False
+        if elapsed >= state.max_duration_ms:
+            return True
+        ramp_end = state.min_duration_ms + state.ramp_duration_ms
+        if state.ramp_duration_ms == 0 or elapsed >= ramp_end:
+            chance = state.exit_chance_after_ramp
+        else:
+            progress = (elapsed - state.min_duration_ms) / state.ramp_duration_ms
+            chance = round(
+                state.exit_chance_after_min
+                + (state.exit_chance_after_ramp - state.exit_chance_after_min)
+                * progress
+            )
+        return chance > 0 and self._rng.randint(1, 100) <= chance
+
+    def _advance_active_state(self, now_ms: int) -> None:
+        state = self._active_state
+        action = self.behavior.current_action
+        if state is None or action is None:
+            self._cancel_active_state()
+            self._resume_base_mode()
+            return
+        spec = self.catalog.spec(action)
+        step = self.timeline.advance(self._adjusted_animation_time(now_ms), spec)
+        self._show_frame(self.catalog.frames(action)[step.frame_index])
+        if not step.finished:
+            return
+        if self._state_phase == "enter":
+            self._state_active_started_ms = now_ms
+            if self._state_exit_requested:
+                self._state_phase = "exit"
+                self._play_state_action(state.exit_action)
+            else:
+                self._state_phase = "resident"
+                self._play_state_action(self._choose_state_action(state))
+            return
+        if self._state_phase == "resident":
+            if self._state_exit_requested or self._state_should_exit(state, now_ms):
+                self._state_phase = "exit"
+                self._play_state_action(state.exit_action)
+            else:
+                self._play_state_action(self._choose_state_action(state))
+            return
+        if self._state_phase == "exit":
+            self._cancel_active_state()
+            self._resume_base_mode()
+            return
+        raise RuntimeError("active pet state has an invalid phase")
 
     def _choose_wander_action(self, direction: int, distance: float) -> ActionKey:
         now_ms = self._now_ms()
@@ -600,6 +773,7 @@ class DesktopPetApplication:
 
     def start_showcase(self) -> None:
         self._cancel_showcase()
+        self._cancel_active_state()
         self._showcase_active = True
         self._showcase_queue = list(self.catalog.showcase_actions())
         self._defer_autonomous()
@@ -687,6 +861,7 @@ class DesktopPetApplication:
         if kind == "look":
             if not self.catalog.supports_gaze:
                 return
+            self._cancel_active_state()
             degrees = float(command.value)
             self._wander_target = None
             self._wander_direction = 0
@@ -763,6 +938,7 @@ class DesktopPetApplication:
         if not force and pet_id == self._settings.pet_id and self.catalog.pet_id == pet_id:
             return
         catalog = self._catalog_loader(definition)
+        self._cancel_active_state()
         self.catalog = catalog
         self._fixed_look_degrees = None
         self._live_gaze_active = False
@@ -957,6 +1133,9 @@ class DesktopPetApplication:
         self._render_base(now_ms)
 
     def _advance_manual(self, now_ms: int) -> None:
+        if self._active_state is not None:
+            self._advance_active_state(now_ms)
+            return
         action = self.behavior.current_action
         if action is None:
             self._resume_base_mode()
@@ -1398,6 +1577,7 @@ class DesktopPetApplication:
         self._interrupt_wander(reschedule=False)
         self.autonomous_timer.stop()
         self._cancel_showcase()
+        self._cancel_active_state()
         if self.behavior.current_action is not None:
             self.behavior.manual_finished()
             self.timeline.start(self.catalog.idle_action, self._now_ms())

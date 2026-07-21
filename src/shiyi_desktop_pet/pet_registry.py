@@ -10,12 +10,19 @@ import re
 from typing import Callable
 
 from .constants import ACTION_MANIFEST_SLOTS, DEFAULT_PET_ACTIONS, IN_PLACE_ACTIONS
-from .models import ActionRole, AnimationSpec, PetActionDefinition
+from .models import (
+    ActionRole,
+    AnimationSpec,
+    PetActionDefinition,
+    PetStateActionChoice,
+    PetStateDefinition,
+)
 
 
 _PET_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _ACTION_KEY = re.compile(r"^[a-z][a-zA-Z0-9_-]{0,63}$")
 _AUTOPLAY_GROUP = re.compile(r"^[a-z][a-zA-Z0-9_-]{0,31}$")
+_STATE_KEY = re.compile(r"^[a-z][a-zA-Z0-9_-]{0,63}$")
 _MANIFEST_NAME = "pet.json"
 _SPRITESHEET_NAME = "spritesheet.webp"
 _MAX_MANIFEST_BYTES = 64 * 1024
@@ -32,6 +39,7 @@ class PetDefinition:
     is_bundled: bool
     icon_frame: tuple[int, int]
     actions: tuple[PetActionDefinition, ...]
+    states: tuple[PetStateDefinition, ...] = ()
     sprite_version: int = 2
 
 
@@ -203,6 +211,14 @@ class PetRegistry:
             if sprite_version == 2
             else PetRegistry._parse_v3_actions(manifest.get("actions"))
         )
+        if sprite_version == 2:
+            if "states" in manifest:
+                raise ValueError("states are only supported by sprite version 3")
+            states: tuple[PetStateDefinition, ...] = ()
+        else:
+            states = PetRegistry._parse_v3_states(
+                manifest.get("states"), actions
+            )
 
         spritesheet_path = directory / _SPRITESHEET_NAME
         if not spritesheet_path.is_file():
@@ -222,6 +238,7 @@ class PetRegistry:
             is_bundled=is_bundled,
             icon_frame=(icon_row, icon_column),
             actions=actions,
+            states=states,
             sprite_version=sprite_version,
         )
 
@@ -385,6 +402,173 @@ class PetRegistry:
         if sum(item.role is ActionRole.GAZE for item in definitions) > 1:
             raise ValueError("v3 actions may contain at most one gaze action")
         return definitions
+
+    @staticmethod
+    def _parse_v3_states(
+        value: object,
+        actions: tuple[PetActionDefinition, ...],
+    ) -> tuple[PetStateDefinition, ...]:
+        """Parse optional persistent states without granting them executable code."""
+
+        if value is None:
+            return ()
+        if not isinstance(value, dict) or not 1 <= len(value) <= 16:
+            raise ValueError("states must contain 1 through 16 named states")
+        if any(
+            not isinstance(key, str) or _STATE_KEY.fullmatch(key) is None
+            for key in value
+        ):
+            raise ValueError("state ids must be safe 1 through 64 character names")
+
+        action_map = {definition.action_id: definition for definition in actions}
+        used_actions: set[object] = set()
+        parsed: list[PetStateDefinition] = []
+        required = {
+            "label",
+            "enterAction",
+            "residentActions",
+            "exitAction",
+            "minDurationMs",
+            "rampDurationMs",
+            "maxDurationMs",
+            "exitChanceAfterMin",
+            "exitChanceAfterRamp",
+        }
+        for key, raw_entry in value.items():
+            if not isinstance(raw_entry, dict) or set(raw_entry) != required:
+                raise ValueError(
+                    f"states.{key} must contain exactly the documented state fields"
+                )
+            label = raw_entry["label"]
+            if (
+                not isinstance(label, str)
+                or not label.strip()
+                or len(label.strip()) > 32
+                or any(not char.isprintable() for char in label.strip())
+            ):
+                raise ValueError(
+                    f"states.{key}.label must be 1 through 32 printable characters"
+                )
+
+            enter_action = raw_entry["enterAction"]
+            exit_action = raw_entry["exitAction"]
+            resident_value = raw_entry["residentActions"]
+            if (
+                not isinstance(resident_value, list)
+                or not 2 <= len(resident_value) <= 16
+            ):
+                raise ValueError(
+                    f"states.{key}.residentActions must contain 2 through 16 choices"
+                )
+            choices: list[PetStateActionChoice] = []
+            resident_ids: set[object] = set()
+            for index, choice_value in enumerate(resident_value):
+                if (
+                    not isinstance(choice_value, dict)
+                    or set(choice_value) != {"action", "weight"}
+                ):
+                    raise ValueError(
+                        f"states.{key}.residentActions[{index}] must contain action and weight"
+                    )
+                action_id = choice_value["action"]
+                weight = choice_value["weight"]
+                if action_id not in action_map:
+                    raise ValueError(
+                        f"states.{key}.residentActions[{index}].action is unknown"
+                    )
+                if action_id in resident_ids:
+                    raise ValueError(
+                        f"states.{key}.residentActions cannot repeat an action"
+                    )
+                if not PetRegistry._is_int_between(weight, 1, 100):
+                    raise ValueError(
+                        f"states.{key}.residentActions[{index}].weight must be 1 through 100"
+                    )
+                resident_ids.add(action_id)
+                choices.append(PetStateActionChoice(action_id, weight))
+
+            referenced = (enter_action, *resident_ids, exit_action)
+            if any(action_id not in action_map for action_id in referenced):
+                raise ValueError(f"states.{key} references an unknown action")
+            if len(set(referenced)) != len(referenced):
+                raise ValueError(
+                    f"states.{key} enter, resident, and exit actions must be distinct"
+                )
+            if any(action_id in used_actions for action_id in referenced):
+                raise ValueError("an action cannot belong to more than one state")
+
+            enter_definition = action_map[enter_action]
+            if enter_definition.role is not ActionRole.INTERACTION:
+                raise ValueError(f"states.{key}.enterAction must be an interaction")
+            internal_definitions = [
+                action_map[action_id] for action_id in (*resident_ids, exit_action)
+            ]
+            if any(
+                item.role is not ActionRole.INTERACTION
+                for item in internal_definitions
+            ):
+                raise ValueError(
+                    f"states.{key} resident and exit actions must be interactions"
+                )
+            if any(
+                item.show_in_menu or item.autoplay_weight
+                for item in internal_definitions
+            ):
+                raise ValueError(
+                    f"states.{key} resident and exit actions must be hidden with autoplayWeight 0"
+                )
+            if (
+                not enter_definition.show_in_menu
+                and not enter_definition.autoplay_weight
+            ):
+                raise ValueError(
+                    f"states.{key}.enterAction must be visible or eligible for autoplay"
+                )
+
+            minimum = raw_entry["minDurationMs"]
+            ramp = raw_entry["rampDurationMs"]
+            maximum = raw_entry["maxDurationMs"]
+            chance_min = raw_entry["exitChanceAfterMin"]
+            chance_ramp = raw_entry["exitChanceAfterRamp"]
+            if not PetRegistry._is_int_between(minimum, 5_000, 300_000):
+                raise ValueError(
+                    f"states.{key}.minDurationMs must be 5000 through 300000"
+                )
+            if not PetRegistry._is_int_between(ramp, 0, 300_000):
+                raise ValueError(
+                    f"states.{key}.rampDurationMs must be 0 through 300000"
+                )
+            if (
+                not PetRegistry._is_int_between(maximum, 10_000, 600_000)
+                or maximum < minimum + ramp
+            ):
+                raise ValueError(
+                    f"states.{key}.maxDurationMs must be at least minDurationMs plus rampDurationMs"
+                )
+            if (
+                not PetRegistry._is_int_between(chance_min, 0, 100)
+                or not PetRegistry._is_int_between(chance_ramp, chance_min, 100)
+            ):
+                raise ValueError(
+                    f"states.{key} exit chances must increase from 0 through 100"
+                )
+
+            used_actions.update(referenced)
+            parsed.append(
+                PetStateDefinition(
+                    key=key,
+                    label=label.strip(),
+                    enter_action=enter_action,
+                    resident_actions=tuple(choices),
+                    exit_action=exit_action,
+                    min_duration_ms=minimum,
+                    ramp_duration_ms=ramp,
+                    max_duration_ms=maximum,
+                    exit_chance_after_min=chance_min,
+                    exit_chance_after_ramp=chance_ramp,
+                )
+            )
+        return tuple(parsed)
 
     @staticmethod
     def _parse_v3_common(

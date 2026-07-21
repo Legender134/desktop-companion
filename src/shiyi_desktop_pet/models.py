@@ -53,6 +53,30 @@ class PetActionDefinition:
 
 
 @dataclass(frozen=True)
+class PetStateActionChoice:
+    """One finite animation that may play while a pet state is active."""
+
+    action_id: ActionKey
+    weight: int
+
+
+@dataclass(frozen=True)
+class PetStateDefinition:
+    """A persistent pet state with finite enter, resident, and exit clips."""
+
+    key: str
+    label: str
+    enter_action: ActionKey
+    resident_actions: tuple[PetStateActionChoice, ...]
+    exit_action: ActionKey
+    min_duration_ms: int
+    ramp_duration_ms: int
+    max_duration_ms: int
+    exit_chance_after_min: int
+    exit_chance_after_ramp: int
+
+
+@dataclass(frozen=True)
 class AnimationSpec:
     row: int
     frame_count: int

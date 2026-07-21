@@ -243,6 +243,76 @@ def _grouped_catalog():
     return AnimationCatalog(atlas, actions=actions, sprite_version=3)
 
 
+def _state_catalog():
+    actions = PetRegistry._parse_v3_actions(
+        {
+            "rest": {
+                "label": "待机", "role": "idle", "row": 0,
+                "frameCount": 3, "frameMs": 180, "loop": True,
+            },
+            "moveRight": {
+                "label": "向右", "role": "move", "direction": "right",
+                "row": 1, "frameCount": 5, "frameMs": 80, "loop": True,
+                "autoplayWeight": 19,
+            },
+            "moveLeft": {
+                "label": "向左", "role": "move", "direction": "left",
+                "mirrorOf": "moveRight", "autoplayWeight": 19,
+            },
+            "hello": {
+                "label": "问候", "role": "interaction", "row": 2,
+                "frameCount": 3, "frameMs": 100, "autoplayWeight": 10,
+            },
+            "rooftopEnter": {
+                "label": "月下屋檐", "role": "interaction", "row": 3,
+                "frameCount": 3, "frameMs": 100, "autoplayWeight": 5,
+                "cooldownMs": 90000,
+            },
+            "rooftopIdle": {
+                "label": "屋檐静坐", "role": "interaction", "row": 4,
+                "frameCount": 3, "frameMs": 100, "showInMenu": False,
+            },
+            "rooftopMoon": {
+                "label": "仰望月色", "role": "interaction", "row": 5,
+                "frameCount": 3, "frameMs": 100, "showInMenu": False,
+            },
+            "rooftopExit": {
+                "label": "离开屋檐", "role": "interaction", "row": 6,
+                "frameCount": 3, "frameMs": 100, "showInMenu": False,
+            },
+        }
+    )
+    states = PetRegistry._parse_v3_states(
+        {
+            "moonlitRooftop": {
+                "label": "月下屋檐",
+                "enterAction": "rooftopEnter",
+                "residentActions": [
+                    {"action": "rooftopIdle", "weight": 70},
+                    {"action": "rooftopMoon", "weight": 30},
+                ],
+                "exitAction": "rooftopExit",
+                "minDurationMs": 30000,
+                "rampDurationMs": 30000,
+                "maxDurationMs": 90000,
+                "exitChanceAfterMin": 5,
+                "exitChanceAfterRamp": 25,
+            }
+        },
+        actions,
+    )
+    atlas = QImage(8 * 192, 7 * 208, QImage.Format.Format_RGBA8888)
+    atlas.fill(QColor(0, 0, 0, 0))
+    for row, used in enumerate((3, 5, 3, 3, 3, 3, 3)):
+        for column in range(used):
+            atlas.setPixelColor(
+                column * 192 + 5, row * 208 + 5, QColor(255, 255, 255, 255)
+            )
+    return AnimationCatalog(
+        atlas, actions=actions, states=states, sprite_version=3
+    )
+
+
 def _install_test_pet(user_root: Path, pet_id: str, display_name: str) -> Path:
     directory = user_root / pet_id
     directory.mkdir(parents=True)
@@ -1042,7 +1112,104 @@ def test_action_showcase_plays_every_in_place_action_once(qapp):
     controller.shutdown()
 
 
-def test_moonlit_chestnut_manual_play_ignores_its_autonomous_cooldown(qapp):
+def test_persistent_state_enters_cycles_without_repeating_and_forces_exit(qapp):
+    settings = replace(AppSettings(), gaze_enabled=False)
+    controller, _, _, _, _ = _controller(
+        qapp, settings=settings, catalog_factory=_state_catalog
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [0]
+    controller._now_ms = lambda: now[0]
+
+    controller.trigger_action("rooftopEnter")
+    assert controller.active_state.key == "moonlitRooftop"
+    assert controller._state_phase == "enter"
+    assert controller.current_action == "rooftopEnter"
+
+    now[0] = 300
+    controller._advance_manual(now[0])
+    first_resident = controller.current_action
+    assert controller._state_phase == "resident"
+    assert first_resident in {"rooftopIdle", "rooftopMoon"}
+
+    now[0] = 600
+    controller._advance_manual(now[0])
+    assert controller.current_action in {"rooftopIdle", "rooftopMoon"}
+    assert controller.current_action != first_resident
+    assert controller._state_phase == "resident"
+
+    controller.timeline.started_ms = 90000
+    now[0] = 90300
+    controller._advance_manual(now[0])
+    assert controller._state_phase == "exit"
+    assert controller.current_action == "rooftopExit"
+
+    now[0] = 90600
+    controller._advance_manual(now[0])
+    assert controller.active_state is None
+    assert controller.current_action == controller.catalog.idle_action
+    controller.shutdown()
+
+
+def test_persistent_state_menu_requests_natural_exit_after_current_clip(qapp):
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=replace(AppSettings(), gaze_enabled=False),
+        catalog_factory=_state_catalog,
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    now = [0]
+    controller._now_ms = lambda: now[0]
+
+    controller.dispatch_menu(MenuCommand("action", "rooftopEnter"))
+    now[0] = 300
+    controller._advance_manual(now[0])
+    resident = controller.current_action
+
+    assert ("结束月下屋檐", "rooftopEnter") in controller._action_menu_items()
+    controller.dispatch_menu(MenuCommand("action", "rooftopEnter"))
+    assert controller._state_exit_requested
+    assert controller.current_action == resident
+    assert ("正在结束月下屋檐", "rooftopEnter") in controller._action_menu_items()
+
+    now[0] = 600
+    controller._advance_manual(now[0])
+    assert controller._state_phase == "exit"
+    assert controller.current_action == "rooftopExit"
+    now[0] = 900
+    controller._advance_manual(now[0])
+    assert controller.active_state is None
+    controller.shutdown()
+
+
+def test_drag_and_pet_switch_cancel_persistent_state_without_scene_residue(qapp):
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=replace(AppSettings(), gaze_enabled=False),
+        catalog_factory=_state_catalog,
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+
+    controller.trigger_action("rooftopEnter")
+    controller._begin_drag()
+    assert controller.active_state is None
+    assert controller.behavior.mode is BehaviorMode.DRAGGING
+    assert controller.behavior.current_action is None
+    controller._finish_drag(QPoint(controller.window.x(), controller.window.y()))
+
+    controller.trigger_action("rooftopEnter")
+    controller._switch_pet("shiyi", force=True)
+    assert controller.active_state is None
+    assert controller.catalog.pet_id == "shiyi"
+    assert controller.current_action == controller.catalog.idle_action
+    controller.shutdown()
+
+
+def test_moonlit_rooftop_manual_start_ignores_cooldown_and_can_exit(qapp):
     class PickLast:
         @staticmethod
         def randint(lower, upper):
@@ -1069,13 +1236,22 @@ def test_moonlit_chestnut_manual_play_ignores_its_autonomous_cooldown(qapp):
 
     controller.dispatch_menu(MenuCommand("action", "moonlitChestnut"))
     assert controller.current_action == "moonlitChestnut"
+    assert controller.active_state.key == "moonlitRooftop"
     assert controller._last_action_played_ms["moonlitChestnut"] == now[0]
 
-    controller.timeline.started_ms = now[0]
-    controller._advance_manual(now[0] + 9_599)
-    assert controller.current_action == "moonlitChestnut"
-    controller._advance_manual(now[0] + 9_600)
+    now[0] += 3690
+    controller._advance_manual(now[0])
+    assert controller.current_action == "rooftopGlance"
+
+    controller.dispatch_menu(MenuCommand("action", "moonlitChestnut"))
+    assert controller._state_exit_requested
+    now[0] += 2100
+    controller._advance_manual(now[0])
+    assert controller.current_action == "rooftopExit"
+    now[0] += 1930
+    controller._advance_manual(now[0])
     assert controller.current_action == controller.catalog.idle_action
+    assert controller.active_state is None
     controller.shutdown()
 
 

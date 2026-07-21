@@ -18,6 +18,7 @@ from .models import (
     AnimationSpec,
     FrameAsset,
     PetActionDefinition,
+    PetStateDefinition,
 )
 from .pet_registry import PetDefinition, PetRegistry
 from .resource_locator import resource_root
@@ -80,6 +81,7 @@ class AnimationCatalog:
         display_name: str = "",
         icon_frame: tuple[int, int] = (0, 0),
         actions: tuple[PetActionDefinition, ...] = DEFAULT_PET_ACTIONS,
+        states: tuple[PetStateDefinition, ...] = (),
         sprite_version: int = 2,
     ):
         if atlas.isNull():
@@ -137,6 +139,25 @@ class AnimationCatalog:
 
         self._action_definitions = tuple(actions)
         self._action_map = action_map
+        self._state_definitions = tuple(states)
+        self._state_map = {state.key: state for state in states}
+        self._state_by_enter_action = {
+            state.enter_action: state for state in states
+        }
+        if len(self._state_map) != len(states) or len(
+            self._state_by_enter_action
+        ) != len(states):
+            raise ValueError("state ids and enter actions must be unique")
+        if any(
+            action_id not in action_map
+            for state in states
+            for action_id in (
+                state.enter_action,
+                *(choice.action_id for choice in state.resident_actions),
+                state.exit_action,
+            )
+        ):
+            raise ValueError("state references an unknown action")
         self._specs: dict[ActionKey, AnimationSpec] = {}
         self._actions: dict[ActionKey, tuple[FrameAsset, ...]] = {}
 
@@ -220,6 +241,7 @@ class AnimationCatalog:
             display_name=definition.display_name,
             icon_frame=definition.icon_frame,
             actions=definition.actions,
+            states=definition.states,
             sprite_version=definition.sprite_version,
         )
 
@@ -262,6 +284,18 @@ class AnimationCatalog:
 
     def definition(self, action: ActionKey) -> PetActionDefinition:
         return self._action_map[action]
+
+    @property
+    def states(self) -> tuple[PetStateDefinition, ...]:
+        return self._state_definitions
+
+    def state_for_enter_action(
+        self, action: ActionKey
+    ) -> PetStateDefinition | None:
+        return self._state_by_enter_action.get(action)
+
+    def state_definition(self, key: str) -> PetStateDefinition:
+        return self._state_map[key]
 
     def icon_image(self) -> QImage:
         return self._icon_image.copy()
@@ -340,12 +374,33 @@ class AnimationCatalog:
                     f" {_seconds(definition.cooldown_ms)} 秒。"
                 )
             else:
+                state = self.state_for_enter_action(definition.action_id)
                 weight = _nominal_weight_text(
                     definition.autoplay_weight,
                     interaction_total,
                     "自主小动作",
                 )
-                behavior = f"{weight}"
+                if state is None:
+                    behavior = f"{weight}"
+                else:
+                    resident_total = sum(
+                        choice.weight for choice in state.resident_actions
+                    )
+                    resident_text = "、".join(
+                        f"{self.definition(choice.action_id).label}约"
+                        f"{choice.weight / resident_total * 100:.0f}%"
+                        for choice in state.resident_actions
+                    )
+                    ramp_end = state.min_duration_ms + state.ramp_duration_ms
+                    behavior = (
+                        f"这是“{state.label}”常驻状态的进入动作。坐稳后至少停留"
+                        f" {_seconds(state.min_duration_ms)} 秒；到"
+                        f" {_seconds(ramp_end)} 秒后每个坐姿小动作结束时的退出概率提高到"
+                        f" {state.exit_chance_after_ramp}%，最迟"
+                        f" {_seconds(state.max_duration_ms)} 秒强制起身。状态内随机为："
+                        f"{resident_text}；不会连续重复同一小动作。再次选择本项可请求自然结束。"
+                        f"{weight}"
+                    )
                 if definition.cooldown_ms:
                     behavior += (
                         f"；播放一次后至少冷却 {_seconds(definition.cooldown_ms)} 秒，"
@@ -395,6 +450,7 @@ class AnimationCatalog:
             for definition in self._action_definitions
             if definition.role is ActionRole.INTERACTION
             and (definition.show_in_menu or definition.autoplay_weight > 0)
+            and definition.action_id not in self._state_by_enter_action
         )
 
     def movement_actions(

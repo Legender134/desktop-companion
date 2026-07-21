@@ -165,41 +165,67 @@ def test_catalog_builds_precise_action_help_and_current_digit_mapping():
     assert shortcuts[0] == "按权重随机"
 
 
-def test_nangongwan_exposes_new_signature_action_and_retires_legacy_cake():
+def test_nangongwan_exposes_persistent_rooftop_state_and_retires_legacy_cake():
     catalog = AnimationCatalog.load_pet("nangongwan")
     menu = dict(catalog.action_menu_items())
     autoplay = dict(catalog.autoplay_actions())
 
-    assert menu["月下含栗"] == "moonlitChestnut"
+    assert menu["月下屋檐"] == "moonlitChestnut"
     assert "栗糕轻尝" not in menu
     assert autoplay["moonlitChestnut"] == 5
     assert "tasteCake" not in autoplay
-    assert "moonlitChestnut" in catalog.showcase_actions()
+    assert "moonlitChestnut" not in catalog.showcase_actions()
     assert "tasteCake" not in catalog.showcase_actions()
     assert len(catalog.frames("tasteCake")) == 10
     assert autoplay["moonlitChestnut"] / sum(autoplay.values()) == pytest.approx(
         5 / 101
     )
+    state = catalog.state_for_enter_action("moonlitChestnut")
+    assert state.key == "moonlitRooftop"
+    assert state.label == "月下屋檐"
+    assert state.exit_action == "rooftopExit"
+    assert [(choice.action_id, choice.weight) for choice in state.resident_actions] == [
+        ("rooftopIdle", 40),
+        ("rooftopMoonGaze", 18),
+        ("rooftopChestnut", 15),
+        ("rooftopRest", 10),
+        ("rooftopBreeze", 10),
+        ("rooftopGlance", 7),
+    ]
 
 
-def test_moonlit_chestnut_uses_all_48_cross_row_frames_once_for_9_6_seconds():
+def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
     catalog = AnimationCatalog.load_pet("nangongwan")
     action = "moonlitChestnut"
     spec = catalog.spec(action)
     frames = catalog.frames(action)
 
     assert [(frame.row, frame.column) for frame in frames] == [
-        divmod(23 * 16 + offset, 16) for offset in range(48)
+        divmod(23 * 16 + offset, 16) for offset in range(20)
     ]
-    assert spec.cycle_ms == 9600
+    assert spec.cycle_ms == 3690
     assert spec.loops == 1
+
+    boundary = frames[-1].image.constBits().tobytes()
+    for resident_action in (
+        "rooftopIdle",
+        "rooftopMoonGaze",
+        "rooftopChestnut",
+        "rooftopRest",
+        "rooftopBreeze",
+        "rooftopGlance",
+    ):
+        resident = catalog.frames(resident_action)
+        assert resident[0].image.constBits().tobytes() == boundary
+        assert resident[-1].image.constBits().tobytes() == boundary
+    assert catalog.frames("rooftopExit")[0].image.constBits().tobytes() == boundary
 
     timeline = AnimationTimeline()
     timeline.start(action, 0)
-    assert timeline.advance(9599, spec).frame_index == 47
-    assert not timeline.advance(9599, spec).finished
-    assert timeline.advance(9600, spec).frame_index == 47
-    assert timeline.advance(9600, spec).finished
+    assert timeline.advance(3689, spec).frame_index == 19
+    assert not timeline.advance(3689, spec).finished
+    assert timeline.advance(3690, spec).frame_index == 19
+    assert timeline.advance(3690, spec).finished
 
 
 def test_catalog_loads_each_bundled_pet_and_rejects_unknown_id():

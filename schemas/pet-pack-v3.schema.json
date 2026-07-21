@@ -38,6 +38,13 @@
       "maxProperties": 64,
       "propertyNames": {"pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"},
       "additionalProperties": {"$ref": "#/$defs/action"}
+    },
+    "states": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "propertyNames": {"pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"},
+      "additionalProperties": {"$ref": "#/$defs/state"}
     }
   },
   "$defs": {
@@ -158,6 +165,55 @@
         {"$ref": "#/$defs/direct"},
         {"$ref": "#/$defs/mirror"}
       ]
+    },
+    "stateChoice": {
+      "type": "object",
+      "required": ["action", "weight"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"
+        },
+        "weight": {"type": "integer", "minimum": 1, "maximum": 100}
+      }
+    },
+    "state": {
+      "type": "object",
+      "required": [
+        "label",
+        "enterAction",
+        "residentActions",
+        "exitAction",
+        "minDurationMs",
+        "rampDurationMs",
+        "maxDurationMs",
+        "exitChanceAfterMin",
+        "exitChanceAfterRamp"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label": {"$ref": "#/$defs/label"},
+        "enterAction": {
+          "type": "string",
+          "pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"
+        },
+        "residentActions": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/stateChoice"}
+        },
+        "exitAction": {
+          "type": "string",
+          "pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"
+        },
+        "minDurationMs": {"type": "integer", "minimum": 5000, "maximum": 300000},
+        "rampDurationMs": {"type": "integer", "minimum": 0, "maximum": 300000},
+        "maxDurationMs": {"type": "integer", "minimum": 10000, "maximum": 600000},
+        "exitChanceAfterMin": {"type": "integer", "minimum": 0, "maximum": 100},
+        "exitChanceAfterRamp": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
     }
   }
 }

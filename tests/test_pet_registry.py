@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import shutil
 
+import pytest
 from PySide6.QtGui import QColor, QImage
 
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
@@ -20,6 +21,7 @@ def _write_pack(
     sprite_bytes: bytes = b"fake-webp",
     icon_frame: object | None = None,
     actions: object | None = None,
+    states: object | None = None,
 ) -> Path:
     directory = root / pet_id
     directory.mkdir(parents=True)
@@ -34,6 +36,8 @@ def _write_pack(
         manifest["iconFrame"] = icon_frame
     if actions is not None:
         manifest["actions"] = actions
+    if states is not None:
+        manifest["states"] = states
     (directory / "pet.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
@@ -207,6 +211,67 @@ def _valid_v3_actions() -> dict[str, dict[str, object]]:
     }
 
 
+def _valid_v3_state_actions() -> dict[str, dict[str, object]]:
+    actions = _valid_v3_actions()
+    actions.update(
+        {
+            "rooftopEnter": {
+                "label": "进入月下屋檐",
+                "role": "interaction",
+                "row": 4,
+                "frameCount": 4,
+                "frameMs": 140,
+                "autoplayWeight": 5,
+                "cooldownMs": 90000,
+            },
+            "rooftopIdle": {
+                "label": "屋檐静坐",
+                "role": "interaction",
+                "row": 5,
+                "frameCount": 4,
+                "frameMs": 180,
+                "showInMenu": False,
+            },
+            "rooftopMoon": {
+                "label": "仰望月色",
+                "role": "interaction",
+                "row": 6,
+                "frameCount": 4,
+                "frameMs": 180,
+                "showInMenu": False,
+            },
+            "rooftopExit": {
+                "label": "离开月下屋檐",
+                "role": "interaction",
+                "row": 7,
+                "frameCount": 4,
+                "frameMs": 140,
+                "showInMenu": False,
+            },
+        }
+    )
+    return actions
+
+
+def _valid_v3_states() -> dict[str, dict[str, object]]:
+    return {
+        "moonlitRooftop": {
+            "label": "月下屋檐",
+            "enterAction": "rooftopEnter",
+            "residentActions": [
+                {"action": "rooftopIdle", "weight": 70},
+                {"action": "rooftopMoon", "weight": 30},
+            ],
+            "exitAction": "rooftopExit",
+            "minDurationMs": 30000,
+            "rampDurationMs": 30000,
+            "maxDurationMs": 90000,
+            "exitChanceAfterMin": 5,
+            "exitChanceAfterRamp": 25,
+        }
+    }
+
+
 def test_registry_loads_complete_pet_specific_action_names_and_weights(tmp_path: Path):
     bundled = tmp_path / "bundled"
     _write_pack(bundled, "shiyi", actions=_valid_actions())
@@ -285,6 +350,84 @@ def test_registry_loads_dynamic_v3_actions_timing_mirroring_and_burst_metadata(
     assert actions["dashLeft"].travel_distance_ratio == 0.5
     assert actions["dashLeft"].max_vertical_ratio == 0.1
     assert actions["hello"].autoplay_group == "quiet"
+
+
+def test_registry_loads_valid_persistent_state_with_weighted_resident_actions(
+    tmp_path: Path,
+):
+    bundled = tmp_path / "bundled"
+    _write_pack(
+        bundled,
+        "state_pet",
+        sprite_version=3,
+        actions=_valid_v3_state_actions(),
+        states=_valid_v3_states(),
+    )
+
+    definition = PetRegistry(bundled, None).refresh().by_id("state_pet")
+
+    assert len(definition.states) == 1
+    state = definition.states[0]
+    assert state.key == "moonlitRooftop"
+    assert state.enter_action == "rooftopEnter"
+    assert [(choice.action_id, choice.weight) for choice in state.resident_actions] == [
+        ("rooftopIdle", 70),
+        ("rooftopMoon", 30),
+    ]
+    assert state.exit_action == "rooftopExit"
+    assert state.min_duration_ms == 30000
+    assert state.ramp_duration_ms == 30000
+    assert state.max_duration_ms == 90000
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda actions, states: states["moonlitRooftop"].update(
+                {"enterAction": "missing"}
+            ),
+            "unknown action",
+        ),
+        (
+            lambda actions, states: actions["rooftopIdle"].update(
+                {"showInMenu": True}
+            ),
+            "hidden with autoplayWeight 0",
+        ),
+        (
+            lambda actions, states: states["moonlitRooftop"].update(
+                {"maxDurationMs": 50000}
+            ),
+            "at least minDurationMs plus rampDurationMs",
+        ),
+        (
+            lambda actions, states: states["moonlitRooftop"].update(
+                {"exitChanceAfterMin": 30, "exitChanceAfterRamp": 20}
+            ),
+            "exit chances must increase",
+        ),
+    ),
+)
+def test_registry_rejects_unsafe_or_incoherent_persistent_states(
+    tmp_path: Path, mutate, message: str
+):
+    bundled = tmp_path / "bundled"
+    actions = _valid_v3_state_actions()
+    states = _valid_v3_states()
+    mutate(actions, states)
+    _write_pack(
+        bundled,
+        "bad_state",
+        sprite_version=3,
+        actions=actions,
+        states=states,
+    )
+
+    snapshot = PetRegistry(bundled, None).refresh()
+
+    assert snapshot.pets == ()
+    assert message in snapshot.issues[0].message
 
 
 def test_registry_accepts_supported_gaze_density_and_rejects_other_counts(
