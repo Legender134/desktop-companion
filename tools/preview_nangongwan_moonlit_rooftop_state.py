@@ -65,15 +65,15 @@ def main() -> None:
 
     preview = tuple(_desktop_preview(frame) for frame in frames)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    gif_path = WORK_DIR / "moonlit-rooftop-transparent-v4.gif"
-    mp4_path = WORK_DIR / "moonlit-rooftop-transparent-v4.mp4"
-    report_path = WORK_DIR / "preview-sequence-v4.json"
+    gif_path = WORK_DIR / "moonlit-rooftop-transparent-v5.gif"
+    mp4_path = WORK_DIR / "moonlit-rooftop-transparent-v5.mp4"
+    report_path = WORK_DIR / "preview-sequence-v5.json"
     _write_gif(preview, durations, gif_path)
     _write_mp4(preview, durations, mp4_path)
     report_path.write_text(
         json.dumps(
             {
-                "note": "Transparent v4 preview: localized moon/eave, natural dangling-leg transition, reversible enter/exit, and every resident action once.",
+                "note": "Transparent v5 preview: head-anchored seated motion, restored large partial moon, reversible enter/exit, and every resident action once.",
                 "sequence": list(SEQUENCE),
                 "frameCount": len(frames),
                 "durationMs": sum(durations),

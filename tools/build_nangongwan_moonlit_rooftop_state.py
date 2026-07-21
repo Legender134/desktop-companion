@@ -63,6 +63,32 @@ CLIP_ORDER = (
     "rooftopExit",
 )
 
+RESIDENT_MOON_OPACITY = 0.78
+CHARACTER_ANCHOR_X = CELL_SIZE[0] // 2
+
+
+def _head_anchor_x(source: Image.Image) -> float:
+    """Return the horizontal centre of the painted head region.
+
+    The generated panels do not share a reliable canvas origin: the same face
+    can sit dozens of source pixels farther left or right from one panel to the
+    next.  The upper 40 percent of the painted silhouette contains the head
+    and hair ornament but excludes sleeves, skirts, and wind-blown lower hair,
+    making it a stable visual anchor for a seated desktop character.
+    """
+
+    alpha = source.convert("RGBA").getchannel("A")
+    opaque = alpha.point(lambda value: 255 if value >= 16 else 0)
+    painted = opaque.getbbox()
+    if painted is None:
+        raise ValueError("generated motion panel is empty")
+    painted_height = painted[3] - painted[1]
+    head_bottom = painted[1] + max(1, round(painted_height * 0.40))
+    head = opaque.crop((0, painted[1], source.width, head_bottom)).getbbox()
+    if head is None:
+        raise ValueError("generated motion panel has no detectable head")
+    return (head[0] + head[2]) / 2
+
 
 def _placed_sequence(
     panels: tuple[Image.Image, ...], *, target_height: int
@@ -72,8 +98,10 @@ def _placed_sequence(
     Generated sheets use different amounts of transparent padding.  Scaling
     the full cells independently makes the character pulse in size, while
     cropping every pose independently makes her horizontal centre wobble.
-    This routine derives one scale from the tallest painted pose, preserves
-    each cell's source alignment, and locks every pose to the same foot line.
+    This routine derives one scale from the tallest painted pose, locks each
+    panel's detected head centre to the same x coordinate, and locks every
+    pose to the same foot line.  Body, sleeves, and hair can still animate,
+    while the seated character herself no longer jumps across the desktop.
     """
 
     sources = tuple(panel.convert("RGBA") for panel in panels)
@@ -90,8 +118,13 @@ def _placed_sequence(
             max(1, round(source.height * scale)),
         )
         resized = source.resize(size, Image.Resampling.LANCZOS)
-        x = round(CELL_SIZE[0] / 2 - source.width * scale / 2)
-        y = round(204 - box[3] * scale)
+        resized_box = resized.getbbox()
+        if resized_box is None:
+            raise ValueError("resized motion panel is empty")
+        # Measure again after resampling so integer placement cannot reintroduce
+        # a two- or three-pixel lateral wobble.
+        x = round(CHARACTER_ANCHOR_X - _head_anchor_x(resized))
+        y = 204 - resized_box[3]
         frame = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
         frame.alpha_composite(resized, (x, y))
         placed.append(frame)
@@ -99,7 +132,7 @@ def _placed_sequence(
 
 
 def _prepared_local_moon(source: Image.Image) -> Image.Image:
-    """Create a softly masked local moon instead of exposing source crop edges."""
+    """Create the large, unmistakable partial moon behind the seated pet."""
 
     moon = source.convert("RGBA")
     box = moon.getbbox()
@@ -111,12 +144,14 @@ def _prepared_local_moon(source: Image.Image) -> Image.Image:
     left = box[0] + round((width - side) * 0.16)
     top = box[1] + round((height - side) * 0.16)
     moon = moon.crop((left, top, left + side, top + side)).convert("RGB")
-    moon = moon.resize((76, 76), Image.Resampling.LANCZOS).convert("RGBA")
+    moon = moon.resize((126, 126), Image.Resampling.LANCZOS).convert("RGBA")
     mask = Image.new("L", moon.size, 0)
-    ImageDraw.Draw(mask).ellipse((2, 2, 73, 73), fill=255)
-    moon.putalpha(mask.filter(ImageFilter.GaussianBlur(0.8)))
+    ImageDraw.Draw(mask).ellipse((2, 2, 123, 123), fill=255)
+    moon.putalpha(mask.filter(ImageFilter.GaussianBlur(1.0)))
     result = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
-    result.alpha_composite(moon, (108, 2))
+    # The character occludes the lower-left portion, so the moon reads as a
+    # large background presence without using a hard crop at the canvas edge.
+    result.alpha_composite(moon, (64, 0))
     return result
 
 
@@ -152,7 +187,9 @@ def _boundary(
     resident: tuple[Image.Image, ...], moon: Image.Image, roof: Image.Image
 ) -> Image.Image:
     return _scene(
-        resident[0], moon, roof, moon_opacity=0.46, roof_opacity=1.0
+        resident[0], moon, roof,
+        moon_opacity=RESIDENT_MOON_OPACITY,
+        roof_opacity=1.0,
     )
 
 
@@ -166,9 +203,29 @@ def _resident_scene_clip(
     characters: tuple[Image.Image, ...], moon: Image.Image, roof: Image.Image
 ) -> tuple[Image.Image, ...]:
     return tuple(
-        _scene(character, moon, roof, moon_opacity=0.46, roof_opacity=1.0)
+        _scene(
+            character,
+            moon,
+            roof,
+            moon_opacity=RESIDENT_MOON_OPACITY,
+            roof_opacity=1.0,
+        )
         for character in characters
     )
+
+
+def _validate_character_anchor(
+    named_sequences: dict[str, tuple[Image.Image, ...]],
+) -> None:
+    """Reject source-placement drift before it reaches the pet atlas."""
+
+    for name, frames in named_sequences.items():
+        anchors = tuple(_head_anchor_x(frame) for frame in frames)
+        drift = max(anchors) - min(anchors)
+        if drift > 1.5:
+            raise ValueError(
+                f"{name} head anchor drifts by {drift:.1f}px after placement"
+            )
 
 
 def _validate_desktop_transparency(
@@ -232,6 +289,15 @@ def build_clips(
     chestnut_return = _placed_sequence(
         chestnut_return_panels, target_height=184
     )
+    _validate_character_anchor(
+        {
+            "transition": transition,
+            "resident": resident,
+            "glance": glance,
+            "chestnut": chestnut,
+            "chestnut-return": chestnut_return,
+        }
+    )
     boundary = _boundary(resident, moon, roof)
 
     enter: list[Image.Image] = [idle[0], idle[1]]
@@ -262,7 +328,7 @@ def build_clips(
                 character,
                 moon,
                 roof,
-                moon_opacity=0.46 * eased,
+                moon_opacity=RESIDENT_MOON_OPACITY * eased,
                 roof_opacity=roof_progress,
             )
         )
@@ -460,14 +526,14 @@ def main() -> None:
         raise AssertionError("builder changed atlas rows 0 through 22")
 
     atlas.save(ATLAS_PATH, "WEBP", lossless=True, quality=100, method=6, exact=True)
-    frame_dir = WORK_DIR / "frames-transparent-v4"
+    frame_dir = WORK_DIR / "frames-transparent-v5"
     frame_dir.mkdir(parents=True, exist_ok=True)
     for key in CLIP_ORDER:
         for index, frame in enumerate(clips[key], 1):
             frame.save(frame_dir / f"{key}-{index:02d}.png")
-    _write_audit(clips, WORK_DIR / "audit-87-transparent-v4.png")
+    _write_audit(clips, WORK_DIR / "audit-87-transparent-v5.png")
     print(f"wrote {sum(map(len, clips.values()))} state frames to {ATLAS_PATH}")
-    print(f"audit: {WORK_DIR / 'audit-87-transparent-v4.png'}")
+    print(f"audit: {WORK_DIR / 'audit-87-transparent-v5.png'}")
 
 
 if __name__ == "__main__":

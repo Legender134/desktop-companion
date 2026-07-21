@@ -16,16 +16,16 @@ def test_installer_always_creates_desktop_shortcut():
     ) in installer
 
 
-def test_product_and_installer_versions_are_2_4_2():
+def test_product_and_installer_versions_are_2_4_3():
     root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     installer = (root / "packaging" / "installer.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "2.4.2"
-    assert PRODUCT_VERSION == "2.4.2"
-    assert project["project"]["version"] == "2.4.2"
-    assert "AppVersion=2.4.2" in installer
-    assert "VersionInfoVersion=2.4.2.0" in installer
+    assert __version__ == "2.4.3"
+    assert PRODUCT_VERSION == "2.4.3"
+    assert project["project"]["version"] == "2.4.3"
+    assert "AppVersion=2.4.3" in installer
+    assert "VersionInfoVersion=2.4.3.0" in installer
 
 
 def test_pyinstaller_collects_the_legacy_moonlit_atlas_with_pet_resources():

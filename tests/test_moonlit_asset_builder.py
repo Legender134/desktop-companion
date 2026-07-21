@@ -12,6 +12,9 @@ from tools.build_nangongwan_moonlit_chestnut import (
 )
 from tools.build_nangongwan_moonlit_rooftop_state import (
     CLIP_ORDER,
+    _head_anchor_x,
+    _placed_sequence,
+    _prepared_local_moon,
     build_clips as build_state_clips,
     extend_atlas as extend_state_atlas,
 )
@@ -182,3 +185,37 @@ def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
             alpha = frame.getchannel("A")
             assert all(alpha.getpixel(point) == 0 for point in corners)
             assert sum(alpha.histogram()[8:]) <= 24000
+
+
+def test_seated_panels_lock_the_head_to_one_horizontal_anchor():
+    panels = []
+    for offset in (-54, -22, 18, 49):
+        panel = Image.new("RGBA", (320, 360), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(panel)
+        centre = 160 + offset
+        draw.ellipse((centre - 42, 22, centre + 42, 112), fill=(220, 228, 244, 255))
+        draw.polygon(
+            ((centre - 36, 102), (centre + 36, 102), (centre + 78, 328), (centre - 64, 328)),
+            fill=(35, 70, 130, 255),
+        )
+        panels.append(panel)
+
+    placed = _placed_sequence(tuple(panels), target_height=184)
+    anchors = tuple(_head_anchor_x(frame) for frame in placed)
+
+    assert max(anchors) - min(anchors) <= 1.5
+    assert all(abs(anchor - 96) <= 1 for anchor in anchors)
+
+
+def test_prepared_moon_is_large_bright_and_keeps_canvas_corners_clear():
+    moon, _ = _moon_and_roof()
+    prepared = _prepared_local_moon(moon)
+    alpha = prepared.getchannel("A")
+
+    assert alpha.getbbox()[2] - alpha.getbbox()[0] >= 120
+    assert alpha.getbbox()[3] - alpha.getbbox()[1] >= 120
+    assert sum(alpha.histogram()[17:]) >= 8500
+    assert all(
+        alpha.getpixel(point) == 0
+        for point in ((0, 0), (191, 0), (0, 207), (191, 207))
+    )
