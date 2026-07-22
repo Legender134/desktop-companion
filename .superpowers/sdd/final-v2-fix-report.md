@@ -120,7 +120,7 @@ Evidence:
 - Added direct `ShotSpec(kind="action")` rendering coverage.
 - Retained CLI custom-output safety and post-commit backup-cleanup semantics were added after final self-review.
 
-The remaining ASS-runtime minor was intentionally not converted into a platform pixel-golden test. V2 contains no subtitle streams, and the making-of pipeline already validates exact ASS headers, style declarations, events, scope, method, and timestamps. Pixel output from libass depends on host font discovery/substitution and would be a Windows-specific flaky oracle with no V2 publication benefit.
+The inexpensive ASS runtime style-membership minor is now complete: `write_ass` rejects any event whose style is absent from the styles declared by the actual `ASS_HEADER`. A platform pixel-golden test remains intentionally out of scope. V2 contains no subtitle streams, and pixel output from libass depends on host font discovery/substitution, making it a Windows-specific flaky oracle with no V2 publication benefit.
 
 ## Fixed source SHA-256 inventory
 
@@ -226,3 +226,87 @@ The following three pre-existing user changes were never staged or modified by t
 No V1 artifact or live atlas/manifest was rebuilt. The only live-resource edits are the requested user-facing 25–60 second/nine-action text corrections.
 
 A theoretical local-filesystem TOCTOU remains in the shared making-of `read_action` helper: V2 verifies a source immediately before that helper reopens its path. Exploiting it would require an external writer racing an in-progress local build and restoring bytes around checks; normal builds, post-build validation, timeline inventory, and atomic publication remain hash-gated. Removing that theoretical race would require changing the shared loader to decode byte snapshots and was not part of the reviewed V2 findings.
+
+## Follow-up re-review: complete retained-CLI collision preflight
+
+Implementation commit: `b258194` (`fix: preflight retained CLI outputs`)
+
+### Remaining Important finding
+
+The retained CLIs previously guarded their primary destination or protected roots, but did not compare all secondary outputs with custom input paths. Consequently, preview could overwrite a custom atlas/manifest named `transition-metrics.json`, while builder could overwrite custom inputs through `audit-48.png` or `frames/frame-*.png`.
+
+Resolution:
+
+- Added the shared, write-free `validate_planned_outputs` preflight. It resolves every input, planned output, and protected root before any source read, directory creation, or file write.
+- It rejects any exact resolved input/output intersection, every output under the archive/live-resource trees, and duplicate planned output destinations.
+- Preview enumerates its output directory and all six files: three GIFs, the MP4, `transition-metrics.json`, and `hardest-seams.png`.
+- Builder enumerates its output directory, `frames/` directory, primary atlas, `audit-48.png`, and all 48 `frames/frame-01.png` through `frame-48.png` files.
+- Builder compares those outputs with all eight inputs: six fixed phase/moon/roof assets plus the custom archive atlas and manifest. Preview compares with both custom inputs.
+- Both package imports and direct `python tools/...py` invocation are supported.
+
+TDD evidence:
+
+```text
+python -m pytest -q tests/test_nangongwan_action_showcase_v2.py tests/test_nangongwan_rooftop_making_of.py -k "input_collision or absent_from_the_declared_header"
+7 failed, 135 deselected in 0.48s
+```
+
+All six CLI cases failed for the expected missing-preflight reason: both `--atlas`/`--manifest` positions against preview `transition-metrics.json`, and both builder input positions against `audit-48.png` and `frames/frame-01.png`. The ASS event with style `Missing` was written instead of rejected.
+
+After the minimal implementation:
+
+```text
+7 passed, 135 deselected in 0.37s
+```
+
+A real direct-script check then exposed the new shared module import issue. The added regression was RED as:
+
+```text
+python -m pytest -q tests/test_nangongwan_action_showcase_v2.py -k "run_directly_from_the_repository_root"
+2 failed, 1 passed, 66 deselected in 0.54s
+```
+
+Both failures were `ModuleNotFoundError: No module named 'tools'`. Conditional sibling/package imports fixed the direct-entry path. The combined new regression set then passed:
+
+```text
+9 passed, 135 deselected in 0.67s
+```
+
+Each collision test verifies the original input bytes remain identical and that no primary or secondary output file was created.
+
+### ASS declared-style membership Minor
+
+`write_ass` now derives the declared style names from the actual `Style: ...` rows in `ASS_HEADER` and validates every event before creating the output parent directory. An unknown style raises `ValueError("subtitle style is not declared in ASS header: Missing")`; the regression also proves no directory/file is created. No font lookup, libass render, or pixel-golden behavior was introduced.
+
+### Complete requested covering tests
+
+```text
+python -m pytest -q tests/test_nangongwan_action_showcase_v2.py tests/test_nangongwan_rooftop_making_of.py
+144 passed in 175.81s (0:02:55)
+```
+
+Static verification:
+
+- `python -m py_compile` for the shared helper, both CLIs, making-of module, and both test files: exit 0.
+- `git diff --check`: exit 0, with only existing LF→CRLF notices.
+- Cached intended-file diff check before `b258194`: exit 0.
+
+### Follow-up files and self-review
+
+- `tools/nangongwan_output_preflight.py`
+- `tools/build_nangongwan_moonlit_chestnut.py`
+- `tools/preview_nangongwan_moonlit_chestnut.py`
+- `tools/nangongwan_rooftop_making_of.py`
+- `tests/test_nangongwan_action_showcase_v2.py`
+- `tests/test_nangongwan_rooftop_making_of.py`
+- this report
+
+The preflight is the first post-argument-parsing operation in both `main()` functions. It has no write operations. Review confirmed that its enumerated sets match every path subsequently created or written by each CLI. This change does not alter the V2 master/timeline or require artifact regeneration.
+
+The three unrelated dirty files remained unstaged and their Git-diff SHA-256 fingerprints are still exactly:
+
+- `tests/test_moonlit_asset_builder.py`: `d09323a91b88ec1cf256b27dde0991e89d96f6f1c53314eddfee1e338e404eb3`
+- `tools/build_nangongwan_giant_moon_webp.py`: `86555ee4546ff8ec8f55807a7c4cc4a1d5d5ad16191d6210bb151cff6ceed176`
+- `tools/build_nangongwan_moonlit_rooftop_state.py`: `34ddf3db9e42f0a7d12bf070513df5b6e0b43e9976d35c6f824b61eb1ef6bd6b`
+
+No remaining concern from this re-review is open. The theoretical source-loader TOCTOU noted above is unchanged and unrelated to retained-CLI output collision safety.
