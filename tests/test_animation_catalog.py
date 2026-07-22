@@ -185,12 +185,15 @@ def test_nangongwan_exposes_persistent_rooftop_state_and_standing_cake_action():
     assert state.label == "月下屋檐"
     assert state.exit_action == "rooftopExit"
     assert [(choice.action_id, choice.weight) for choice in state.resident_actions] == [
-        ("rooftopIdle", 25),
-        ("rooftopMoonGaze", 18),
+        ("rooftopIdle", 18),
+        ("rooftopMoonGaze", 12),
         ("rooftopChestnut", 20),
         ("rooftopRest", 10),
-        ("rooftopBreeze", 17),
-        ("rooftopGlance", 10),
+        ("rooftopBreeze", 10),
+        ("rooftopGlance", 8),
+        ("rooftopHair", 8),
+        ("rooftopBracelet", 7),
+        ("rooftopCranes", 7),
     ]
 
 
@@ -214,12 +217,15 @@ def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
         "rooftopRest",
         "rooftopBreeze",
         "rooftopGlance",
+        "rooftopHair",
+        "rooftopBracelet",
+        "rooftopCranes",
     ):
         resident = catalog.frames(resident_action)
         assert resident[0].image.constBits().tobytes() == boundary
         assert resident[-1].image.constBits().tobytes() == boundary
     chestnut_frames = catalog.frames("rooftopChestnut")
-    assert len(chestnut_frames) == 28
+    assert len(chestnut_frames) == 44
     assert len(
         {
             frame.image.copy(0, 133, 192, 75).constBits().tobytes()

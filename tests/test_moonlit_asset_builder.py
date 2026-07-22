@@ -62,6 +62,10 @@ def _synthetic_seat_anchors(
     glance: tuple[Image.Image, ...],
     chestnut: tuple[Image.Image, ...],
     chestnut_return: tuple[Image.Image, ...],
+    chestnut_linger: tuple[Image.Image, ...],
+    drowsy: tuple[Image.Image, ...],
+    hair: tuple[Image.Image, ...],
+    bracelet: tuple[Image.Image, ...],
 ) -> dict[str, tuple[tuple[float, float], ...]]:
     def anchors(panels: tuple[Image.Image, ...]) -> tuple[tuple[float, float], ...]:
         return tuple((panel.width / 2, panel.height - 88) for panel in panels)
@@ -71,6 +75,10 @@ def _synthetic_seat_anchors(
         "glance": anchors(glance),
         "chestnut": anchors(chestnut),
         "chestnut-return": anchors(chestnut_return),
+        "chestnut-linger": anchors(chestnut_linger),
+        "drowsy": anchors(drowsy),
+        "hair": anchors(hair),
+        "bracelet": anchors(bracelet),
     }
 
 
@@ -137,6 +145,10 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
     glance = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
     chestnut = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
     chestnut_return = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    chestnut_linger = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    drowsy = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    hair = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    bracelet = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
     clips = build_state_clips(
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
@@ -144,10 +156,21 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
         glance,
         chestnut,
         chestnut_return,
+        chestnut_linger,
+        drowsy,
+        hair,
+        bracelet,
         moon,
         roof,
         seated_source_anchors=_synthetic_seat_anchors(
-            resident, glance, chestnut, chestnut_return
+            resident,
+            glance,
+            chestnut,
+            chestnut_return,
+            chestnut_linger,
+            drowsy,
+            hair,
+            bracelet,
         ),
     )
 
@@ -156,10 +179,13 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
         "moonlitChestnut": 18,
         "rooftopIdle": 9,
         "rooftopMoonGaze": 7,
-        "rooftopChestnut": 28,
-        "rooftopRest": 5,
+        "rooftopChestnut": 44,
+        "rooftopRest": 13,
         "rooftopBreeze": 7,
         "rooftopGlance": 9,
+        "rooftopHair": 13,
+        "rooftopBracelet": 13,
+        "rooftopCranes": 15,
         "rooftopExit": 18,
     }
     boundary = clips["moonlitChestnut"][-1].tobytes()
@@ -175,6 +201,10 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
     glance = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
     chestnut = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
     chestnut_return = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    chestnut_linger = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    drowsy = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    hair = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    bracelet = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
     clips = build_state_clips(
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
@@ -182,10 +212,21 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
         glance,
         chestnut,
         chestnut_return,
+        chestnut_linger,
+        drowsy,
+        hair,
+        bracelet,
         moon,
         roof,
         seated_source_anchors=_synthetic_seat_anchors(
-            resident, glance, chestnut, chestnut_return
+            resident,
+            glance,
+            chestnut,
+            chestnut_return,
+            chestnut_linger,
+            drowsy,
+            hair,
+            bracelet,
         ),
     )
     source = Image.new("RGBA", (ATLAS_WIDTH, 5408), (11, 17, 29, 255))
@@ -193,7 +234,7 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
 
     atlas = extend_state_atlas(source, clips)
 
-    assert atlas.size == (ATLAS_WIDTH, 6240)
+    assert atlas.size == (ATLAS_WIDTH, 7072)
     assert sha256(atlas.crop((0, 0, ATLAS_WIDTH, 4784)).tobytes()).digest() == sha256(
         prefix.tobytes()
     ).digest()
@@ -205,6 +246,10 @@ def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
     glance = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
     chestnut = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
     chestnut_return = extract_grid(_panel_sheet(4, 1, size=(800, 400)), 4, 1)
+    chestnut_linger = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    drowsy = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    hair = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
+    bracelet = extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2)
     clips = build_state_clips(
         _idle_frames(),
         extract_grid(_panel_sheet(4, 2, size=(800, 800)), 4, 2),
@@ -212,10 +257,21 @@ def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
         glance,
         chestnut,
         chestnut_return,
+        chestnut_linger,
+        drowsy,
+        hair,
+        bracelet,
         moon,
         roof,
         seated_source_anchors=_synthetic_seat_anchors(
-            resident, glance, chestnut, chestnut_return
+            resident,
+            glance,
+            chestnut,
+            chestnut_return,
+            chestnut_linger,
+            drowsy,
+            hair,
+            bracelet,
         ),
     )
 

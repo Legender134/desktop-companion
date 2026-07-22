@@ -48,6 +48,10 @@ RESIDENT_PATH = ASSET_DIR / "phase-resident-v3.png"
 GLANCE_PATH = ASSET_DIR / "phase-glance-v3.png"
 CHESTNUT_PATH = ASSET_DIR / "phase-rooftop-chestnut-v3.png"
 CHESTNUT_RETURN_PATH = ASSET_DIR / "phase-rooftop-chestnut-return-v3.png"
+CHESTNUT_LINGER_PATH = ASSET_DIR / "phase-rooftop-chestnut-linger-v1.png"
+DROWSY_PATH = ASSET_DIR / "phase-rooftop-drowsy-v1.png"
+HAIR_PATH = ASSET_DIR / "phase-rooftop-hair-v1.png"
+BRACELET_PATH = ASSET_DIR / "phase-rooftop-bracelet-v1.png"
 MOON_PATH = ASSET_DIR / "moon-partial.png"
 ROOF_PATH = ASSET_DIR / "roof-eave.png"
 
@@ -60,6 +64,9 @@ CLIP_ORDER = (
     "rooftopRest",
     "rooftopBreeze",
     "rooftopGlance",
+    "rooftopHair",
+    "rooftopBracelet",
+    "rooftopCranes",
     "rooftopExit",
 )
 
@@ -105,6 +112,46 @@ CHESTNUT_RETURN_SEAT_ANCHORS = (
     (238, 451),
     (216, 451),
     (182, 452),
+)
+CHESTNUT_LINGER_SEAT_ANCHORS = (
+    (203, 280),
+    (206, 280),
+    (194, 280),
+    (171, 280),
+    (198, 235),
+    (202, 235),
+    (194, 235),
+    (174, 235),
+)
+DROWSY_SEAT_ANCHORS = (
+    (237, 263),
+    (215, 265),
+    (192, 266),
+    (172, 271),
+    (237, 218),
+    (204, 217),
+    (181, 216),
+    (160, 216),
+)
+HAIR_SEAT_ANCHORS = (
+    (210, 266),
+    (204, 266),
+    (179, 267),
+    (169, 267),
+    (211, 223),
+    (188, 223),
+    (172, 223),
+    (163, 223),
+)
+BRACELET_SEAT_ANCHORS = (
+    (202, 279),
+    (196, 280),
+    (184, 280),
+    (172, 280),
+    (209, 235),
+    (193, 235),
+    (168, 233),
+    (161, 233),
 )
 
 
@@ -319,6 +366,59 @@ def _resident_scene_clip(
     )
 
 
+def _clean_generated_panel(
+    panel: Image.Image,
+    *,
+    clear_regions: tuple[tuple[int, int, int, int], ...] = (),
+) -> Image.Image:
+    """Remove low-alpha keying dust and explicitly audited generator specks."""
+
+    result = panel.convert("RGBA").copy()
+    alpha = result.getchannel("A").point(lambda value: 0 if value < 16 else value)
+    result.putalpha(alpha)
+    if clear_regions:
+        draw = ImageDraw.Draw(result)
+        for region in clear_regions:
+            draw.rectangle(region, fill=(0, 0, 0, 0))
+    return result
+
+
+def _crane_scene_frame(
+    character: Image.Image,
+    moon: Image.Image,
+    roof: Image.Image,
+    progress: float,
+    *,
+    wing_phase: int,
+) -> Image.Image:
+    """Pass the same pair of small white cranes referenced by the anime scene."""
+
+    t = max(0.0, min(1.0, progress))
+    cranes = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(cranes)
+    for offset, y_offset, scale in ((0, 0, 1.0), (-23, 11, 0.82)):
+        x = round(18 + 145 * t + offset)
+        y = round(62 - 7 * (1.0 - (2.0 * t - 1.0) ** 2) + y_offset)
+        half = max(3, round(5 * scale))
+        rise = max(2, round((3 if wing_phase % 2 == 0 else -2) * scale))
+        color = (236, 243, 255, 225)
+        shade = (159, 183, 222, 180)
+        draw.line((x - half, y + rise, x, y, x + half, y + rise), fill=shade, width=2)
+        draw.line((x - half, y + rise - 1, x, y - 1, x + half, y + rise - 1), fill=color, width=1)
+        draw.ellipse((x - 2, y - 1, x + 2, y + 2), fill=color)
+        draw.line((x + 2, y, x + 5, y - 1), fill=color, width=1)
+
+    actors = cranes.filter(ImageFilter.GaussianBlur(0.25))
+    actors.alpha_composite(character.convert("RGBA"))
+    return _scene(
+        actors,
+        moon,
+        roof,
+        moon_opacity=RESIDENT_MOON_OPACITY,
+        roof_opacity=1.0,
+    )
+
+
 def _violet_spell_hand(character: Image.Image) -> Image.Image:
     """Shift the summoning spark toward the violet aura seen in the scene."""
 
@@ -471,6 +571,10 @@ def build_clips(
     glance_panels: tuple[Image.Image, ...],
     chestnut_panels: tuple[Image.Image, ...],
     chestnut_return_panels: tuple[Image.Image, ...],
+    chestnut_linger_panels: tuple[Image.Image, ...],
+    drowsy_panels: tuple[Image.Image, ...],
+    hair_panels: tuple[Image.Image, ...],
+    bracelet_panels: tuple[Image.Image, ...],
     moon_source: Image.Image,
     roof_source: Image.Image,
     *,
@@ -486,8 +590,12 @@ def build_clips(
         or len(glance_panels) != 4
         or len(chestnut_panels) != 8
         or len(chestnut_return_panels) != 4
+        or len(chestnut_linger_panels) != 8
+        or len(drowsy_panels) != 8
+        or len(hair_panels) != 8
+        or len(bracelet_panels) != 8
     ):
-        raise ValueError("source sheets must contain 8/8/4/8/4 panels")
+        raise ValueError("source sheets must contain 8/8/4/8/4/8/8/8/8 panels")
 
     idle = tuple(frame.convert("RGBA") for frame in idle_frames[:3])
     anchors = (
@@ -498,9 +606,22 @@ def build_clips(
             "glance": GLANCE_SEAT_ANCHORS,
             "chestnut": CHESTNUT_SEAT_ANCHORS,
             "chestnut-return": CHESTNUT_RETURN_SEAT_ANCHORS,
+            "chestnut-linger": CHESTNUT_LINGER_SEAT_ANCHORS,
+            "drowsy": DROWSY_SEAT_ANCHORS,
+            "hair": HAIR_SEAT_ANCHORS,
+            "bracelet": BRACELET_SEAT_ANCHORS,
         }
     )
-    if set(anchors) != {"resident", "glance", "chestnut", "chestnut-return"}:
+    if set(anchors) != {
+        "resident",
+        "glance",
+        "chestnut",
+        "chestnut-return",
+        "chestnut-linger",
+        "drowsy",
+        "hair",
+        "bracelet",
+    }:
         raise ValueError("seated source anchors must cover all resident sheets")
     moon = _prepared_local_moon(moon_source)
     roof = _prepared_local_roof(roof_source)
@@ -525,17 +646,47 @@ def build_clips(
         target_height=184,
         source_anchors=anchors["chestnut-return"],
     )
+    chestnut_linger = _placed_sequence(
+        chestnut_linger_panels,
+        target_height=184,
+        source_anchors=anchors["chestnut-linger"],
+    )
+    drowsy = _placed_sequence(
+        drowsy_panels,
+        target_height=184,
+        source_anchors=anchors["drowsy"],
+    )
+    hair = _placed_sequence(
+        hair_panels,
+        target_height=184,
+        source_anchors=anchors["hair"],
+    )
+    bracelet = _placed_sequence(
+        bracelet_panels,
+        target_height=184,
+        source_anchors=anchors["bracelet"],
+    )
     resident = tuple(_normalize_seated_geometry(frame) for frame in resident)
     glance = tuple(_normalize_seated_geometry(frame) for frame in glance)
     chestnut = tuple(_normalize_seated_geometry(frame) for frame in chestnut)
     chestnut_return = tuple(
         _normalize_seated_geometry(frame) for frame in chestnut_return
     )
+    chestnut_linger = tuple(
+        _normalize_seated_geometry(frame) for frame in chestnut_linger
+    )
+    drowsy = tuple(_normalize_seated_geometry(frame) for frame in drowsy)
+    hair = tuple(_normalize_seated_geometry(frame) for frame in hair)
+    bracelet = tuple(_normalize_seated_geometry(frame) for frame in bracelet)
     for sequence_name, sequence in (
         ("resident", resident),
         ("glance", glance),
         ("chestnut", chestnut),
         ("chestnut-return", chestnut_return),
+        ("chestnut-linger", chestnut_linger),
+        ("drowsy", drowsy),
+        ("hair", hair),
+        ("bracelet", bracelet),
     ):
         for index, character in enumerate(sequence, start=1):
             painted = character.getbbox()
@@ -551,7 +702,14 @@ def build_clips(
             (0, SEATED_TARGET_ANCHOR[1], CELL_SIZE[0], CELL_SIZE[1])
         ).tobytes()
         == base_lower
-        for frame in (*chestnut[1:7], *chestnut_return[:-1])
+        for frame in (
+            *chestnut[1:7],
+            *chestnut_return[:-1],
+            *chestnut_linger,
+            *drowsy[1:-1],
+            *hair[1:-1],
+            *bracelet[1:-1],
+        )
     ):
         raise AssertionError("seated actions must retain their own lower-body artwork")
     boundary = _boundary(resident, moon, roof)
@@ -610,14 +768,6 @@ def build_clips(
         resident[3],
         resident[0],
     )
-    rest_peak = resident[4]
-    rest_path = (
-        resident[0],
-        rest_peak,
-        rest_peak,
-        rest_peak,
-        resident[0],
-    )
     breeze_path = (
         resident[0],
         resident[1],
@@ -635,11 +785,28 @@ def build_clips(
     )
     open_hand = _violet_spell_hand(chestnut[1])
     flight = tuple(
-        _chestnut_flight_frame(open_hand, index / 9) for index in range(10)
+        _chestnut_flight_frame(open_hand, index / 11) for index in range(12)
     )
     hover = tuple(
         _chestnut_flight_frame(open_hand, 1.0, pulse=pulse)
-        for pulse in (1.10, 0.92, 0.78)
+        for pulse in (1.12, 0.98, 0.86, 0.76)
+    )
+    linger_path = (
+        chestnut_linger[0],
+        chestnut_linger[0],
+        chestnut_linger[1],
+        chestnut_linger[2],
+        chestnut_linger[2],
+        chestnut_linger[3],
+        chestnut_linger[3],
+        chestnut_linger[4],
+        chestnut_linger[4],
+        chestnut_linger[5],
+        chestnut_linger[5],
+        chestnut_linger[5],
+        chestnut_linger[6],
+        chestnut_linger[6],
+        chestnut_linger[7],
     )
     chestnut_path = (
         resident[0],
@@ -649,23 +816,111 @@ def build_clips(
         *hover,
         chestnut[2],
         chestnut[3],
-        chestnut[3],
         chestnut[4],
         chestnut[5],
         chestnut[6],
-        chestnut[6],
+        *linger_path,
         *chestnut_return,
         resident[0],
     )
+    rest_path = (
+        resident[0],
+        drowsy[1],
+        drowsy[2],
+        drowsy[3],
+        drowsy[3],
+        drowsy[4],
+        drowsy[4],
+        drowsy[4],
+        drowsy[5],
+        drowsy[5],
+        drowsy[6],
+        drowsy[7],
+        resident[0],
+    )
+    hair_path = (
+        resident[0],
+        hair[1],
+        hair[2],
+        hair[3],
+        hair[3],
+        hair[4],
+        hair[4],
+        hair[5],
+        hair[5],
+        hair[6],
+        hair[6],
+        hair[7],
+        resident[0],
+    )
+    bracelet_path = (
+        resident[0],
+        bracelet[1],
+        bracelet[2],
+        bracelet[3],
+        bracelet[3],
+        bracelet[4],
+        bracelet[4],
+        bracelet[5],
+        bracelet[5],
+        bracelet[6],
+        bracelet[6],
+        bracelet[7],
+        resident[0],
+    )
+    crane_characters = (
+        resident[0],
+        resident[3],
+        resident[3],
+        resident[6],
+        resident[6],
+        resident[6],
+        resident[3],
+        resident[3],
+        resident[3],
+        resident[6],
+        resident[3],
+        resident[3],
+        resident[0],
+    )
+    crane_path = (
+        boundary,
+        *tuple(
+            _crane_scene_frame(
+                character,
+                moon,
+                roof,
+                index / (len(crane_characters) - 1),
+                wing_phase=index,
+            )
+            for index, character in enumerate(crane_characters)
+        ),
+        boundary,
+    )
+    chestnut_scene = tuple(
+        _scene(
+            character,
+            moon,
+            roof,
+            moon_opacity=RESIDENT_MOON_OPACITY
+            + 0.012 * ((index % 5) - 2),
+            roof_opacity=1.0,
+        )
+        for index, character in enumerate(chestnut_path)
+    )
+    chestnut_scene = (boundary, *chestnut_scene[1:-1], boundary)
 
     clips: dict[str, tuple[Image.Image, ...]] = {
         "moonlitChestnut": tuple(enter),
         "rooftopIdle": _resident_scene_clip(idle_path, moon, roof),
         "rooftopMoonGaze": _resident_scene_clip(moon_gaze_path, moon, roof),
-        "rooftopChestnut": _resident_scene_clip(chestnut_path, moon, roof),
+        "rooftopChestnut": chestnut_scene,
         "rooftopRest": _resident_scene_clip(rest_path, moon, roof),
         "rooftopBreeze": _resident_scene_clip(breeze_path, moon, roof),
         "rooftopGlance": _resident_scene_clip(glance_path, moon, roof),
+        "rooftopHair": _resident_scene_clip(hair_path, moon, roof),
+        "rooftopBracelet": _resident_scene_clip(bracelet_path, moon, roof),
+        "rooftopCranes": crane_path,
         "rooftopExit": tuple(reversed(enter)),
     }
 
@@ -673,10 +928,13 @@ def build_clips(
         "moonlitChestnut": 18,
         "rooftopIdle": 9,
         "rooftopMoonGaze": 7,
-        "rooftopChestnut": 28,
-        "rooftopRest": 5,
+        "rooftopChestnut": 44,
+        "rooftopRest": 13,
         "rooftopBreeze": 7,
         "rooftopGlance": 9,
+        "rooftopHair": 13,
+        "rooftopBracelet": 13,
+        "rooftopCranes": 15,
         "rooftopExit": 18,
     }
     if {key: len(value) for key, value in clips.items()} != expected:
@@ -688,6 +946,9 @@ def build_clips(
         "rooftopRest",
         "rooftopBreeze",
         "rooftopGlance",
+        "rooftopHair",
+        "rooftopBracelet",
+        "rooftopCranes",
     ):
         if clips[key][0].tobytes() != boundary.tobytes() or clips[key][-1].tobytes() != boundary.tobytes():
             raise AssertionError(f"{key} does not use the exact resident boundary")
@@ -755,6 +1016,10 @@ def main() -> None:
         GLANCE_PATH,
         CHESTNUT_PATH,
         CHESTNUT_RETURN_PATH,
+        CHESTNUT_LINGER_PATH,
+        DROWSY_PATH,
+        HAIR_PATH,
+        BRACELET_PATH,
         MOON_PATH,
         ROOF_PATH,
         ATLAS_PATH,
@@ -779,9 +1044,41 @@ def main() -> None:
             Image.open(GLANCE_PATH) as glance_sheet,
             Image.open(CHESTNUT_PATH) as chestnut_sheet,
             Image.open(CHESTNUT_RETURN_PATH) as chestnut_return_sheet,
+            Image.open(CHESTNUT_LINGER_PATH) as chestnut_linger_sheet,
+            Image.open(DROWSY_PATH) as drowsy_sheet,
+            Image.open(HAIR_PATH) as hair_sheet,
+            Image.open(BRACELET_PATH) as bracelet_sheet,
             Image.open(MOON_PATH) as moon_source,
             Image.open(ROOF_PATH) as roof_source,
         ):
+            chestnut_linger_panels = tuple(
+                _clean_generated_panel(panel)
+                for panel in extract_grid(chestnut_linger_sheet, 4, 2, inset=4)
+            )
+            drowsy_panels = tuple(
+                _clean_generated_panel(
+                    panel,
+                    clear_regions=((118, 132, 178, 170),) if index == 4 else (),
+                )
+                for index, panel in enumerate(
+                    extract_grid(drowsy_sheet, 4, 2, inset=4)
+                )
+            )
+            hair_panels = tuple(
+                _clean_generated_panel(panel)
+                for panel in extract_grid(hair_sheet, 4, 2, inset=4)
+            )
+            bracelet_panels = tuple(
+                _clean_generated_panel(
+                    panel,
+                    clear_regions=((0, 496, panel.width, panel.height),)
+                    if index in {2, 3}
+                    else (),
+                )
+                for index, panel in enumerate(
+                    extract_grid(bracelet_sheet, 4, 2, inset=4)
+                )
+            )
             clips = build_clips(
                 idle_frames,
                 extract_grid(transition_sheet, 4, 2, inset=4),
@@ -789,6 +1086,10 @@ def main() -> None:
                 extract_grid(glance_sheet, 4, 1, inset=4),
                 extract_grid(chestnut_sheet, 4, 2, inset=4),
                 extract_grid(chestnut_return_sheet, 4, 1, inset=4),
+                chestnut_linger_panels,
+                drowsy_panels,
+                hair_panels,
+                bracelet_panels,
                 moon_source,
                 roof_source,
             )
@@ -800,14 +1101,14 @@ def main() -> None:
         raise AssertionError("builder changed atlas rows 0 through 22")
 
     atlas.save(ATLAS_PATH, "WEBP", lossless=True, quality=100, method=6, exact=True)
-    frame_dir = WORK_DIR / "frames-transparent-v8"
+    frame_dir = WORK_DIR / "frames-transparent-v9"
     frame_dir.mkdir(parents=True, exist_ok=True)
     for key in CLIP_ORDER:
         for index, frame in enumerate(clips[key], 1):
             frame.save(frame_dir / f"{key}-{index:02d}.png")
-    _write_audit(clips, WORK_DIR / "audit-101-transparent-v8.png")
+    _write_audit(clips, WORK_DIR / "audit-166-transparent-v9.png")
     print(f"wrote {sum(map(len, clips.values()))} state frames to {ATLAS_PATH}")
-    print(f"audit: {WORK_DIR / 'audit-101-transparent-v8.png'}")
+    print(f"audit: {WORK_DIR / 'audit-166-transparent-v9.png'}")
 
 
 if __name__ == "__main__":

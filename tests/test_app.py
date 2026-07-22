@@ -762,7 +762,7 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.dispatch_menu(MenuCommand("center"))
     controller.dispatch_menu(MenuCommand("about"))
     assert about == [
-        ("关于桌面灵伴", "桌面灵伴 2.4.5\n可用宠物：3（南宫婉、十一、紫灵）")
+        ("关于桌面灵伴", "桌面灵伴 2.4.6\n可用宠物：3（南宫婉、十一、紫灵）")
     ]
 
     hooks[0].digit_pressed.emit(4)
@@ -1241,11 +1241,11 @@ def test_moonlit_rooftop_manual_start_ignores_cooldown_and_can_exit(qapp):
 
     now[0] += 2460
     controller._advance_manual(now[0])
-    assert controller.current_action == "rooftopGlance"
+    assert controller.current_action == "rooftopCranes"
 
     controller.dispatch_menu(MenuCommand("action", "moonlitChestnut"))
     assert controller._state_exit_requested
-    now[0] += 2100
+    now[0] += 2400
     controller._advance_manual(now[0])
     assert controller.current_action == "rooftopExit"
     now[0] += 2460

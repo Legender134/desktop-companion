@@ -36,6 +36,9 @@ SEQUENCE = (
     "rooftopRest",
     "rooftopBreeze",
     "rooftopGlance",
+    "rooftopHair",
+    "rooftopBracelet",
+    "rooftopCranes",
     "rooftopExit",
 )
 
@@ -65,15 +68,22 @@ def main() -> None:
 
     preview = tuple(_desktop_preview(frame) for frame in frames)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    gif_path = WORK_DIR / "moonlit-rooftop-transparent-v8.gif"
-    mp4_path = WORK_DIR / "moonlit-rooftop-transparent-v8.mp4"
-    report_path = WORK_DIR / "preview-sequence-v8.json"
+    gif_path = WORK_DIR / "moonlit-rooftop-transparent-v9.gif"
+    mp4_path = WORK_DIR / "moonlit-rooftop-transparent-v9.mp4"
+    chestnut_mp4_path = WORK_DIR / "rooftop-chestnut-extended-v9.mp4"
+    report_path = WORK_DIR / "preview-sequence-v9.json"
     _write_gif(preview, durations, gif_path)
     _write_mp4(preview, durations, mp4_path)
+    chestnut_start, chestnut_end = boundaries["rooftopChestnut"]
+    _write_mp4(
+        preview[chestnut_start:chestnut_end],
+        durations[chestnut_start:chestnut_end],
+        chestnut_mp4_path,
+    )
     report_path.write_text(
         json.dumps(
             {
-                "note": "Transparent v8 preview: individually redrawn seated poses, root-and-footline geometry normalization without pasted body pixels, anime-derived violet chestnut flight, fixed moon and eave, and every resident action once.",
+                "note": "Transparent v9 preview: an extended eight-second chestnut performance, anime-derived drowsiness and paired cranes, hair and Zhuque-ring gestures, fixed seated root, moon, and eave, with every resident action shown once.",
                 "sequence": list(SEQUENCE),
                 "frameCount": len(frames),
                 "durationMs": sum(durations),
@@ -87,6 +97,7 @@ def main() -> None:
     )
     print(gif_path)
     print(mp4_path)
+    print(chestnut_mp4_path)
     print(report_path)
 
 
