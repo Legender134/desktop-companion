@@ -29,7 +29,11 @@ from tools.nangongwan_rooftop_making_of import (
     write_ass,
     write_action_mp4,
 )
-from tools.render_nangongwan_rooftop_making_of import build_video_plan
+from tools.render_nangongwan_rooftop_making_of import (
+    build_frame_schedule,
+    build_video_plan,
+    quantize_subtitle_events,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +59,7 @@ def test_run_ffmpeg_raises_with_command_and_stderr(monkeypatch):
     with pytest.raises(RuntimeError, match="bad filter") as error:
         run_ffmpeg(["ffmpeg", "-version"])
 
-    assert "ffmpeg" in str(error.value)
+    assert "['ffmpeg', '-version']" in str(error.value)
 
 
 def test_renderer_cli_is_directly_runnable_from_the_checkout():
@@ -406,6 +410,95 @@ def test_every_chapter_shot_sum_matches_approved_duration():
     )
     for chapter in plan.chapters:
         assert sum(shot.duration_ms for shot in chapter.shots) == chapter.duration_ms
+
+
+def test_chapter_frame_schedule_keeps_each_editorial_chapter_on_its_exact_30fps_boundary():
+    schedule = build_frame_schedule(build_video_plan(ROOT))
+
+    assert [chapter.frame_count for chapter in schedule] == [540, 1200, 1200, 1200, 2610, 1650]
+    assert sum(chapter.frame_count for chapter in schedule) == 8400
+    assert all(
+        sum(shot.frame_count for shot in chapter.shots) == chapter.frame_count
+        and all(shot.frame_count > 0 for shot in chapter.shots)
+        for chapter in schedule
+    )
+    v9, moon = schedule[4:6]
+    assert (v9.end_frame, moon.start_frame) == (6750, 6750)
+    assert (v9.end_ms, moon.start_ms) == (225_000, 225_000)
+    moon_actions = [
+        shot for shot in moon.shots if shot.shot.id in {"moon-184", "moon-232", "moon-full"}
+    ]
+    assert [shot.frame_count for shot in moon_actions] == [270, 270, 270]
+    assert next(shot for shot in moon.shots if shot.shot.id == "moon-compare").frame_count == 450
+
+
+def test_rendered_timeline_and_subtitles_use_the_frame_schedule_without_title_action_collisions(tmp_path):
+    plan = build_video_plan(ROOT)
+    schedule = build_frame_schedule(plan)
+    rendered_events = quantize_subtitle_events(plan.subtitle_events)
+    output = tmp_path / "master-v1-timeline.json"
+
+    making_of.write_timeline_json(
+        plan,
+        output,
+        frame_schedule=schedule,
+        subtitle_events=rendered_events,
+    )
+
+    timeline = json.loads(output.read_text(encoding="utf-8"))
+    v9, moon = timeline["chapters"][4:6]
+    assert (v9["endFrame"], moon["startFrame"]) == (6750, 6750)
+    assert (v9["renderedEndMs"], moon["renderedStartMs"]) == (225_000, 225_000)
+    assert all(
+        "startFrame" in shot and "endFrame" in shot
+        for chapter in timeline["chapters"]
+        for shot in chapter["shots"]
+    )
+    titles = [event for event in rendered_events if event.style == "Title"]
+    actions = [event for event in rendered_events if event.style == "Action"]
+    assert all(
+        title.end_frame <= action.start_frame or action.end_frame <= title.start_frame
+        for title in titles
+        for action in actions
+    )
+
+
+@pytest.mark.integration
+def test_built_shots_match_the_exact_frame_schedule_and_v9_moon_boundary():
+    master = renderer.build_master(ROOT)
+    schedule = build_frame_schedule(build_video_plan(ROOT))
+    output = ROOT / "work" / "nangongwan-rooftop-making-of-video"
+    allocated_shots = tuple(shot for chapter in schedule for shot in chapter.shots)
+
+    for allocated in allocated_shots:
+        probe = json.loads(
+            subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=nb_read_frames",
+                    "-of",
+                    "json",
+                    str(output / "intermediates" / "shots" / f"{allocated.index:02d}-{allocated.shot.id}.mp4"),
+                ]
+            )
+        )
+        assert int(probe["streams"][0]["nb_read_frames"]) == allocated.frame_count
+
+    master_probe = json.loads(
+        subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(master)]
+        )
+    )
+    video = next(stream for stream in master_probe["streams"] if stream["codec_type"] == "video")
+    assert int(video["nb_frames"]) == 8400
+    timeline = json.loads((output / "master-v1-timeline.json").read_text(encoding="utf-8"))
+    assert timeline["chapters"][4]["endFrame"] == timeline["chapters"][5]["startFrame"] == 6750
 
 
 def test_v9_caption_explains_sequential_demo_vs_random_runtime():

@@ -56,6 +56,16 @@ class SubtitleEvent:
 
 
 @dataclass(frozen=True)
+class RenderedSubtitleEvent:
+    """A subtitle interval snapped to the delivery frame grid."""
+
+    start_frame: int
+    end_frame: int
+    text: str
+    style: Literal["Title", "Caption", "Action", "Note"]
+
+
+@dataclass(frozen=True)
 class ChapterSpec:
     id: str
     title: str
@@ -96,6 +106,20 @@ def ass_time(milliseconds: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{milliseconds // 10:02d}"
 
 
+def frame_milliseconds(frame: int) -> int | float:
+    """Represent a 30fps frame boundary in milliseconds without inventing drift."""
+
+    milliseconds, remainder = divmod(frame * 1_000, 30)
+    return milliseconds if remainder == 0 else round(frame * 1_000 / 30, 6)
+
+
+def ass_frame_time(frame: int) -> str:
+    """Format a frame-grid boundary at ASS's nearest available centisecond."""
+
+    centiseconds = (frame * 100 + 15) // 30
+    return ass_time(centiseconds * 10)
+
+
 ASS_HEADER = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
@@ -119,16 +143,24 @@ def _ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\N")
 
 
-def write_ass(events: tuple[SubtitleEvent, ...], out: Path) -> None:
+def write_ass(
+    events: tuple[SubtitleEvent | RenderedSubtitleEvent, ...], out: Path
+) -> None:
     """Write the review subtitles as a human-editable UTF-8 ASS script."""
 
     rows = [ASS_HEADER]
     for event in events:
-        if event.end_ms <= event.start_ms:
-            raise ValueError("subtitle events must have a positive duration")
+        if isinstance(event, RenderedSubtitleEvent):
+            if event.end_frame <= event.start_frame:
+                raise ValueError("subtitle events must have a positive duration")
+            start, end = ass_frame_time(event.start_frame), ass_frame_time(event.end_frame)
+        else:
+            if event.end_ms <= event.start_ms:
+                raise ValueError("subtitle events must have a positive duration")
+            start, end = ass_time(event.start_ms), ass_time(event.end_ms)
         rows.append(
             "Dialogue: 0,"
-            f"{ass_time(event.start_ms)},{ass_time(event.end_ms)},{event.style},"
+            f"{start},{end},{event.style},"
             f",0,0,0,,{_ass_escape(event.text)}\n"
         )
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -149,58 +181,92 @@ def _source_json(source: Path | ActionSource | None) -> object:
     }
 
 
-def write_timeline_json(plan: VideoPlan, out: Path) -> None:
+def write_timeline_json(
+    plan: VideoPlan,
+    out: Path,
+    *,
+    frame_schedule: tuple[object, ...] | None = None,
+    subtitle_events: tuple[SubtitleEvent | RenderedSubtitleEvent, ...] | None = None,
+) -> None:
     """Persist exact shot and subtitle timing for review and later rendering."""
 
     chapters: list[dict[str, object]] = []
     cursor = 0
-    for chapter in plan.chapters:
+    if frame_schedule is not None and len(frame_schedule) != len(plan.chapters):
+        raise ValueError("frame schedule does not match chapter count")
+    for chapter_index, chapter in enumerate(plan.chapters):
+        scheduled_chapter = frame_schedule[chapter_index] if frame_schedule is not None else None
         shot_cursor = cursor
         shots: list[dict[str, object]] = []
-        for shot in chapter.shots:
+        for shot_index, shot in enumerate(chapter.shots):
             end = shot_cursor + shot.duration_ms
-            shots.append(
-                {
-                    "id": shot.id,
-                    "kind": shot.kind,
-                    "startMs": shot_cursor,
-                    "endMs": end,
-                    "durationMs": shot.duration_ms,
-                    "source": _source_json(shot.source),
-                    "title": shot.title,
-                    "caption": shot.caption,
-                    "loop": shot.loop,
-                }
-            )
+            row: dict[str, object] = {
+                "id": shot.id,
+                "kind": shot.kind,
+                "startMs": shot_cursor,
+                "endMs": end,
+                "durationMs": shot.duration_ms,
+                "source": _source_json(shot.source),
+                "title": shot.title,
+                "caption": shot.caption,
+                "loop": shot.loop,
+            }
+            if scheduled_chapter is not None:
+                scheduled_shot = scheduled_chapter.shots[shot_index]
+                row.update(
+                    {
+                        "startFrame": scheduled_shot.start_frame,
+                        "endFrame": scheduled_shot.end_frame,
+                        "renderedStartMs": frame_milliseconds(scheduled_shot.start_frame),
+                        "renderedEndMs": frame_milliseconds(scheduled_shot.end_frame),
+                    }
+                )
+            shots.append(row)
             shot_cursor = end
         if shot_cursor != cursor + chapter.duration_ms:
             raise ValueError(f"chapter {chapter.id} shots do not match its duration")
-        chapters.append(
-            {
-                "id": chapter.id,
-                "title": chapter.title,
-                "startMs": cursor,
-                "endMs": shot_cursor,
-                "durationMs": chapter.duration_ms,
-                "shots": shots,
-            }
-        )
+        chapter_row: dict[str, object] = {
+            "id": chapter.id,
+            "title": chapter.title,
+            "startMs": cursor,
+            "endMs": shot_cursor,
+            "durationMs": chapter.duration_ms,
+            "shots": shots,
+        }
+        if scheduled_chapter is not None:
+            chapter_row.update(
+                {
+                    "startFrame": scheduled_chapter.start_frame,
+                    "endFrame": scheduled_chapter.end_frame,
+                    "renderedStartMs": frame_milliseconds(scheduled_chapter.start_frame),
+                    "renderedEndMs": frame_milliseconds(scheduled_chapter.end_frame),
+                }
+            )
+        chapters.append(chapter_row)
         cursor = shot_cursor
     if cursor != plan.duration_ms:
         raise ValueError("timeline duration does not match plan duration")
+    rendered_events = subtitle_events if subtitle_events is not None else plan.subtitle_events
+    subtitle_rows: list[dict[str, object]] = []
+    for event in rendered_events:
+        row: dict[str, object] = {"text": event.text, "style": event.style}
+        if isinstance(event, RenderedSubtitleEvent):
+            row.update(
+                {
+                    "startFrame": event.start_frame,
+                    "endFrame": event.end_frame,
+                    "renderedStartMs": frame_milliseconds(event.start_frame),
+                    "renderedEndMs": frame_milliseconds(event.end_frame),
+                }
+            )
+        else:
+            row.update({"startMs": event.start_ms, "endMs": event.end_ms})
+        subtitle_rows.append(row)
     payload = {
         "schemaVersion": 1,
         "durationMs": plan.duration_ms,
         "chapters": chapters,
-        "subtitleEvents": [
-            {
-                "startMs": event.start_ms,
-                "endMs": event.end_ms,
-                "text": event.text,
-                "style": event.style,
-            }
-            for event in plan.subtitle_events
-        ],
+        "subtitleEvents": subtitle_rows,
         "voiceStatus": "pending-openai-api-key",
         "aiVoiceDisclosureRequired": True,
         "privateAnimeUsed": False,
@@ -496,11 +562,13 @@ def _encode_still_image(source: Path, out: Path, frame_count: int, *, zoom: bool
     )
 
 
-def render_shot(shot: ShotSpec, out: Path) -> None:
+def render_shot(shot: ShotSpec, out: Path, *, frame_count: int | None = None) -> None:
     """Render one plan shot as a 1920x1080 silent, square-pixel H.264 clip."""
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    frame_count = _duration_frames(shot.duration_ms)
+    frame_count = _duration_frames(shot.duration_ms) if frame_count is None else frame_count
+    if frame_count <= 0:
+        raise ValueError("shot frame count must be positive")
     prepared = out.with_suffix(".png")
     if shot.kind == "card":
         _encode_still_image(_write_card(shot, prepared), out, frame_count, zoom=False)

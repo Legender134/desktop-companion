@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -12,11 +13,13 @@ if __package__ in {None, ""}:
 from tools.nangongwan_rooftop_making_of import (
     ActionSource,
     ChapterSpec,
+    RenderedSubtitleEvent,
     ShotSpec,
     SubtitleEvent,
     VideoPlan,
     burn_ass_and_add_silence,
     concat_shots,
+    frame_milliseconds,
     read_action,
     render_shot,
     write_action_mp4,
@@ -27,6 +30,132 @@ from tools.nangongwan_rooftop_making_of import (
 
 CHAPTER_DURATIONS = (18_000, 40_000, 40_000, 40_000, 87_000, 55_000)
 MOON_COMPARISON_FRAME_INDEX = 20
+FRAMES_PER_SECOND = 30
+
+
+@dataclass(frozen=True)
+class ScheduledShot:
+    index: int
+    shot: ShotSpec
+    start_frame: int
+    end_frame: int
+
+    @property
+    def frame_count(self) -> int:
+        return self.end_frame - self.start_frame
+
+
+@dataclass(frozen=True)
+class ScheduledChapter:
+    chapter: ChapterSpec
+    start_frame: int
+    end_frame: int
+    shots: tuple[ScheduledShot, ...]
+
+    @property
+    def frame_count(self) -> int:
+        return self.end_frame - self.start_frame
+
+    @property
+    def start_ms(self) -> int | float:
+        return frame_milliseconds(self.start_frame)
+
+    @property
+    def end_ms(self) -> int | float:
+        return frame_milliseconds(self.end_frame)
+
+
+def _round_to_frame(milliseconds: int) -> int:
+    """Round a millisecond offset to the nearest 30fps frame, half upward."""
+
+    return (milliseconds * FRAMES_PER_SECOND + 500) // 1_000
+
+
+def _chapter_frame_counts(chapter: ChapterSpec, chapter_frames: int) -> tuple[int, ...]:
+    """Use cumulative rounding, with a locked frame count for moon variant parity."""
+
+    cumulative_ms = 0
+    previous_relative_frame = 0
+    counts: list[int] = []
+    for position, shot in enumerate(chapter.shots):
+        cumulative_ms += shot.duration_ms
+        relative_end = (
+            chapter_frames
+            if position == len(chapter.shots) - 1
+            else _round_to_frame(cumulative_ms)
+        )
+        counts.append(relative_end - previous_relative_frame)
+        previous_relative_frame = relative_end
+    if cumulative_ms != chapter.duration_ms or sum(counts) != chapter_frames:
+        raise ValueError(f"chapter {chapter.id} frame allocation does not match its duration")
+    if chapter.id == "moon_variants":
+        action_indexes = [
+            index
+            for index, shot in enumerate(chapter.shots)
+            if shot.id in {"moon-184", "moon-232", "moon-full"}
+        ]
+        comparison_index = next(
+            index for index, shot in enumerate(chapter.shots) if shot.id == "moon-compare"
+        )
+        action_frames = _round_to_frame(chapter.shots[action_indexes[0]].duration_ms)
+        if any(_round_to_frame(chapter.shots[index].duration_ms) != action_frames for index in action_indexes):
+            raise ValueError("moon variant action durations must remain identical")
+        delta = sum(action_frames - counts[index] for index in action_indexes)
+        for index in action_indexes:
+            counts[index] = action_frames
+        counts[comparison_index] -= delta
+        if counts[comparison_index] <= 0 or sum(counts) != chapter_frames:
+            raise ValueError("moon variant parity cannot fit in its chapter frame budget")
+    return tuple(counts)
+
+
+def build_frame_schedule(plan: VideoPlan) -> tuple[ScheduledChapter, ...]:
+    """Allocate frames cumulatively within each chapter so no drift crosses a cut."""
+
+    schedule: list[ScheduledChapter] = []
+    frame_cursor = 0
+    shot_index = 1
+    for chapter in plan.chapters:
+        chapter_frames, remainder = divmod(chapter.duration_ms * FRAMES_PER_SECOND, 1_000)
+        if remainder:
+            raise ValueError(f"chapter {chapter.id} is not frame-aligned at 30fps")
+        chapter_start = frame_cursor
+        scheduled_shots: list[ScheduledShot] = []
+        relative_frame = 0
+        for shot, count in zip(
+            chapter.shots, _chapter_frame_counts(chapter, chapter_frames), strict=True
+        ):
+            start_frame = chapter_start + relative_frame
+            end_frame = start_frame + count
+            if end_frame <= start_frame:
+                raise ValueError(f"shot {shot.id} has no allocated frames")
+            scheduled_shots.append(ScheduledShot(shot_index, shot, start_frame, end_frame))
+            shot_index += 1
+            relative_frame += count
+        if relative_frame != chapter_frames:
+            raise ValueError(f"chapter {chapter.id} frame allocation does not match its duration")
+        frame_cursor = chapter_start + chapter_frames
+        schedule.append(
+            ScheduledChapter(chapter, chapter_start, frame_cursor, tuple(scheduled_shots))
+        )
+    if frame_cursor != plan.duration_ms * FRAMES_PER_SECOND // 1_000:
+        raise ValueError("frame allocation does not match plan duration")
+    return tuple(schedule)
+
+
+def quantize_subtitle_events(
+    events: tuple[SubtitleEvent, ...],
+) -> tuple[RenderedSubtitleEvent, ...]:
+    """Snap public subtitle timing to the same frame grid as the rendered master."""
+
+    rendered: list[RenderedSubtitleEvent] = []
+    for event in events:
+        start_frame = _round_to_frame(event.start_ms)
+        end_frame = _round_to_frame(event.end_ms)
+        if end_frame <= start_frame:
+            raise ValueError(f"subtitle {event.text!r} has no rendered frames")
+        rendered.append(RenderedSubtitleEvent(start_frame, end_frame, event.text, event.style))
+    return tuple(rendered)
 
 
 def _sources(root: Path) -> tuple[dict[str, ActionSource], dict[str, Path], dict[str, Path]]:
@@ -262,18 +391,28 @@ def build_master(root: Path) -> Path:
     build_action_clips(root)
     build_review_stills(root)
     plan = build_video_plan(root)
+    frame_schedule = build_frame_schedule(plan)
+    rendered_events = quantize_subtitle_events(plan.subtitle_events)
     ass = output / "master-v1.ass"
     timeline = output / "master-v1-timeline.json"
-    write_ass(plan.subtitle_events, ass)
-    write_timeline_json(plan, timeline)
+    write_ass(rendered_events, ass)
+    write_timeline_json(
+        plan,
+        timeline,
+        frame_schedule=frame_schedule,
+        subtitle_events=rendered_events,
+    )
 
     rendered_shots: list[Path] = []
-    for index, shot in enumerate(
-        (shot for chapter in plan.chapters for shot in chapter.shots), start=1
-    ):
-        target = shots_dir / f"{index:02d}-{shot.id}.mp4"
-        render_shot(shot, target)
-        rendered_shots.append(target)
+    for scheduled_chapter in frame_schedule:
+        for scheduled_shot in scheduled_chapter.shots:
+            target = shots_dir / f"{scheduled_shot.index:02d}-{scheduled_shot.shot.id}.mp4"
+            render_shot(
+                scheduled_shot.shot,
+                target,
+                frame_count=scheduled_shot.frame_count,
+            )
+            rendered_shots.append(target)
     master_base = output / "master-base.mp4"
     concat_shots(tuple(rendered_shots), master_base)
     master = output / "master-v1-no-voice-1920x1080.mp4"
