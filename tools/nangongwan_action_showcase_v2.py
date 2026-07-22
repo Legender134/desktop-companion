@@ -14,7 +14,7 @@ import re
 import struct
 import subprocess
 import tempfile
-from typing import BinaryIO, Callable, Iterator, Literal
+from typing import BinaryIO, Callable, Iterable, Iterator, Literal
 
 from PIL import Image, ImageChops, ImageStat
 
@@ -51,13 +51,25 @@ _EXPECTED_OUTPUT_FRAMES = (15, 62, 15, 273, 15, 288, 15, 920, 15, 270, 15, 270, 
 _EXPECTED_TOTAL_FRAMES = 2473
 _FORBIDDEN_SOURCE_MARKERS = ("anime-reference", "do-not-publish")
 _SSIM_THRESHOLD = 0.995
+_OUTSIDE_MIN_PSNR_DB = 40.0
 _CENTER_MIN_PSNR_DB = 29.0
+_CENTER_MIN_TEMPORAL_RATIO = 0.10
+_EXPECTED_VIDEO_TIME_BASE = Fraction(1, 15_360)
+
+
+@dataclass(frozen=True)
+class SourceAsset:
+    path: Path
+    sha256: str
+    role: Literal["background", "atlas", "manifest", "sequence"]
+    id: str = ""
 
 
 @dataclass(frozen=True)
 class ShowcaseSource:
     kind: Literal["blink", "action", "sequence"]
     actions: tuple[ActionSource, ...]
+    assets: tuple[SourceAsset, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -72,6 +84,7 @@ class ShowcasePlan:
     background_source: Path
     segments: tuple[ShowcaseSegment, ...]
     sequence_sources: tuple[Path, ...] = ()
+    source_inventory: tuple[SourceAsset, ...] = ()
 
     @property
     def total_frames(self) -> int:
@@ -93,6 +106,9 @@ class VideoProbe:
     sample_aspect_ratio: str
     frame_rate: Fraction
     nb_read_frames: int | None
+    average_frame_rate: Fraction = Fraction(FPS, 1)
+    time_base: Fraction = _EXPECTED_VIDEO_TIME_BASE
+    duration: Fraction = Fraction(0, 1)
 
 
 @dataclass(frozen=True)
@@ -110,6 +126,50 @@ class MediaProbe:
     subtitle_streams: int
     data_streams: int
     other_streams: int = 0
+
+
+def _validate_source_asset_paths(assets: tuple[SourceAsset, ...]) -> None:
+    seen: dict[Path, str] = {}
+    ids: set[str] = set()
+    for asset in assets:
+        resolved = asset.path.resolve(strict=False)
+        encoded = str(resolved).lower()
+        if any(marker in encoded for marker in _FORBIDDEN_SOURCE_MARKERS):
+            raise ValueError(f"showcase source is not public: {asset.path}")
+        if not asset.path.is_file():
+            raise ValueError(f"showcase source is missing: {asset.path}")
+        if not re.fullmatch(r"[0-9a-f]{64}", asset.sha256):
+            raise ValueError(f"source SHA-256 is invalid for {asset.path}")
+        if not asset.id or asset.id in ids:
+            raise ValueError(f"source inventory id is missing or duplicated: {asset.id!r}")
+        ids.add(asset.id)
+        previous = seen.setdefault(resolved, asset.sha256)
+        if previous != asset.sha256:
+            raise ValueError(f"conflicting source SHA-256 values for {asset.path}")
+
+
+def _verified_source_snapshots(
+    assets: tuple[SourceAsset, ...],
+) -> dict[Path, bytes]:
+    """Hash every declared public input before any caller parses or decodes it."""
+
+    _validate_source_asset_paths(assets)
+    snapshots: dict[Path, bytes] = {}
+    mismatches: list[str] = []
+    for asset in assets:
+        resolved = asset.path.resolve()
+        if resolved in snapshots:
+            continue
+        encoded = asset.path.read_bytes()
+        actual = sha256(encoded).hexdigest()
+        if actual != asset.sha256:
+            mismatches.append(
+                f"{asset.path} expected {asset.sha256}, found {actual}"
+            )
+        snapshots[resolved] = encoded
+    if mismatches:
+        raise ValueError("source SHA-256 mismatch: " + "; ".join(mismatches))
+    return snapshots
 
 
 def _run_capture(command: list[str], *, tool: str) -> subprocess.CompletedProcess[bytes]:
@@ -181,6 +241,17 @@ def _frame_rate(stream: dict[str, object]) -> Fraction:
     return rate
 
 
+def _rational_field(stream: dict[str, object], key: str) -> Fraction:
+    value = _required_string(stream, key)
+    try:
+        parsed = Fraction(value)
+    except (ValueError, ZeroDivisionError) as error:
+        raise ValueError(f"ffprobe stream has no valid {key}") from error
+    if parsed <= 0:
+        raise ValueError(f"ffprobe stream {key} must be positive")
+    return parsed
+
+
 def _positive_fraction(stream: dict[str, object], key: str) -> Fraction:
     value = _required_string(stream, key)
     try:
@@ -212,6 +283,7 @@ def probe_media(path: Path, *, count_frames: bool = False) -> MediaProbe:
             frame_count = int(raw_frames)  # type: ignore[arg-type]
         except (TypeError, ValueError) as error:
             raise ValueError("ffprobe stream has invalid nb_read_frames") from error
+    video_time_base = _rational_field(video_stream, "time_base")
     video = VideoProbe(
         width=_required_int(video_stream, "width"),
         height=_required_int(video_stream, "height"),
@@ -221,6 +293,9 @@ def probe_media(path: Path, *, count_frames: bool = False) -> MediaProbe:
         sample_aspect_ratio=_required_string(video_stream, "sample_aspect_ratio"),
         frame_rate=_frame_rate(video_stream),
         nb_read_frames=frame_count,
+        average_frame_rate=_rational_field(video_stream, "avg_frame_rate"),
+        time_base=video_time_base,
+        duration=_required_int(video_stream, "duration_ts") * video_time_base,
     )
     audio = None
     if audios:
@@ -243,14 +318,54 @@ def probe_media(path: Path, *, count_frames: bool = False) -> MediaProbe:
     )
 
 
-def write_silent_video(frames: SegmentFrames, output: Path) -> None:
-    """Stream exact RGB frames into a normalized silent H.264 clip."""
+def _probe_video_timestamps(master: Path, expected_frames: int) -> dict[str, object]:
+    completed = _run_capture(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_frames",
+            "-show_entries",
+            "frame=best_effort_timestamp",
+            "-of",
+            "json",
+            str(master),
+        ],
+        tool="ffprobe",
+    )
+    try:
+        document = json.loads(completed.stdout)
+        frames = document["frames"]
+        timestamps = tuple(int(frame["best_effort_timestamp"]) for frame in frames)
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("ffprobe returned invalid decoded video timestamps") from error
+    step = _EXPECTED_VIDEO_TIME_BASE.denominator // FPS
+    mismatches = [
+        index
+        for index, timestamp in enumerate(timestamps)
+        if timestamp != index * step
+    ]
+    return {
+        "passed": len(timestamps) == expected_frames and not mismatches,
+        "frameCount": len(timestamps),
+        "firstPts": timestamps[0] if timestamps else None,
+        "lastPts": timestamps[-1] if timestamps else None,
+        "step": step,
+        "firstMismatchFrame": mismatches[0] if mismatches else None,
+    }
 
-    if not frames.frames:
-        raise ValueError("a video segment needs at least one frame")
-    if any(frame.size != FRAME_SIZE or frame.mode != "RGB" for frame in frames.frames):
-        raise ValueError(f"video frames must be RGB images sized {FRAME_SIZE}")
+
+def write_silent_video(
+    frames: Iterable[Image.Image], output: Path, *, expected_frames: int
+) -> None:
+    """Consume one frame iterator once and encode exactly ``expected_frames``."""
+
+    if expected_frames <= 0:
+        raise ValueError("expected frame count must be positive")
     output.parent.mkdir(parents=True, exist_ok=True)
+    output.unlink(missing_ok=True)
     command = [
         "ffmpeg",
         "-y",
@@ -269,7 +384,7 @@ def write_silent_video(frames: SegmentFrames, output: Path) -> None:
         "-vf",
         "setsar=1",
         "-frames:v",
-        str(len(frames.frames)),
+        str(expected_frames),
         "-an",
         "-c:v",
         "libx264",
@@ -287,26 +402,50 @@ def write_silent_video(frames: SegmentFrames, output: Path) -> None:
         "+faststart",
         str(output),
     ]
+    iterator = iter(frames)
+    close_source = getattr(iterator, "close", None)
+    process: subprocess.Popen[bytes] | None = None
     try:
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    except OSError as error:
-        raise RuntimeError(f"could not start ffmpeg: {error}") from error
-    assert process.stdin is not None
-    try:
-        for frame in frames.frames:
+        try:
+            process = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        except OSError as error:
+            raise RuntimeError(f"could not start ffmpeg: {error}") from error
+        assert process.stdin is not None
+        for index in range(expected_frames):
+            try:
+                frame = next(iterator)
+            except StopIteration as error:
+                raise ValueError(
+                    f"frame stream ended at {index}; expected {expected_frames} frames"
+                ) from error
+            if frame.size != FRAME_SIZE or frame.mode != "RGB":
+                raise ValueError(f"video frames must be RGB images sized {FRAME_SIZE}")
             process.stdin.write(frame.tobytes())
+        try:
+            next(iterator)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError(
+                f"frame stream contains more than expected {expected_frames} frames"
+            )
         process.stdin.close()
         stderr = process.stderr.read() if process.stderr is not None else b""
         returncode = process.wait()
+        if returncode:
+            message = stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(f"ffmpeg failed with exit code {returncode}:\n{message}")
     except BaseException:
-        process.kill()
-        process.wait()
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
         output.unlink(missing_ok=True)
         raise
-    if returncode:
-        output.unlink(missing_ok=True)
-        message = stderr.decode("utf-8", errors="replace")
-        raise RuntimeError(f"ffmpeg failed with exit code {returncode}:\n{message}")
+    finally:
+        if callable(close_source):
+            close_source()
 
 
 def _video_stream_signature(path: Path) -> tuple[object, ...]:
@@ -521,10 +660,12 @@ def compose_frame(background: Image.Image, sprite: Image.Image) -> Image.Image:
     return canvas.convert("RGB")
 
 
-def _concatenate_actions(actions: tuple[ActionSource, ...]) -> TimedFrames:
-    if not actions:
+def _concatenate_actions(source: ShowcaseSource) -> TimedFrames:
+    if not source.actions:
         raise ValueError("showcase source needs at least one action")
-    timed_actions = tuple(read_action(action) for action in actions)
+    if source.assets:
+        _verified_source_snapshots(source.assets)
+    timed_actions = tuple(read_action(action) for action in source.actions)
     for timed in timed_actions:
         _validate_timed_frames(timed)
     return TimedFrames(
@@ -568,7 +709,7 @@ def _iter_expected_center_frames(
     with Image.open(background) as source:
         center_background = source.convert("RGB").crop(rectangle).convert("RGBA")
     for segment in plan.segments:
-        timed = _concatenate_actions(segment.source.actions)
+        timed = _concatenate_actions(segment.source)
         source_indices = _segment_source_indices(segment, timed)
         if len(source_indices) != segment.output_frames:
             raise ValueError("expected center sequence does not match segment frames")
@@ -578,28 +719,23 @@ def _iter_expected_center_frames(
             yield center.convert("RGB")
 
 
-def build_segment_frames(segment: ShowcaseSegment, background: Image.Image) -> SegmentFrames:
-    """Read, time-resample, and fixed-center compose every frame in one segment."""
+def iter_segment_frames(
+    segment: ShowcaseSegment, background: Image.Image
+) -> Iterator[Image.Image]:
+    """Yield full-resolution composites one at a time in exact approved order."""
 
-    timed = _concatenate_actions(segment.source.actions)
-    if segment.source.kind == "blink":
-        sprites = make_blink(timed)
-    elif segment.source.kind in {"action", "sequence"}:
-        if segment.id in _MOON_SEGMENT_IDS:
-            if (timed.duration_ms, segment.output_frames) != (
-                _MOON_DURATION_MS,
-                _MOON_OUTPUT_FRAMES,
-            ):
-                raise ValueError("moon segments must use the approved shared time positions")
-            sprites = _resample_at_positions(timed, _MOON_SAMPLE_POSITIONS)
-        else:
-            sprites = resample_action(timed, segment.output_frames)
-    else:
-        raise ValueError(f"unknown showcase source kind: {segment.source.kind}")
-
-    if len(sprites.frames) != segment.output_frames:
+    timed = _concatenate_actions(segment.source)
+    source_indices = _segment_source_indices(segment, timed)
+    if len(source_indices) != segment.output_frames:
         raise ValueError("segment frame count does not match its plan")
-    return SegmentFrames(tuple(compose_frame(background, sprite) for sprite in sprites.frames))
+    for source_index in source_indices:
+        yield compose_frame(background, timed.frames[source_index])
+
+
+def build_segment_frames(segment: ShowcaseSegment, background: Image.Image) -> SegmentFrames:
+    """Materialize a segment only for focused tests; production uses the iterator."""
+
+    return SegmentFrames(tuple(iter_segment_frames(segment, background)))
 
 
 def _verified_background_snapshot(source: Path) -> tuple[str, bytes, bytes]:
@@ -823,31 +959,136 @@ def _timeline_segments(document: dict[str, object]) -> tuple[dict[str, object], 
 def _encoded_background_fidelity(
     master: Path, background: Path, timeline_document: dict[str, object]
 ) -> dict[str, object]:
-    entries = _timeline_segments(timeline_document)
-    selected = (entries[0], *(entry for entry in entries if not str(entry.get("id", "")).startswith("blink-")))
-    frame_indices = tuple(
-        (int(entry["startFrame"]) + int(entry["endFrame"]) - 1) // 2
-        for entry in selected
-    )
-    decoded = _extract_raw_frames(master, frame_indices)
-    with Image.open(background) as source:
-        reference = source.convert("RGB")
-    scores = tuple(
-        _outside_sprite_ssim(reference, frame) for frame in decoded
-    )
+    expected_frames = timeline_document.get("totalFrames")
+    if not isinstance(expected_frames, int) or expected_frames <= 0:
+        raise ValueError("timeline totalFrames must be a positive integer")
+    regions = {
+        "top": (FRAME_SIZE[0], SPRITE_ORIGIN[1], 0, 0),
+        "bottom": (
+            FRAME_SIZE[0],
+            FRAME_SIZE[1] - SPRITE_ORIGIN[1] - SPRITE_SIZE[1],
+            0,
+            SPRITE_ORIGIN[1] + SPRITE_SIZE[1],
+        ),
+        "left": (SPRITE_ORIGIN[0], SPRITE_SIZE[1], 0, SPRITE_ORIGIN[1]),
+        "right": (
+            FRAME_SIZE[0] - SPRITE_ORIGIN[0] - SPRITE_SIZE[0],
+            SPRITE_SIZE[1],
+            SPRITE_ORIGIN[0] + SPRITE_SIZE[0],
+            SPRITE_ORIGIN[1],
+        ),
+    }
+    region_scores: dict[str, tuple[float, ...]] = {}
+    for name, (width, height, x, y) in regions.items():
+        completed = _run_capture(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-i",
+                str(master),
+                "-loop",
+                "1",
+                "-framerate",
+                str(FPS),
+                "-i",
+                str(background),
+                "-filter_complex",
+                (
+                    f"[0:v]trim=end_frame={expected_frames},crop={width}:{height}:{x}:{y},"
+                    "setpts=PTS-STARTPTS[encoded];"
+                    f"[1:v]trim=end_frame={expected_frames},crop={width}:{height}:{x}:{y},"
+                    "setpts=PTS-STARTPTS[reference];"
+                    "[encoded][reference]psnr=stats_file=-[checked]"
+                ),
+                "-map",
+                "[checked]",
+                "-f",
+                "null",
+                "-",
+            ],
+            tool="ffmpeg",
+        )
+        rows = tuple(
+            (
+                int(match.group(1)),
+                float("inf")
+                if match.group(2).lower() == b"inf"
+                else float(match.group(2)),
+            )
+            for match in re.finditer(
+                rb"n:\s*(\d+).*?psnr_avg:\s*(inf|[-+0-9.eE]+)",
+                completed.stdout,
+                re.IGNORECASE,
+            )
+        )
+        if tuple(index for index, _ in rows) != tuple(range(1, expected_frames + 1)):
+            raise ValueError(
+                f"outside-region PSNR for {name} checked {len(rows)} of {expected_frames} frames"
+            )
+        region_scores[name] = tuple(score for _, score in rows)
+
+    failed = [
+        (frame_index, name, score)
+        for name, scores in region_scores.items()
+        for frame_index, score in enumerate(scores)
+        if score < _OUTSIDE_MIN_PSNR_DB
+    ]
+    minimum = min(score for scores in region_scores.values() for score in scores)
+    sampled_ssim: list[dict[str, object]] = []
+    try:
+        entries = _timeline_segments(timeline_document)
+    except ValueError:
+        entries = ()
+    if entries:
+        selected = (
+            entries[0],
+            *(
+                entry
+                for entry in entries
+                if not str(entry.get("id", "")).startswith("blink-")
+            ),
+        )
+        sample_indices = tuple(
+            (int(entry["startFrame"]) + int(entry["endFrame"]) - 1) // 2
+            for entry in selected
+        )
+        decoded = _extract_raw_frames(master, sample_indices)
+        with Image.open(background) as source:
+            reference = source.convert("RGB")
+        sampled_ssim = [
+            {"frame": index, "ssim": _outside_sprite_ssim(reference, frame)}
+            for index, frame in zip(sample_indices, decoded, strict=True)
+        ]
+    sampled_ssim_passed = not sampled_ssim or min(
+        sample["ssim"] for sample in sampled_ssim
+    ) >= _SSIM_THRESHOLD
     return {
-        "passed": bool(scores) and min(scores) >= _SSIM_THRESHOLD,
-        "threshold": _SSIM_THRESHOLD,
-        "minimumSsim": min(scores) if scores else None,
-        "samples": [
-            {"segmentId": entry["id"], "frame": index, "ssim": score}
-            for entry, index, score in zip(selected, frame_indices, scores, strict=True)
+        "passed": not failed and sampled_ssim_passed,
+        "thresholdPsnrDb": _OUTSIDE_MIN_PSNR_DB,
+        "minimumPsnrDb": "inf" if math.isinf(minimum) else minimum,
+        "sampledSsimThreshold": _SSIM_THRESHOLD,
+        "minimumSampledSsim": (
+            min(sample["ssim"] for sample in sampled_ssim)
+            if sampled_ssim
+            else None
+        ),
+        "sampledSsim": sampled_ssim,
+        "framesChecked": expected_frames,
+        "regionFrameCounts": {
+            name: len(scores) for name, scores in region_scores.items()
+        },
+        "firstFailedFrame": min((frame for frame, _, _ in failed), default=None),
+        "failures": [
+            {"frame": frame, "region": name, "psnrDb": score}
+            for frame, name, score in failed[:20]
         ],
     }
 
 
 def _representative_sprites(segment: ShowcaseSegment) -> tuple[Image.Image, ...]:
-    timed = _concatenate_actions(segment.source.actions)
+    timed = _concatenate_actions(segment.source)
     output_indices = (0, (segment.output_frames - 1) // 2, segment.output_frames - 1)
     if segment.source.kind == "blink":
         blink = make_blink(timed)
@@ -954,19 +1195,48 @@ def _center_frame_psnr(expected: Image.Image, actual: Image.Image) -> float:
     return 10 * math.log10((255 * 255) / mean_squared_error)
 
 
-def _encoded_center_sequence(
-    master: Path, plan: ShowcasePlan, background: Path
+def _changed_pixel_mask(first: Image.Image, second: Image.Image) -> Image.Image:
+    difference = ImageChops.difference(first, second)
+    red, green, blue = difference.split()
+    maximum = ImageChops.lighter(red, ImageChops.lighter(green, blue))
+    return maximum.point(lambda value: 255 if value else 0)
+
+
+def _masked_rgb_mse(
+    expected: Image.Image, actual: Image.Image, mask: Image.Image
+) -> float:
+    if mask.getbbox() is None:
+        return 0.0
+    rms = ImageStat.Stat(ImageChops.difference(expected, actual), mask).rms
+    return sum(value * value for value in rms) / len(rms)
+
+
+def _frame_rms_difference(first: Image.Image, second: Image.Image) -> float:
+    rms = ImageStat.Stat(ImageChops.difference(first, second)).rms
+    return math.sqrt(sum(value * value for value in rms) / len(rms))
+
+
+def _compare_center_sequences(
+    expected_source: Iterable[Image.Image],
+    actual_source: Iterable[Image.Image],
+    *,
+    expected_frames: int,
 ) -> dict[str, object]:
-    """Compare every encoded center frame with its exact planned counterpart."""
+    """Compare lossy centers while requiring every genuine temporal change."""
 
     missing = object()
     minimum_psnr = float("inf")
     failed_indices: list[int] = []
+    content_mismatches: list[int] = []
+    nearest_neighbor_mismatches: list[int] = []
+    minimum_temporal_ratio = float("inf")
     compared = 0
+    previous_expected: Image.Image | None = None
+    previous_actual: Image.Image | None = None
     for index, (expected, actual) in enumerate(
         zip_longest(
-            _iter_expected_center_frames(plan, background),
-            _iter_decoded_center_frames(master),
+            expected_source,
+            actual_source,
             fillvalue=missing,
         )
     ):
@@ -980,10 +1250,34 @@ def _encoded_center_sequence(
         minimum_psnr = min(minimum_psnr, psnr)
         if psnr < _CENTER_MIN_PSNR_DB:
             failed_indices.append(index)
+        if previous_expected is not None and previous_actual is not None:
+            changed_mask = _changed_pixel_mask(expected, previous_expected)
+            if changed_mask.getbbox() is not None:
+                current_error = _masked_rgb_mse(expected, actual, changed_mask)
+                prior_error = _masked_rgb_mse(previous_expected, actual, changed_mask)
+                if current_error >= prior_error:
+                    nearest_neighbor_mismatches.append(index)
+                expected_change = _frame_rms_difference(expected, previous_expected)
+                actual_change = _frame_rms_difference(actual, previous_actual)
+                temporal_ratio = actual_change / expected_change
+                minimum_temporal_ratio = min(
+                    minimum_temporal_ratio, temporal_ratio
+                )
+                if temporal_ratio < _CENTER_MIN_TEMPORAL_RATIO:
+                    content_mismatches.append(index)
+                    if index not in failed_indices:
+                        failed_indices.append(index)
+        previous_expected = expected
+        previous_actual = actual
+    failed_indices.sort()
     return {
-        "passed": compared == _EXPECTED_TOTAL_FRAMES and not failed_indices,
-        "method": "per-frame RGB PSNR over decoded 192x208 center crop",
+        "passed": compared == expected_frames and not failed_indices,
+        "method": (
+            "per-frame RGB PSNR plus expected-to-decoded temporal-change ratio "
+            "over every 192x208 center crop"
+        ),
         "thresholdPsnrDb": _CENTER_MIN_PSNR_DB,
+        "minimumTemporalChangeRatio": _CENTER_MIN_TEMPORAL_RATIO,
         "framesCompared": compared,
         "minimumPsnrDb": (
             "inf" if math.isinf(minimum_psnr) else minimum_psnr
@@ -991,7 +1285,28 @@ def _encoded_center_sequence(
         "failedFrameCount": len(failed_indices),
         "firstFailedFrame": failed_indices[0] if failed_indices else None,
         "failedFrames": failed_indices[:20],
+        "contentMismatchFrameCount": len(content_mismatches),
+        "contentMismatchFrames": content_mismatches[:20],
+        "observedMinimumTemporalRatio": (
+            "inf"
+            if math.isinf(minimum_temporal_ratio)
+            else minimum_temporal_ratio
+        ),
+        "nearestNeighborMismatchFrameCount": len(nearest_neighbor_mismatches),
+        "nearestNeighborMismatchFrames": nearest_neighbor_mismatches[:20],
     }
+
+
+def _encoded_center_sequence(
+    master: Path, plan: ShowcasePlan, background: Path
+) -> dict[str, object]:
+    """Compare every encoded center frame with its exact planned counterpart."""
+
+    return _compare_center_sequences(
+        _iter_expected_center_frames(plan, background),
+        _iter_decoded_center_frames(master),
+        expected_frames=_EXPECTED_TOTAL_FRAMES,
+    )
 
 
 def _centered_composition(plan: ShowcasePlan, background: Path) -> dict[str, object]:
@@ -1023,7 +1338,7 @@ def _centered_composition(plan: ShowcasePlan, background: Path) -> dict[str, obj
 
 def _moon_frame_parity(plan: ShowcasePlan) -> dict[str, object]:
     moon_segments = tuple(segment for segment in plan.segments if segment.id in _MOON_SEGMENT_IDS)
-    timed = tuple(_concatenate_actions(segment.source.actions) for segment in moon_segments)
+    timed = tuple(_concatenate_actions(segment.source) for segment in moon_segments)
     passed = (
         tuple(segment.id for segment in moon_segments) == ("moon-184", "moon-232", "moon-full")
         and all(segment.output_frames == _MOON_OUTPUT_FRAMES for segment in moon_segments)
@@ -1047,6 +1362,7 @@ def _source_privacy(plan: ShowcasePlan) -> dict[str, object]:
         for action in segment.source.actions
         for path in (action.atlas, action.manifest)
     )
+    sources.extend(asset.path for asset in plan.source_inventory)
     resolved: list[str] = []
     passed = True
     for source in sources:
@@ -1065,6 +1381,71 @@ def _source_privacy(plan: ShowcasePlan) -> dict[str, object]:
             )
         )
     return {"passed": passed, "resolvedSources": resolved}
+
+
+def _source_integrity(plan: ShowcasePlan) -> dict[str, object]:
+    required = {
+        path.resolve()
+        for path in (
+            plan.background_source,
+            *plan.sequence_sources,
+            *(
+                path
+                for segment in plan.segments
+                for action in segment.source.actions
+                for path in (action.atlas, action.manifest)
+            ),
+        )
+    }
+    declared = {asset.path.resolve() for asset in plan.source_inventory}
+    mismatches: list[dict[str, object]] = []
+    actual_inventory: list[dict[str, object]] = []
+    for asset in plan.source_inventory:
+        try:
+            actual = sha256(asset.path.read_bytes()).hexdigest()
+        except OSError as error:
+            actual = None
+            mismatches.append(
+                {
+                    "path": str(asset.path.resolve(strict=False)),
+                    "role": asset.role,
+                    "expectedSha256": asset.sha256,
+                    "actualSha256": None,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+        else:
+            if actual != asset.sha256:
+                mismatches.append(
+                    {
+                        "path": str(asset.path.resolve()),
+                        "role": asset.role,
+                        "expectedSha256": asset.sha256,
+                        "actualSha256": actual,
+                    }
+                )
+        actual_inventory.append(
+            {
+                "id": asset.id,
+                "path": str(asset.path.resolve(strict=False)),
+                "role": asset.role,
+                "sha256": actual,
+            }
+        )
+    complete = bool(plan.source_inventory) and declared == required
+    return {
+        "passed": complete and not mismatches,
+        "inventoryComplete": complete,
+        "assetCount": len(plan.source_inventory),
+        "inventory": actual_inventory,
+        "mismatches": mismatches,
+        "missingDeclarations": [
+            str(path) for path in sorted(required - declared, key=str)
+        ],
+        "extraDeclarations": [
+            str(path) for path in sorted(declared - required, key=str)
+        ],
+    }
 
 
 def _checked_detail(
@@ -1092,6 +1473,7 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         "silentAudio": False,
         "noTextSidecarsOrStreams": False,
         "sourcePrivacy": False,
+        "sourceIntegrity": False,
         "centeredComposition": False,
         "moonFrameParity": False,
     }
@@ -1100,6 +1482,17 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         details, "sourcePrivacy", lambda: _source_privacy(plan)
     )
     sources_are_private = not checks["sourcePrivacy"]
+    if sources_are_private:
+        details["sourceIntegrity"] = {
+            "passed": False,
+            "skipped": "source privacy failed before source hashing",
+            "mismatches": [],
+        }
+    else:
+        checks["sourceIntegrity"] = _checked_detail(
+            details, "sourceIntegrity", lambda: _source_integrity(plan)
+        )
+    sources_are_untrusted = sources_are_private or not checks["sourceIntegrity"]
     try:
         timeline_document = json.loads(timeline.read_text(encoding="utf-8"))
         if not isinstance(timeline_document, dict):
@@ -1109,6 +1502,30 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         timeline_document = {}
         entries = ()
         details["timeline"] = {"passed": False, "error": f"{type(error).__name__}: {error}"}
+
+    expected_timeline_inventory = [
+        {
+            "id": asset.id,
+            "role": asset.role,
+            "sha256": asset.sha256,
+        }
+        for asset in plan.source_inventory
+    ]
+    timeline_inventory_matches = (
+        timeline_document.get("sourceSha256") == expected_timeline_inventory
+    )
+    if isinstance(details.get("sourceIntegrity"), dict):
+        details["sourceIntegrity"][
+            "timelineInventoryMatches"
+        ] = timeline_inventory_matches
+        details["sourceIntegrity"]["passed"] = (
+            details["sourceIntegrity"].get("passed") is True
+            and timeline_inventory_matches
+        )
+    checks["sourceIntegrity"] = (
+        checks["sourceIntegrity"] and timeline_inventory_matches
+    )
+    sources_are_untrusted = sources_are_private or not checks["sourceIntegrity"]
 
     def background_detail() -> dict[str, object]:
         encoded_hash, _ = _verified_background_pixels(plan.background_source)
@@ -1120,10 +1537,10 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         )
         return {"passed": passed, "sha256": encoded_hash, "encodedFidelity": fidelity}
 
-    if sources_are_private:
+    if sources_are_untrusted:
         details["backgroundHash"] = {
             "passed": False,
-            "skipped": "source privacy failed before background reads",
+            "skipped": "source privacy or integrity failed before background reads",
         }
     else:
         checks["backgroundHash"] = _checked_detail(
@@ -1175,16 +1592,28 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
     details["totalFrames"] = {"passed": checks["totalFrames"], "timelineEnd": expected_start}
     if probe is not None:
         video = probe.video
+        try:
+            timestamps = _probe_video_timestamps(master, _EXPECTED_TOTAL_FRAMES)
+        except Exception as error:
+            timestamps = {
+                "passed": False,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        expected_video_duration = Fraction(_EXPECTED_TOTAL_FRAMES, FPS)
         checks["videoGeometry"] = (
             (video.width, video.height) == FRAME_SIZE
             and video.sample_aspect_ratio == "1:1"
             and video.frame_rate == FPS
+            and video.average_frame_rate == FPS
         )
         fast_start = _read_mp4_atom_order(master)
         checks["videoEncoding"] = (
             video.codec == "h264"
             and video.profile == "High"
             and video.pixel_format == "yuv420p"
+            and video.time_base == _EXPECTED_VIDEO_TIME_BASE
+            and video.duration == expected_video_duration
+            and timestamps.get("passed") is True
             and fast_start
         )
         details["video"] = {
@@ -1196,8 +1625,13 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
             "pixelFormat": video.pixel_format,
             "sampleAspectRatio": video.sample_aspect_ratio,
             "frameRate": str(video.frame_rate),
+            "averageFrameRate": str(video.average_frame_rate),
+            "timeBase": str(video.time_base),
+            "duration": str(video.duration),
+            "expectedDuration": str(expected_video_duration),
             "frames": video.nb_read_frames,
             "moovBeforeMdat": fast_start,
+            "timestamps": timestamps,
         }
         try:
             silence = _measure_audio_silence(master)
@@ -1250,14 +1684,14 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
             "otherStreams": probe.other_streams,
             "sidecars": [str(path) for path in sidecars],
         }
-    if sources_are_private:
+    if sources_are_untrusted:
         details["centeredComposition"] = {
             "passed": False,
-            "skipped": "source privacy failed before source-derived reads",
+            "skipped": "source privacy or integrity failed before source-derived reads",
         }
         details["moonFrameParity"] = {
             "passed": False,
-            "skipped": "source privacy failed before source-derived reads",
+            "skipped": "source privacy or integrity failed before source-derived reads",
         }
     else:
         def composition_detail() -> dict[str, object]:
@@ -1283,7 +1717,7 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
 
     artifact_hashes: dict[str, str] = {}
     artifacts = [("master", master), ("timeline", timeline)]
-    if not sources_are_private:
+    if not sources_are_untrusted:
         artifacts.append(("background", plan.background_source))
     for name, path in artifacts:
         try:

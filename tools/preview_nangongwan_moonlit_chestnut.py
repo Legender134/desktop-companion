@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 from hashlib import sha256
@@ -11,9 +12,14 @@ from PIL import Image, ImageChops, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PET_ROOT = ROOT / "src" / "shiyi_desktop_pet" / "resources" / "pets" / "nangongwan"
-ATLAS_PATH = PET_ROOT / "spritesheet.webp"
-MANIFEST_PATH = PET_ROOT / "pet.json"
+ARCHIVE_ROOT = (
+    ROOT / "tools" / "archives" / "nangongwan-moonlit-chestnut-anchored-v1"
+)
+LIVE_PET_ROOT = (
+    ROOT / "src" / "shiyi_desktop_pet" / "resources" / "pets" / "nangongwan"
+)
+ATLAS_PATH = ARCHIVE_ROOT / "spritesheet.webp"
+MANIFEST_PATH = ARCHIVE_ROOT / "pet.json"
 WORK_DIR = ROOT / "work" / "moonlit-chestnut-redesign"
 CELL = (192, 208)
 ATLAS_COLUMNS = 16
@@ -201,13 +207,32 @@ def _write_mp4(
         raise subprocess.CalledProcessError(process.returncode, process.args)
 
 
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Preview the archived 48-frame moonlit-chestnut candidate safely."
+    )
+    parser.add_argument("--atlas", type=Path, default=ATLAS_PATH)
+    parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
+    parser.add_argument("--output-dir", type=Path, default=WORK_DIR)
+    return parser
+
+
+def _validate_output_location(path: Path) -> None:
+    resolved = path.resolve(strict=False)
+    protected = (ARCHIVE_ROOT.resolve(), LIVE_PET_ROOT.resolve())
+    if any(resolved == root or resolved.is_relative_to(root) for root in protected):
+        raise ValueError("output must not be inside a protected archive or live pet tree")
+
+
 def main() -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    args = _parser().parse_args()
+    _validate_output_location(args.output_dir)
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     action = manifest["actions"]["moonlitChestnut"]
     durations = action["frameDurations"]
     if len(durations) != 48 or sum(durations) != 9600:
         raise ValueError("moonlitChestnut must contain 48 durations totalling 9600 ms")
-    with Image.open(ATLAS_PATH) as atlas:
+    with Image.open(args.atlas) as atlas:
         frames = _runtime_frames(atlas.convert("RGBA"), action)
         idle = _runtime_frames(
             atlas.convert("RGBA"),
@@ -218,19 +243,19 @@ def main() -> None:
         raise AssertionError("runtime action does not share exact idle endpoints")
 
     preview_frames = tuple(_desktop_preview(frame) for frame in frames)
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
-    _write_gif(preview_frames, durations, WORK_DIR / "moonlit-chestnut-9600ms.gif")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    _write_gif(preview_frames, durations, args.output_dir / "moonlit-chestnut-9600ms.gif")
     _write_gif(
         preview_frames,
         [max(10, round(duration / 0.75)) for duration in durations],
-        WORK_DIR / "moonlit-chestnut-75pct.gif",
+        args.output_dir / "moonlit-chestnut-75pct.gif",
     )
     _write_gif(
         preview_frames,
         [max(10, round(duration / 1.25)) for duration in durations],
-        WORK_DIR / "moonlit-chestnut-125pct.gif",
+        args.output_dir / "moonlit-chestnut-125pct.gif",
     )
-    _write_mp4(preview_frames, durations, WORK_DIR / "moonlit-chestnut-9600ms.mp4")
+    _write_mp4(preview_frames, durations, args.output_dir / "moonlit-chestnut-9600ms.mp4")
 
     metrics: list[dict] = []
     for index, (left, right) in enumerate(zip(frames, frames[1:]), start=1):
@@ -247,13 +272,13 @@ def main() -> None:
         "transitions": metrics,
         "hardestTransitions": hardest[:10],
     }
-    (WORK_DIR / "transition-metrics.json").write_text(
+    (args.output_dir / "transition-metrics.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    _hardest_seams(frames, metrics, WORK_DIR / "hardest-seams.png")
-    print(WORK_DIR / "moonlit-chestnut-9600ms.gif")
-    print(WORK_DIR / "moonlit-chestnut-9600ms.mp4")
-    print(WORK_DIR / "transition-metrics.json")
+    _hardest_seams(frames, metrics, args.output_dir / "hardest-seams.png")
+    print(args.output_dir / "moonlit-chestnut-9600ms.gif")
+    print(args.output_dir / "moonlit-chestnut-9600ms.mp4")
+    print(args.output_dir / "transition-metrics.json")
 
 
 if __name__ == "__main__":

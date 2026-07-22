@@ -8,6 +8,7 @@ partial moon/eave transition, and writes only atlas rows 23-25.  The archived
 
 from __future__ import annotations
 
+import argparse
 import json
 from hashlib import sha256
 from pathlib import Path
@@ -31,12 +32,16 @@ RECOVER_PATH = ASSET_DIR / "phase-recover.png"
 STAND_PATH = ASSET_DIR / "phase-stand-v2.png"
 MOON_PATH = ASSET_DIR / "moon-partial.png"
 ROOF_PATH = ASSET_DIR / "roof-eave.png"
-PET_ROOT = (
+ARCHIVE_ROOT = (
+    ROOT / "tools" / "archives" / "nangongwan-moonlit-chestnut-anchored-v1"
+)
+LIVE_PET_ROOT = (
     ROOT / "src" / "shiyi_desktop_pet" / "resources" / "pets" / "nangongwan"
 )
-ATLAS_PATH = PET_ROOT / "spritesheet.webp"
-MANIFEST_PATH = PET_ROOT / "pet.json"
+ATLAS_PATH = ARCHIVE_ROOT / "spritesheet.webp"
+MANIFEST_PATH = ARCHIVE_ROOT / "pet.json"
 WORK_DIR = ROOT / "work" / "moonlit-chestnut-redesign"
+OUTPUT_ATLAS_PATH = WORK_DIR / "rebuilt-anchored-48-spritesheet.webp"
 
 
 def extract_grid(
@@ -334,7 +339,34 @@ def _write_audit(frames: tuple[Image.Image, ...], path: Path) -> None:
     audit.save(path)
 
 
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Rebuild the archived 48-frame moonlit-chestnut candidate into a "
+            "separate work output."
+        )
+    )
+    parser.add_argument("--archive-atlas", type=Path, default=ATLAS_PATH)
+    parser.add_argument("--archive-manifest", type=Path, default=MANIFEST_PATH)
+    parser.add_argument("--output-atlas", type=Path, default=OUTPUT_ATLAS_PATH)
+    return parser
+
+
+def _validate_output_location(path: Path) -> None:
+    resolved = path.resolve(strict=False)
+    protected = (ARCHIVE_ROOT.resolve(), LIVE_PET_ROOT.resolve())
+    if any(resolved == root or resolved.is_relative_to(root) for root in protected):
+        raise ValueError("output must not be inside a protected archive or live pet tree")
+
+
 def main() -> None:
+    args = _parser().parse_args()
+    _validate_output_location(args.output_atlas)
+    if args.output_atlas.resolve() in {
+        args.archive_atlas.resolve(),
+        args.archive_manifest.resolve(),
+    }:
+        raise ValueError("output atlas must not overwrite an archived source")
     required = (
         SIT_PATH,
         TASTE_PATH,
@@ -342,14 +374,15 @@ def main() -> None:
         STAND_PATH,
         MOON_PATH,
         ROOF_PATH,
-        ATLAS_PATH,
+        args.archive_atlas,
+        args.archive_manifest,
     )
     missing = [path for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing moonlit-chestnut assets: {missing}")
 
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    with Image.open(ATLAS_PATH) as source:
+    manifest = json.loads(args.archive_manifest.read_text(encoding="utf-8"))
+    with Image.open(args.archive_atlas) as source:
         source_rgba = source.convert("RGBA")
         idle_frames = tuple(
             _atlas_frame(source_rgba, manifest, "idle", index) for index in range(3)
@@ -382,15 +415,15 @@ def main() -> None:
     if rebuilt_prefix_hash != original_prefix_hash:
         raise AssertionError("builder changed atlas rows 0-22")
 
-    atlas.save(ATLAS_PATH, "WEBP", lossless=True, quality=100, method=6, exact=True)
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
-    frame_dir = WORK_DIR / "frames"
+    args.output_atlas.parent.mkdir(parents=True, exist_ok=True)
+    atlas.save(args.output_atlas, "WEBP", lossless=True, quality=100, method=6, exact=True)
+    frame_dir = args.output_atlas.parent / "frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
     for index, frame in enumerate(frames, start=1):
         frame.save(frame_dir / f"frame-{index:02d}.png")
-    _write_audit(frames, WORK_DIR / "audit-48.png")
-    print(f"wrote {FRAME_COUNT} frames to {ATLAS_PATH}")
-    print(f"audit: {WORK_DIR / 'audit-48.png'}")
+    _write_audit(frames, args.output_atlas.parent / "audit-48.png")
+    print(f"wrote {FRAME_COUNT} frames to {args.output_atlas}")
+    print(f"audit: {args.output_atlas.parent / 'audit-48.png'}")
 
 
 if __name__ == "__main__":

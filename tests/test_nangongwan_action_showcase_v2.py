@@ -1,5 +1,6 @@
 from io import BytesIO
 from fractions import Fraction
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -79,6 +80,7 @@ def test_validation_requires_every_v2_gate(valid_showcase_fixture):
         "silentAudio": True,
         "noTextSidecarsOrStreams": True,
         "sourcePrivacy": True,
+        "sourceIntegrity": True,
         "centeredComposition": True,
         "moonFrameParity": True,
     }
@@ -118,8 +120,8 @@ def test_two_segment_encode_has_exact_frames_and_no_subtitle_stream(
     second = tmp_path / "second.mp4"
     joined = tmp_path / "joined.mp4"
     final = tmp_path / "final.mp4"
-    write_silent_video(tiny_segments[0], first)
-    write_silent_video(tiny_segments[1], second)
+    write_silent_video(tiny_segments[0].frames, first, expected_frames=15)
+    write_silent_video(tiny_segments[1].frames, second, expected_frames=15)
     concat_clips((first, second), joined)
     add_silent_aac(joined, final, expected_frames=30)
 
@@ -155,6 +157,12 @@ def test_timeline_has_exact_contiguous_segments_and_no_text_fields(showcase_plan
         "height": 208,
     }
     assert timeline["totalFrames"] == 2473
+    assert len(timeline["sourceSha256"]) == 16
+    assert all(
+        set(asset) == {"id", "role", "sha256"}
+        and not Path(asset["id"]).is_absolute()
+        for asset in timeline["sourceSha256"]
+    )
     assert len(timeline["segments"]) == 15
     assert [entry["startFrame"] for entry in timeline["segments"]] == [
         0,
@@ -187,14 +195,14 @@ def test_build_showcase_writes_only_v2_background_clips_timeline_and_master(
         lambda root, background_source: showcase_plan,
     )
     monkeypatch.setattr(
-        "tools.render_nangongwan_action_showcase_v2.build_segment_frames",
-        lambda segment, background: SegmentFrames((background.copy(),) * segment.output_frames),
+        "tools.render_nangongwan_action_showcase_v2.iter_segment_frames",
+        lambda segment, background: iter((background.copy(),) * segment.output_frames),
     )
 
-    def fake_encode(frames, output):
+    def fake_encode(frames, output, *, expected_frames):
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"clip")
-        encoded_clips.append((output.name, len(frames.frames)))
+        encoded_clips.append((output.name, expected_frames))
 
     monkeypatch.setattr(
         "tools.render_nangongwan_action_showcase_v2.write_silent_video", fake_encode
@@ -208,9 +216,8 @@ def test_build_showcase_writes_only_v2_background_clips_timeline_and_master(
         lambda video, output, expected_frames: output.write_bytes(b"final"),
     )
 
-    master = build_showcase(tmp_path, BACKGROUND)
-
     output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    master = render_module._build_showcase_directory(tmp_path, BACKGROUND, output)
     assert master == output / "nangongwan-action-showcase-v2-1600x900.mp4"
     assert len(encoded_clips) == 15
     assert [frame_count for _, frame_count in encoded_clips] == [
@@ -251,6 +258,9 @@ def _test_video_probe(frame_count: int, *, pixel_format: str = "yuv420p") -> Vid
         sample_aspect_ratio="1:1",
         frame_rate=Fraction(30, 1),
         nb_read_frames=frame_count,
+        average_frame_rate=Fraction(30, 1),
+        time_base=Fraction(1, 15_360),
+        duration=Fraction(frame_count, 30),
     )
 
 
@@ -284,6 +294,19 @@ def valid_showcase_fixture(tmp_path, monkeypatch, showcase_plan):
     )
     monkeypatch.setattr(
         showcase_module, "_read_mp4_atom_order", lambda path: True, raising=False
+    )
+    monkeypatch.setattr(
+        showcase_module,
+        "_probe_video_timestamps",
+        lambda path, expected_frames: {
+            "passed": True,
+            "frameCount": expected_frames,
+            "firstPts": 0,
+            "lastPts": (expected_frames - 1) * 512,
+            "step": 512,
+            "firstMismatchFrame": None,
+        },
+        raising=False,
     )
     monkeypatch.setattr(
         showcase_module,
@@ -537,6 +560,10 @@ def test_probe_media_reports_audio_duration_and_unknown_stream_count(
                 "pix_fmt": "yuv420p",
                 "sample_aspect_ratio": "1:1",
                 "r_frame_rate": "30/1",
+                "avg_frame_rate": "30/1",
+                "time_base": "1/15360",
+                "duration_ts": "1266176",
+                "duration": "82.433333333333333333",
                 "nb_read_frames": "2473",
             },
             {
@@ -775,7 +802,7 @@ def test_moon_segments_use_one_identical_source_index_mapping(
     mappings = {
         segment.id: tuple(
             frame.getpixel((0, 0))[0]
-            for frame in showcase_module.build_segment_frames(segment, background_image).frames
+            for frame in showcase_module.iter_segment_frames(segment, background_image)
         )
         for segment in moon_segments
     }
@@ -805,8 +832,9 @@ def test_all_segment_frame_counts_and_moon_mapping_are_exact(
         showcase_module, "compose_frame", lambda background, sprite: sprite.copy()
     )
     built_counts = {
-        segment.id: len(
-            showcase_module.build_segment_frames(segment, background_image).frames
+        segment.id: sum(
+            1
+            for _ in showcase_module.iter_segment_frames(segment, background_image)
         )
         for segment in showcase_plan.segments
     }
@@ -928,22 +956,670 @@ def test_showcase_plan_rejects_a_private_resolved_v9_preview_path(monkeypatch):
     assert background_reads == []
 
 
-def test_showcase_plan_rejects_moon_actions_with_different_frame_durations(
+def test_showcase_plan_rejects_changed_moon_manifest_hash(
     monkeypatch,
 ):
-    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
 
-    def read_one_changed_moon_manifest(path: Path, *args, **kwargs) -> str:
-        encoded = original_read_text(path, *args, **kwargs)
+    def read_one_changed_moon_manifest(path: Path, *args, **kwargs) -> bytes:
+        encoded = original_read_bytes(path, *args, **kwargs)
         if path.name == "pet.json" and "03-cropped-disc-232" in path.parts:
             document = json.loads(encoded)
             durations = document["actions"]["rooftopChestnut"]["frameDurations"]
             durations[0] += 10
             durations[1] -= 10
-            return json.dumps(document)
+            return json.dumps(document).encode("utf-8")
         return encoded
 
-    monkeypatch.setattr(Path, "read_text", read_one_changed_moon_manifest)
+    monkeypatch.setattr(Path, "read_bytes", read_one_changed_moon_manifest)
 
-    with pytest.raises(ValueError, match="identical per-frame durations"):
+    with pytest.raises(ValueError, match="source SHA-256"):
         build_showcase_plan(ROOT, BACKGROUND)
+
+
+def test_showcase_plan_binds_every_approved_input_to_fixed_sha256_inventory(
+    showcase_plan,
+):
+    relative_inventory = {
+        asset.path.relative_to(ROOT).as_posix(): asset.sha256
+        for asset in showcase_plan.source_inventory
+        if asset.path != BACKGROUND
+    }
+
+    assert relative_inventory == {
+        "work/nangongwan-moonlit-rooftop-history/01-cinematic-36f-v2.4.1/pet.json": "a4397d9d4d0caeb338ecbfbae88d4c9ada457c5c50c507d2d77eb7d5fb922964",
+        "work/nangongwan-moonlit-rooftop-history/01-cinematic-36f-v2.4.1/spritesheet.webp": "990d1ee9db3632102e9f07984301519606a9cc3591585e8ef892d0ba975a9d3e",
+        "work/nangongwan-moonlit-rooftop-history/02-anchored-48f-v1/complete-archive/pet.json": "3edd549ff49be95758b531ff15dbdeabee1ce44f0dedb4065fcb8e23e7e10bf3",
+        "work/nangongwan-moonlit-rooftop-history/02-anchored-48f-v1/complete-archive/spritesheet.webp": "d224d16c48beea73516a9eb02e4da4543dfbbd2af7bf96cf10efbf7ff11f0d52",
+        "work/nangongwan-moonlit-rooftop-history/03-persistent-rooftop-revisions/render-history-v2-v9/preview-sequence-v9.json": "ce818923d127ba78facd81f8a2ff6afefcccd37319df3325774a0568154fe0fa",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/01-small-moon-current/pet.json": "c9622eb87d0f5cc3c5ec275e8ef4e017ed639b23e6ce8e31026d822e3f24d131",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/01-small-moon-current/spritesheet.webp": "564793e6c2e090d8e882cc4a829ceccb9bde2ab98b54b9f6126c65cf41fac77e",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/02-full-circle-184/pet.json": "c9622eb87d0f5cc3c5ec275e8ef4e017ed639b23e6ce8e31026d822e3f24d131",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/02-full-circle-184/spritesheet.webp": "117b5bcf84e9dbdc45b5ef13590fe3726667823178b5a603e0e83e527902fa5a",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/03-cropped-disc-232/pet.json": "c9622eb87d0f5cc3c5ec275e8ef4e017ed639b23e6ce8e31026d822e3f24d131",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/03-cropped-disc-232/spritesheet.webp": "6f671f19463dd4f6bf293550ad05c24b6e18c851d98264dd3548b0dc5d5cbb92",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/04-full-frame-moon-surface/pet.json": "c9622eb87d0f5cc3c5ec275e8ef4e017ed639b23e6ce8e31026d822e3f24d131",
+        "work/nangongwan-moonlit-rooftop-history/04-moon-background-variants/04-full-frame-moon-surface/spritesheet.webp": "03393672e282e5bdcca3fea5f9d58928e0775fb42802e1c10b9a11d1d1e15abe",
+        "work/nangongwan-moonlit-rooftop-history/06-standing-chestnut-easter-egg/action.json": "687da2a94210ac5d6907061b5ddd9d39e16d2f51719e311807179eaf01c70d9f",
+        "work/nangongwan-moonlit-rooftop-history/06-standing-chestnut-easter-egg/standing-chestnut-10frames.webp": "9bb9c75b86b82e8903abc8b9099e1be51b5972d72243b6d6c5f10c74a41b275e",
+    }
+    assert next(
+        asset.sha256
+        for asset in showcase_plan.source_inventory
+        if asset.path == BACKGROUND
+    ) == BACKGROUND_SHA256
+
+
+def test_showcase_plan_rejects_changed_source_hash_before_parsing_sources(monkeypatch):
+    target = (
+        ROOT
+        / "work"
+        / "nangongwan-moonlit-rooftop-history"
+        / "04-moon-background-variants"
+        / "01-small-moon-current"
+        / "spritesheet.webp"
+    )
+    original_read_bytes = Path.read_bytes
+    original_loads = render_module.json.loads
+    parse_calls = []
+
+    def changed_bytes(path: Path) -> bytes:
+        encoded = original_read_bytes(path)
+        return encoded + b"tampered" if path == target else encoded
+
+    def record_parse(*args, **kwargs):
+        parse_calls.append(args[0])
+        return original_loads(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", changed_bytes)
+    monkeypatch.setattr(render_module.json, "loads", record_parse)
+
+    with pytest.raises(ValueError, match="source SHA-256"):
+        build_showcase_plan(ROOT, BACKGROUND)
+    assert parse_calls == []
+
+
+def test_validation_rejects_a_source_changed_after_plan_binding(
+    valid_showcase_fixture, monkeypatch
+):
+    plan = valid_showcase_fixture["plan"]
+    target = next(asset.path for asset in plan.source_inventory if asset.role == "atlas")
+    original_read_bytes = Path.read_bytes
+
+    def changed_bytes(path: Path) -> bytes:
+        encoded = original_read_bytes(path)
+        return encoded + b"tampered" if path == target else encoded
+
+    monkeypatch.setattr(Path, "read_bytes", changed_bytes)
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["sourceIntegrity"] is False
+    assert report["details"]["sourceIntegrity"]["mismatches"][0]["path"] == str(
+        target.resolve()
+    )
+
+
+def test_encoded_background_fidelity_checks_every_frame_and_catches_one_frame_overlay(
+    tmp_path,
+):
+    with Image.open(BACKGROUND) as source:
+        background = source.convert("RGB")
+    background_path = tmp_path / "background.png"
+    background.save(background_path)
+    clean = tmp_path / "clean.mp4"
+    altered = tmp_path / "altered.mp4"
+    write_silent_video(
+        (background.copy() for _ in range(3)), clean, expected_frames=3
+    )
+    altered_frames = [background.copy() for _ in range(3)]
+    altered_frames[1].paste((255, 0, 255), (40, 40, 300, 220))
+    write_silent_video(iter(altered_frames), altered, expected_frames=3)
+
+    clean_result = showcase_module._encoded_background_fidelity(
+        clean, background_path, {"totalFrames": 3}
+    )
+    altered_result = showcase_module._encoded_background_fidelity(
+        altered, background_path, {"totalFrames": 3}
+    )
+
+    assert clean_result["passed"] is True
+    assert clean_result["framesChecked"] == 3
+    assert clean_result["regionFrameCounts"] == {
+        "top": 3,
+        "bottom": 3,
+        "left": 3,
+        "right": 3,
+    }
+    assert altered_result["passed"] is False
+    assert altered_result["framesChecked"] == 3
+    assert altered_result["firstFailedFrame"] == 1
+
+
+def test_center_validation_rejects_real_adjacent_frame_repetition(
+    showcase_plan, monkeypatch
+):
+    previous = None
+    repeated_frame = None
+    repeated_index = None
+    for index, current in enumerate(
+        showcase_module._iter_expected_center_frames(
+            showcase_plan, showcase_plan.background_source
+        )
+    ):
+        if (
+            previous is not None
+            and current.tobytes() != previous.tobytes()
+            and showcase_module._center_frame_psnr(current, previous) >= 29.0
+            and showcase_module._frame_rms_difference(current, previous) > 3.0
+        ):
+            repeated_index = index
+            repeated_frame = previous.copy()
+            break
+        previous = current
+    assert repeated_index is not None and repeated_frame is not None
+
+    def actual_frames(master):
+        for index, frame in enumerate(
+            showcase_module._iter_expected_center_frames(
+                showcase_plan, showcase_plan.background_source
+            )
+        ):
+            yield repeated_frame.copy() if index == repeated_index else frame
+
+    monkeypatch.setattr(showcase_module, "_iter_decoded_center_frames", actual_frames)
+
+    result = REAL_ENCODED_CENTER_SEQUENCE(
+        Path("synthetic.mp4"), showcase_plan, showcase_plan.background_source
+    )
+
+    assert result["passed"] is False
+    assert result["firstFailedFrame"] == repeated_index
+    assert result["contentMismatchFrameCount"] >= 1
+
+
+def test_center_validation_rejects_h264_encoded_adjacent_frame_repetition(
+    tmp_path, showcase_plan
+):
+    expected_pair = None
+    previous = None
+    for current in showcase_module._iter_expected_center_frames(
+        showcase_plan, showcase_plan.background_source
+    ):
+        if (
+            previous is not None
+            and current.tobytes() != previous.tobytes()
+            and showcase_module._center_frame_psnr(current, previous) >= 29.0
+            and showcase_module._frame_rms_difference(current, previous) > 3.0
+        ):
+            expected_pair = (previous.copy(), current.copy())
+            break
+        previous = current
+    assert expected_pair is not None
+    with Image.open(showcase_plan.background_source) as source:
+        background = source.convert("RGB")
+
+    def full_frame(center):
+        frame = background.copy()
+        frame.paste(center, (704, 346))
+        return frame
+
+    clean = tmp_path / "clean-center.mp4"
+    repeated = tmp_path / "repeated-center.mp4"
+    write_silent_video(
+        (full_frame(center) for center in expected_pair),
+        clean,
+        expected_frames=2,
+    )
+    write_silent_video(
+        (full_frame(expected_pair[0]) for _ in range(2)),
+        repeated,
+        expected_frames=2,
+    )
+
+    clean_result = showcase_module._compare_center_sequences(
+        iter(expected_pair),
+        showcase_module._iter_decoded_center_frames(clean),
+        expected_frames=2,
+    )
+    repeated_result = showcase_module._compare_center_sequences(
+        iter(expected_pair),
+        showcase_module._iter_decoded_center_frames(repeated),
+        expected_frames=2,
+    )
+
+    assert clean_result["passed"] is True
+    assert repeated_result["passed"] is False
+    assert repeated_result["firstFailedFrame"] == 1
+    assert repeated_result["contentMismatchFrameCount"] == 1
+
+
+class _SinglePassFrames:
+    def __init__(self, frames, *, failure: Exception | None = None):
+        self._frames = iter(frames)
+        self._failure = failure
+        self.iterated = False
+        self.closed = False
+
+    def __iter__(self):
+        if self.iterated:
+            raise AssertionError("frame source was iterated more than once")
+        self.iterated = True
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._frames)
+        except StopIteration:
+            if self._failure is not None:
+                failure, self._failure = self._failure, None
+                raise failure
+            raise
+
+    def close(self):
+        self.closed = True
+
+
+def test_write_silent_video_accepts_a_single_pass_iterator_with_explicit_count(
+    tmp_path,
+):
+    source = _SinglePassFrames(
+        (
+            Image.new("RGB", (1600, 900), (20, 40, 80)),
+            Image.new("RGB", (1600, 900), (80, 40, 20)),
+        )
+    )
+    output = tmp_path / "single-pass.mp4"
+
+    write_silent_video(source, output, expected_frames=2)
+
+    assert source.iterated is True
+    assert source.closed is True
+    assert probe_media(output, count_frames=True).video.nb_read_frames == 2
+
+
+@pytest.mark.parametrize("damage", ("short", "long", "failure"))
+def test_write_silent_video_enforces_count_and_cleans_failed_stream(
+    tmp_path, damage
+):
+    frame = Image.new("RGB", (1600, 900), (20, 40, 80))
+    if damage == "short":
+        source = _SinglePassFrames((frame,))
+    elif damage == "long":
+        source = _SinglePassFrames((frame, frame, frame))
+    else:
+        source = _SinglePassFrames((frame,), failure=RuntimeError("producer failed"))
+    output = tmp_path / f"{damage}.mp4"
+    output.write_bytes(b"stale")
+
+    with pytest.raises((ValueError, RuntimeError)):
+        write_silent_video(source, output, expected_frames=2)
+
+    assert source.closed is True
+    assert not output.exists()
+
+
+def test_failed_rebuild_invalidates_acceptance_but_preserves_previous_publication(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    review = output / "review"
+    review.mkdir(parents=True)
+    (output / "nangongwan-action-showcase-v2-1600x900.mp4").write_bytes(b"old master")
+    (output / "timeline.json").write_text("old timeline", encoding="utf-8")
+    (output / "validation-report.json").write_text(
+        json.dumps({"allPassed": True}), encoding="utf-8"
+    )
+    (review / "contact-sheet.jpg").write_bytes(b"old review")
+
+    def fail_build(root, background, staging):
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / "mixed-new-file").write_bytes(b"partial")
+        raise RuntimeError("interrupted build")
+
+    monkeypatch.setattr(render_module, "_build_showcase_directory", fail_build, raising=False)
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        build_showcase(tmp_path, BACKGROUND)
+
+    assert (output / "nangongwan-action-showcase-v2-1600x900.mp4").read_bytes() == b"old master"
+    assert (output / "timeline.json").read_text(encoding="utf-8") == "old timeline"
+    assert not (output / "validation-report.json").exists()
+    assert not review.exists()
+    assert not tuple((tmp_path / "work").glob(".nangongwan-action-showcase-v2-staging-*"))
+
+
+def test_failed_staging_validation_never_publishes_mixed_outputs(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    output.mkdir(parents=True)
+    (output / "nangongwan-action-showcase-v2-1600x900.mp4").write_bytes(b"old master")
+    (output / "validation-report.json").write_text(
+        json.dumps({"allPassed": True}), encoding="utf-8"
+    )
+
+    def staged_build(root, background, staging):
+        (staging / "nangongwan-action-showcase-v2-1600x900.mp4").write_bytes(
+            b"new unapproved master"
+        )
+        return staging / "nangongwan-action-showcase-v2-1600x900.mp4"
+
+    def failed_validation(*args, **kwargs):
+        staging = kwargs["output_directory"]
+        (staging / "validation-report.json").write_text(
+            json.dumps({"allPassed": False}), encoding="utf-8"
+        )
+        raise ValueError("staging validation failed")
+
+    monkeypatch.setattr(render_module, "_build_showcase_directory", staged_build)
+    monkeypatch.setattr(render_module, "_validate_final_showcase", failed_validation)
+
+    with pytest.raises(ValueError, match="staging validation failed"):
+        build_showcase(tmp_path, BACKGROUND)
+
+    assert (output / "nangongwan-action-showcase-v2-1600x900.mp4").read_bytes() == b"old master"
+    assert not (output / "validation-report.json").exists()
+    assert b"new unapproved" not in b"".join(
+        path.read_bytes() for path in output.rglob("*") if path.is_file()
+    )
+
+
+def _write_synthetic_publishable_staging(staging: Path) -> None:
+    master = staging / "nangongwan-action-showcase-v2-1600x900.mp4"
+    background = staging / "background.png"
+    timeline = staging / "timeline.json"
+    clips = staging / "clips"
+    review = staging / "review"
+    clips.mkdir()
+    review.mkdir()
+    master.write_bytes(b"new")
+    background.write_bytes(b"background")
+    segments = [{"id": f"segment-{index:02d}"} for index in range(1, 16)]
+    timeline.write_text(json.dumps({"segments": segments}), encoding="utf-8")
+    for index, segment in enumerate(segments, start=1):
+        (clips / f"{index:02d}-{segment['id']}.mp4").write_bytes(b"clip")
+    for index in range(45):
+        (review / f"frame-{index:02d}.png").write_bytes(b"frame")
+    contact_sheet = review / "contact-sheet.jpg"
+    contact_sheet.write_bytes(b"sheet")
+    report = {
+        "allPassed": True,
+        "artifactSha256": {
+            "master": sha256(master.read_bytes()).hexdigest(),
+            "background": sha256(background.read_bytes()).hexdigest(),
+            "timeline": sha256(timeline.read_bytes()).hexdigest(),
+        },
+        "review": {
+            "frameCount": 45,
+            "contactSheetSha256": sha256(contact_sheet.read_bytes()).hexdigest(),
+        },
+    }
+    (staging / "validation-report.json").write_text(
+        json.dumps(report), encoding="utf-8"
+    )
+
+
+def test_atomic_directory_publication_restores_previous_output_on_rename_failure(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "published"
+    staging = tmp_path / "staging"
+    output.mkdir()
+    staging.mkdir()
+    (output / "master.mp4").write_bytes(b"old")
+    _write_synthetic_publishable_staging(staging)
+    original_replace = Path.replace
+
+    def fail_staging_publish(path: Path, target: Path):
+        if path == staging and target == output:
+            raise OSError("simulated publish failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_staging_publish)
+
+    with pytest.raises(OSError, match="publish failure"):
+        render_module._publish_staged_directory(staging, output)
+
+    assert (output / "master.mp4").read_bytes() == b"old"
+    assert not (output / "validation-report.json").exists()
+    assert not tuple(tmp_path.glob(".published-backup-*"))
+
+
+def test_atomic_directory_publication_replaces_the_complete_output_set(tmp_path):
+    output = tmp_path / "published"
+    staging = tmp_path / "staging"
+    output.mkdir()
+    staging.mkdir()
+    (output / "old-only").write_bytes(b"old")
+    _write_synthetic_publishable_staging(staging)
+
+    render_module._publish_staged_directory(staging, output)
+
+    assert not (output / "old-only").exists()
+    assert (
+        output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    ).read_bytes() == b"new"
+    assert json.loads((output / "validation-report.json").read_text(encoding="utf-8"))[
+        "allPassed"
+    ] is True
+    assert not tuple(tmp_path.glob(".published-backup-*"))
+
+
+def test_successful_publication_is_not_reversed_by_backup_cleanup_failure(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "published"
+    staging = tmp_path / "staging"
+    output.mkdir()
+    staging.mkdir()
+    (output / "old-only").write_bytes(b"old")
+    _write_synthetic_publishable_staging(staging)
+    original_rmtree = render_module.shutil.rmtree
+
+    def fail_only_backup_cleanup(path: Path, *args, **kwargs):
+        if path.name.startswith(".published-backup-"):
+            raise PermissionError("simulated locked old publication")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(render_module.shutil, "rmtree", fail_only_backup_cleanup)
+
+    render_module._publish_staged_directory(staging, output)
+
+    assert not (output / "old-only").exists()
+    assert (
+        output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    ).read_bytes() == b"new"
+
+
+def test_validate_only_uses_built_background_without_external_temp_source(
+    existing_validation_output,
+):
+    master = render_module._validate_existing(
+        existing_validation_output["root"], background_source=None
+    )
+
+    assert master == (
+        existing_validation_output["output"]
+        / "nangongwan-action-showcase-v2-1600x900.mp4"
+    )
+    assert render_module._parser().parse_args(["--validate-only"]).background is None
+
+
+def test_validation_rejects_nonuniform_decoded_video_pts(
+    valid_showcase_fixture, monkeypatch
+):
+    monkeypatch.setattr(
+        showcase_module,
+        "_probe_video_timestamps",
+        lambda path, expected_frames: {
+            "passed": False,
+            "frameCount": expected_frames,
+            "firstPts": 0,
+            "step": 512,
+            "firstMismatchFrame": 200,
+        },
+        raising=False,
+    )
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["videoEncoding"] is False
+    assert report["details"]["video"]["timestamps"]["firstMismatchFrame"] == 200
+
+
+def test_probe_media_reports_exact_video_time_base_and_duration(tmp_path, monkeypatch):
+    document = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "width": 1600,
+                "height": 900,
+                "codec_name": "h264",
+                "profile": "High",
+                "pix_fmt": "yuv420p",
+                "sample_aspect_ratio": "1:1",
+                "r_frame_rate": "30/1",
+                "avg_frame_rate": "30/1",
+                "time_base": "1/15360",
+                "duration_ts": "1266176",
+                "duration": "82.433333333333333333",
+                "nb_read_frames": "2473",
+            }
+        ]
+    }
+    monkeypatch.setattr(showcase_module, "_probe_document", lambda *args, **kwargs: document)
+
+    probe = probe_media(tmp_path / "master.mp4", count_frames=True)
+
+    assert probe.video.time_base == Fraction(1, 15_360)
+    assert probe.video.duration == Fraction(2473, 30)
+    assert probe.video.average_frame_rate == Fraction(30, 1)
+
+
+def test_retained_moonlit_clis_default_to_archive_and_never_write_it():
+    import tools.build_nangongwan_moonlit_chestnut as builder
+    import tools.preview_nangongwan_moonlit_chestnut as previewer
+
+    archive = ROOT / "tools" / "archives" / "nangongwan-moonlit-chestnut-anchored-v1"
+    assert previewer.ATLAS_PATH == archive / "spritesheet.webp"
+    assert previewer.MANIFEST_PATH == archive / "pet.json"
+    assert builder.ATLAS_PATH == archive / "spritesheet.webp"
+    assert builder.MANIFEST_PATH == archive / "pet.json"
+    assert builder.OUTPUT_ATLAS_PATH.is_relative_to(ROOT / "work")
+    assert builder.OUTPUT_ATLAS_PATH != builder.ATLAS_PATH
+    assert "archived 48-frame" in previewer._parser().format_help().lower()
+    assert "archived 48-frame" in builder._parser().format_help().lower()
+
+
+@pytest.mark.parametrize("protected_kind", ("archive", "live"))
+def test_retained_moonlit_clis_reject_any_output_inside_protected_trees(
+    tmp_path, protected_kind
+):
+    import tools.build_nangongwan_moonlit_chestnut as builder
+    import tools.preview_nangongwan_moonlit_chestnut as previewer
+
+    protected_root = (
+        builder.ARCHIVE_ROOT
+        if protected_kind == "archive"
+        else builder.LIVE_PET_ROOT
+    )
+    output_file = protected_root / "nested" / "candidate.webp"
+    output_directory = protected_root / "nested" / "preview"
+
+    with pytest.raises(ValueError, match="protected archive or live pet tree"):
+        builder._validate_output_location(output_file)
+    with pytest.raises(ValueError, match="protected archive or live pet tree"):
+        previewer._validate_output_location(output_directory)
+
+    safe_file = tmp_path / "candidate.webp"
+    safe_directory = tmp_path / "preview"
+    builder._validate_output_location(safe_file)
+    previewer._validate_output_location(safe_directory)
+
+
+def test_live_rooftop_user_text_matches_final_duration_and_resident_count():
+    manifest = json.loads(
+        (
+            ROOT
+            / "src"
+            / "shiyi_desktop_pet"
+            / "resources"
+            / "pets"
+            / "nangongwan"
+            / "pet.json"
+        ).read_text(encoding="utf-8")
+    )
+    menu_source = (ROOT / "src" / "shiyi_desktop_pet" / "menu_controller.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "二十五至六十秒" in manifest["description"]
+    assert "九种坐姿小动作" in manifest["description"]
+    assert "25–60 秒的常驻状态" in menu_source
+
+
+def test_making_of_concat_handles_an_apostrophe_in_the_output_path(tmp_path):
+    import tools.nangongwan_rooftop_making_of as making_of
+
+    directory = tmp_path / "reviewer's-cut"
+    first = directory / "first.mp4"
+    second = directory / "second.mp4"
+    joined = directory / "joined.mp4"
+    write_silent_video(
+        iter((Image.new("RGB", (1600, 900), (20, 40, 80)),)),
+        first,
+        expected_frames=1,
+    )
+    write_silent_video(
+        iter((Image.new("RGB", (1600, 900), (80, 40, 20)),)),
+        second,
+        expected_frames=1,
+    )
+
+    making_of.concat_shots((first, second), joined)
+
+    assert probe_media(joined, count_frames=True).video.nb_read_frames == 2
+    assert not joined.with_suffix(".concat.txt").exists()
+
+
+def test_making_of_render_shot_directly_covers_an_action_source(
+    tmp_path, monkeypatch
+):
+    import tools.nangongwan_rooftop_making_of as making_of
+    from tools.nangongwan_rooftop_making_of import ActionSource, ShotSpec
+
+    source = ActionSource(
+        tmp_path / "atlas.webp", tmp_path / "pet.json", "directAction"
+    )
+    shot = ShotSpec("direct", "action", 1_000, source)
+    output = tmp_path / "direct.mp4"
+    calls = []
+
+    monkeypatch.setattr(
+        making_of,
+        "read_action",
+        lambda action: TimedFrames(
+            (Image.new("RGBA", (192, 208), (20, 40, 80, 255)),), (1_000,)
+        ),
+    )
+
+    def fake_action_video(frames, path):
+        calls.append((frames.duration_ms, path))
+        path.write_bytes(b"action")
+
+    def fake_ffmpeg(command):
+        Path(command[-1]).write_bytes(b"rendered")
+
+    monkeypatch.setattr(making_of, "write_action_mp4", fake_action_video)
+    monkeypatch.setattr(making_of, "run_ffmpeg", fake_ffmpeg)
+
+    making_of.render_shot(shot, output, frame_count=30)
+
+    generated = output.with_suffix(".action-source.mp4")
+    assert calls == [(1_000, generated)]
+    assert output.read_bytes() == b"rendered"
+    assert not generated.exists()
+    assert not output.with_suffix(".background.png").exists()
