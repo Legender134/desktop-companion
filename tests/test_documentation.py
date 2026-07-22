@@ -108,3 +108,21 @@ def test_legacy_v2_schema_remains_available(repo_root: Path):
         )
     )
     assert schema["properties"]["spriteVersionNumber"]["const"] == 2
+
+
+def test_v246_rooftop_timing_documentation_matches_resource_contract(repo_root: Path):
+    expected = "最短 25 秒、渐变 20 秒、最长 60 秒"
+    manual_qa = (repo_root / "docs" / "manual-qa-v2.4.6.md").read_text(
+        encoding="utf-8"
+    )
+    changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
+    format_guide = (repo_root / "docs" / "pet-pack-format-v3.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert expected in manual_qa
+    assert "最短驻留由 20 秒提高到 25 秒" in changelog
+    assert '"minDurationMs": 25000' in format_guide
+    assert '"rampDurationMs": 20000' in format_guide
+    assert '"maxDurationMs": 60000' in format_guide
+    assert "30–90 秒" not in format_guide

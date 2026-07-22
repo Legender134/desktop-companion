@@ -8,6 +8,7 @@ import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from fractions import Fraction
 from hashlib import sha256
 from pathlib import Path
@@ -964,6 +965,17 @@ def verify_manual_review_binding(
     try:
         if not isinstance(manual_review, dict):
             return False
+        reviewed_at = manual_review.get("reviewedAt")
+        if not isinstance(reviewed_at, str):
+            return False
+        reviewed_timestamp = datetime.fromisoformat(reviewed_at)
+        audit_metadata_valid = bool(
+            manual_review.get("schemaVersion") == 2
+            and manual_review.get("method") == "full-playback-1x"
+            and manual_review.get("scope") == "00:00-04:40"
+            and reviewed_timestamp.tzinfo is not None
+            and reviewed_timestamp.utcoffset() is not None
+        )
         manifests_valid = _verify_review_manifest(
             required_manifest,
             master,
@@ -979,6 +991,7 @@ def verify_manual_review_binding(
         )
         return bool(
             manifests_valid
+            and audit_metadata_valid
             and manual_review
             and manual_review.get("passed") is True
             and manual_review.get("artifactBinding")

@@ -11,6 +11,7 @@ import pytest
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QImage
 
+import shiyi_desktop_pet.app as app_module
 from shiyi_desktop_pet.app import (
     DesktopPetApplication,
     HoverSnapshot,
@@ -26,7 +27,7 @@ from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.geometry import Point, Rect, Size
 from shiyi_desktop_pet.logging_setup import configure_logging, install_exception_hook
 from shiyi_desktop_pet.menu_controller import MenuCommand
-from shiyi_desktop_pet.models import ActionId
+from shiyi_desktop_pet.models import ActionId, AnimationSpec
 from shiyi_desktop_pet.pet_registry import PetRegistry
 from shiyi_desktop_pet.pet_window import PetWindow
 from shiyi_desktop_pet.resource_locator import resource_root
@@ -1150,6 +1151,63 @@ def test_persistent_state_enters_cycles_without_repeating_and_forces_exit(qapp):
     controller._advance_manual(now[0])
     assert controller.active_state is None
     assert controller.current_action == controller.catalog.idle_action
+    controller.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected_ms"),
+    (
+        (AnimationSpec(row=0, frame_count=3, frame_ms=100, loops=2), 600),
+        (
+            AnimationSpec(
+                row=0,
+                frame_count=3,
+                frame_ms=50,
+                loops=3,
+                hold_ms=40,
+                frame_durations=(50, 100, 150),
+            ),
+            940,
+        ),
+    ),
+)
+def test_configured_action_duration_includes_frames_repeats_and_hold(
+    spec, expected_ms
+):
+    assert app_module._configured_action_duration_ms(spec) == expected_ms
+
+
+def test_persistent_state_exits_before_starting_resident_action_that_would_cross_maximum(
+    qapp,
+):
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=replace(AppSettings(), gaze_enabled=False),
+        catalog_factory=_state_catalog,
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [0]
+    controller._now_ms = lambda: now[0]
+
+    controller.trigger_action("rooftopEnter")
+    now[0] = 300
+    controller._advance_manual(now[0])
+    controller._active_state = replace(
+        controller.active_state,
+        max_duration_ms=60_000,
+        exit_chance_after_min=0,
+        exit_chance_after_ramp=0,
+    )
+
+    controller.timeline.started_ms = 59_850
+    now[0] = 60_150
+    controller._advance_manual(now[0])
+
+    assert now[0] - controller._state_active_started_ms == 59_850
+    assert controller._state_phase == "exit"
+    assert controller.current_action == "rooftopExit"
     controller.shutdown()
 
 

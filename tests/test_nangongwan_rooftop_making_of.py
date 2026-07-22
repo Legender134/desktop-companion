@@ -475,8 +475,11 @@ def test_manual_review_is_bound_transitively_to_exact_artifacts(tmp_path):
         artifacts=(dense_artifact,),
     )
     manual = {
+        "schemaVersion": 2,
         "passed": True,
-        "method": "inspected exact required frames and every dense proxy page",
+        "reviewedAt": "2026-07-22T23:40:00+08:00",
+        "method": "full-playback-1x",
+        "scope": "00:00-04:40",
         "findings": [],
         "artifactBinding": making_of.build_review_binding(
             master, timeline, ass, required_manifest, dense_manifest
@@ -498,6 +501,76 @@ def test_manual_review_is_bound_transitively_to_exact_artifacts(tmp_path):
         ass=ass,
         artifacts=(dense_artifact,),
     )
+    assert not making_of.verify_manual_review_binding(
+        manual, master, timeline, ass, required_manifest, dense_manifest
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("schemaVersion", None),
+        ("method", None),
+        ("scope", None),
+        ("reviewedAt", None),
+        ("schemaVersion", 1),
+        ("method", "dense-proxy-only"),
+        ("scope", "312 proxy timestamps"),
+        ("reviewedAt", "2026-07-22T23:40:00"),
+        ("reviewedAt", "not-a-timestamp"),
+    ),
+)
+def test_manual_review_rejects_missing_or_invalid_release_audit_metadata(
+    tmp_path, field, value
+):
+    master = tmp_path / "master.mp4"
+    timeline = tmp_path / "master-v1-timeline.json"
+    ass = tmp_path / "master-v1.ass"
+    master.write_bytes(b"master")
+    timeline.write_text("{}", encoding="utf-8")
+    ass.write_text("ass", encoding="utf-8")
+    required_dir = tmp_path / "review-frames"
+    dense_dir = tmp_path / "dense-review-proxy"
+    required_dir.mkdir()
+    dense_dir.mkdir()
+    required_artifact = required_dir / "frame-000000.jpg"
+    dense_artifact = dense_dir / "proxy-000000.jpg"
+    required_artifact.write_bytes(b"required")
+    dense_artifact.write_bytes(b"dense")
+    required_manifest = required_dir / "manifest.json"
+    dense_manifest = dense_dir / "manifest.json"
+    making_of.write_review_manifest(
+        required_manifest,
+        kind="required-frames",
+        master=master,
+        timeline=timeline,
+        ass=ass,
+        artifacts=(required_artifact,),
+    )
+    making_of.write_review_manifest(
+        dense_manifest,
+        kind="dense-proxy",
+        master=master,
+        timeline=timeline,
+        ass=ass,
+        artifacts=(dense_artifact,),
+    )
+    manual = {
+        "schemaVersion": 2,
+        "passed": True,
+        "reviewedAt": "2026-07-22T23:40:00+08:00",
+        "method": "full-playback-1x",
+        "scope": "00:00-04:40",
+        "findings": [],
+        "artifactBinding": making_of.build_review_binding(
+            master, timeline, ass, required_manifest, dense_manifest
+        ),
+    }
+    if value is None:
+        manual.pop(field)
+    else:
+        manual[field] = value
+
     assert not making_of.verify_manual_review_binding(
         manual, master, timeline, ass, required_manifest, dense_manifest
     )

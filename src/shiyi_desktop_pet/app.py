@@ -35,6 +35,7 @@ from .models import (
     ActionId,
     ActionKey,
     ActionRole,
+    AnimationSpec,
     FrameAsset,
     PetActionDefinition,
     PetStateDefinition,
@@ -57,6 +58,16 @@ from .wander import WanderPlanner
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _configured_action_duration_ms(spec: AnimationSpec) -> int:
+    """Return the configured duration of one finite action playback."""
+
+    if spec.loops is None:
+        raise ValueError("finite action duration requires a repeat count")
+    return spec.cycle_ms * spec.loops + spec.hold_ms
+
+
 _RANDOM_ACTIONS = (
     ActionId.WAVE,
     ActionId.JUMP,
@@ -631,6 +642,22 @@ class DesktopPetApplication:
             )
         return chance > 0 and self._rng.randint(1, 100) <= chance
 
+    def _play_next_state_resident_or_exit(
+        self, state: PetStateDefinition, now_ms: int
+    ) -> None:
+        candidate = self._choose_state_action(state)
+        started = self._state_active_started_ms
+        elapsed = max(0, now_ms - started) if started is not None else 0
+        candidate_duration = _configured_action_duration_ms(
+            self.catalog.spec(candidate)
+        )
+        if elapsed + candidate_duration > state.max_duration_ms:
+            self._state_phase = "exit"
+            self._play_state_action(state.exit_action)
+            return
+        self._state_phase = "resident"
+        self._play_state_action(candidate)
+
     def _advance_active_state(self, now_ms: int) -> None:
         state = self._active_state
         action = self.behavior.current_action
@@ -649,15 +676,14 @@ class DesktopPetApplication:
                 self._state_phase = "exit"
                 self._play_state_action(state.exit_action)
             else:
-                self._state_phase = "resident"
-                self._play_state_action(self._choose_state_action(state))
+                self._play_next_state_resident_or_exit(state, now_ms)
             return
         if self._state_phase == "resident":
             if self._state_exit_requested or self._state_should_exit(state, now_ms):
                 self._state_phase = "exit"
                 self._play_state_action(state.exit_action)
             else:
-                self._play_state_action(self._choose_state_action(state))
+                self._play_next_state_resident_or_exit(state, now_ms)
             return
         if self._state_phase == "exit":
             self._cancel_active_state()
