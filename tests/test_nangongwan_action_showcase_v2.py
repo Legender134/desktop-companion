@@ -36,9 +36,10 @@ def test_blink_is_exactly_fifteen_frames_and_returns_to_open_pose(idle_frames):
     blink = showcase_module.make_blink(idle_frames)
 
     assert len(blink.frames) == 15
-    assert blink.frames[0].tobytes() == idle_frames.frames[0].tobytes()
-    assert blink.frames[-1].tobytes() == idle_frames.frames[0].tobytes()
-    assert blink.frames[6].tobytes() != blink.frames[0].tobytes()
+    assert [frame.tobytes() for frame in blink.frames] == [
+        idle_frames.frames[index].tobytes()
+        for index in (0, 0, 0, 1, 2, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0)
+    ]
 
 
 def test_compose_frame_changes_only_the_centered_sprite_rectangle():
@@ -67,6 +68,68 @@ def test_resample_action_uses_cumulative_duration_midpoints_and_endpoint_frames(
     resampled = showcase_module.resample_action(timed, 5)
 
     assert [frame.getpixel((0, 0))[0] for frame in resampled.frames] == [10, 30, 30, 30, 30]
+
+
+@pytest.mark.parametrize(
+    ("timed", "output_frames"),
+    (
+        (TimedFrames((Image.new("RGBA", (192, 208)),), (100,)), 0),
+        (TimedFrames((Image.new("RGBA", (192, 208)),), (100,)), -1),
+        (TimedFrames((), ()), 1),
+        (TimedFrames((Image.new("RGBA", (192, 208)),), ()), 1),
+        (TimedFrames((Image.new("RGBA", (191, 208)),), (100,)), 1),
+    ),
+)
+def test_resample_action_rejects_invalid_output_and_native_frame_inputs(
+    timed, output_frames
+):
+    with pytest.raises(ValueError):
+        showcase_module.resample_action(timed, output_frames)
+
+
+def test_moon_segments_use_one_identical_source_index_mapping(
+    monkeypatch, showcase_plan, background_image
+):
+    durations = (200,) * 43 + (390,)
+    synthetic = TimedFrames(
+        tuple(
+            Image.new("RGBA", (192, 208), (index, 0, 0, 255))
+            for index in range(len(durations))
+        ),
+        durations,
+    )
+    monkeypatch.setattr(showcase_module, "read_action", lambda source: synthetic)
+    monkeypatch.setattr(showcase_module, "compose_frame", lambda background, sprite: sprite)
+    moon_segments = tuple(
+        segment
+        for segment in showcase_plan.segments
+        if segment.id in {"moon-184", "moon-232", "moon-full"}
+    )
+
+    mappings = {
+        segment.id: tuple(
+            frame.getpixel((0, 0))[0]
+            for frame in showcase_module.build_segment_frames(segment, background_image).frames
+        )
+        for segment in moon_segments
+    }
+    expected = []
+    cumulative = 0
+    for index, duration in enumerate(durations):
+        cumulative += duration
+        expected.append(cumulative)
+    expected_mapping = tuple(
+        next(
+            source_index
+            for source_index, source_end in enumerate(expected)
+            if source_end * 540 > (2 * output_index + 1) * 8_990
+        )
+        for output_index in range(270)
+    )
+    expected_mapping = (0, *expected_mapping[1:-1], len(durations) - 1)
+
+    assert mappings["moon-184"] == expected_mapping
+    assert mappings["moon-184"] == mappings["moon-232"] == mappings["moon-full"]
 
 
 def test_all_segment_frame_counts_and_moon_mapping_are_exact(
