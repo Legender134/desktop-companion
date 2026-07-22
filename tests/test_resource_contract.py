@@ -135,11 +135,11 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
             {"action": "rooftopCranes", "weight": 7},
         ],
         "exitAction": "rooftopExit",
-        "minDurationMs": 30000,
-        "rampDurationMs": 30000,
-        "maxDurationMs": 90000,
-        "exitChanceAfterMin": 8,
-        "exitChanceAfterRamp": 22,
+        "minDurationMs": 25000,
+        "rampDurationMs": 20000,
+        "maxDurationMs": 60000,
+        "exitChanceAfterMin": 12,
+        "exitChanceAfterRamp": 30,
     }
 
     standing_cake = manifest["actions"]["tasteCake"]
