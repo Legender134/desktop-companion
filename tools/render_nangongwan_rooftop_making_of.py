@@ -19,12 +19,16 @@ from tools.nangongwan_rooftop_making_of import (
     VideoPlan,
     burn_ass_and_add_silence,
     concat_shots,
+    extract_dense_review_proxy,
+    extract_review_frames,
     frame_milliseconds,
     read_action,
     render_shot,
+    validate_master,
     write_action_mp4,
     write_ass,
     write_timeline_json,
+    write_validation_report,
 )
 
 
@@ -253,7 +257,7 @@ def _sources(root: Path) -> tuple[dict[str, ActionSource], dict[str, Path], dict
     stills = {
         "cinematic_sheet": output / "intermediates" / "stills" / "cinematic-36-contact-sheet.png",
         "anchored_compare": history / "02-anchored-48f-v1" / "complete-archive" / "audit-48.png",
-        "v9_grid": render_history / "audit-166-transparent-v9.png",
+        "v9_grid": render_history / "desktop-background-qa-v5.png",
         "moon_compare": output / "intermediates" / "stills" / "moon-variants-three-panel.png",
     }
     return action_sources, videos, stills
@@ -318,7 +322,7 @@ def build_shots(root: Path) -> tuple[ShotSpec, ...]:
         ShotSpec("v9-title", "card", 3_000, None, "V9：小月亮与九种居民动作", "月色缩小后，角色和屋檐仍是画面的主角。"),
         ShotSpec("v9-sequence", "video", 30_680, videos["v9"], "V9 全动作序列", "进入、九种居民动作与离开，按制作顺序完整展示。"),
         ShotSpec("v9-replay", "video", 30_680, videos["v9"], "V9 标注回放", "逐段标注动作名，方便核对节奏与画面细节。", True),
-        ShotSpec("v9-grid", "still", 14_000, stills["v9_grid"], "九种居民动作一览", "静坐、望月、含栗、欲眠、拂袖、回眸、拢发、触环、白鹤掠月。"),
+        ShotSpec("v9-grid", "still", 14_000, stills["v9_grid"], "桌面背景适配抽查", "静坐、望月、含栗和清风，在 Windows、浅色与深色桌面上保持清晰。"),
         ShotSpec("v9-random", "card", 8_640, None, "实际运行并不按剧本", "实际运行时，九种动作会按权重随机出现；演示视频为方便观看而依次播放。"),
         ShotSpec("moon-title", "card", 3_000, None, "三种新月景", "同一段屋檐含栗动作，只替换月亮背景。"),
         ShotSpec("moon-184", "video", 8_990, videos["moon_184"], "满圆月 184", "第一种月景：月面完整，角色动作保持不变。"),
@@ -465,12 +469,46 @@ def build_master(root: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render the Nangong Wan making-of review master.")
-    parser.add_argument("--build-all", action="store_true", help="render all actions, shots, and the master")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--build-all", action="store_true", help="render all actions, shots, and the master")
+    mode.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate the existing master and generate visual-review artifacts",
+    )
     arguments = parser.parse_args()
-    if not arguments.build_all:
-        parser.error("--build-all is required")
     root = Path(__file__).resolve().parents[1]
-    print(build_master(root))
+    if arguments.build_all:
+        print(build_master(root))
+        return
+    output = root / "work" / "nangongwan-rooftop-making-of-video"
+    master = output / "master-v1-no-voice-1920x1080.mp4"
+    timeline = output / "master-v1-timeline.json"
+    review_frames, contact_sheet = extract_review_frames(master, output / "review-frames")
+    proxy_frames, proxy_pages = extract_dense_review_proxy(
+        master, timeline, output / "dense-review-proxy"
+    )
+    automated = validate_master(master, build_video_plan(root))
+    automated["reviewArtifacts"] = {
+        "requiredFrameCount": len(review_frames),
+        "contactSheet": str(contact_sheet),
+        "denseProxyFrameCount": len(proxy_frames),
+        "denseProxyPages": [str(path) for path in proxy_pages],
+    }
+    manual_path = output / "manual-review.json"
+    manual_review = (
+        json.loads(manual_path.read_text(encoding="utf-8"))
+        if manual_path.exists()
+        else None
+    )
+    report_path = output / "validation-report.json"
+    report = write_validation_report(
+        automated, report_path, manual_review=manual_review
+    )
+    print(report_path)
+    print(json.dumps({"allPassed": report["allPassed"], "checks": report["checks"]}))
+    if not report["allPassed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

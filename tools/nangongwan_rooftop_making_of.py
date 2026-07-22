@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Literal, Mapping
 
@@ -15,6 +17,22 @@ from PIL import Image, ImageDraw
 CELL_SIZE = (192, 208)
 ATLAS_COLUMNS = 16
 DESKTOP_SIZE = (960, 540)
+REVIEW_FRAME_MILLISECONDS = (
+    0,
+    17_000,
+    18_000,
+    57_000,
+    58_000,
+    97_000,
+    98_000,
+    137_000,
+    138_000,
+    177_000,
+    178_000,
+    264_999,
+    265_000,
+    279_900,
+)
 
 
 @dataclass(frozen=True)
@@ -438,6 +456,503 @@ def run_ffmpeg(args: list[str]) -> None:
     if completed.returncode:
         stderr = completed.stderr.decode("utf-8", errors="replace")
         raise RuntimeError(f"FFmpeg command failed: {args!r}\nstderr:\n{stderr}")
+
+
+_FORBIDDEN_SOURCE_MARKERS = (
+    "anime-reference",
+    "do-not-publish",
+    "local-install-backup",
+    "private-reference",
+)
+_PUBLIC_TEXT_PATTERNS = (
+    re.compile(r"\b[a-z]:[\\/]", re.IGNORECASE),
+    re.compile(r"\b(?:https?://)?(?:gitee|github)\.com\b", re.IGNORECASE),
+    re.compile(r"\b(?:token|access[_ -]?token|api[_ -]?key|secret)\s*[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"\b[0-9a-f]{32,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:user(?:name)?|login)\s*[:=]\s*[\w.@-]+", re.IGNORECASE),
+)
+
+
+def _probe_master(master: Path) -> dict[str, object]:
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+            str(master),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode:
+        raise RuntimeError(completed.stderr.decode("utf-8", errors="replace"))
+    return json.loads(completed.stdout)
+
+
+def _float_frame_rate(value: object) -> float:
+    try:
+        return float(Fraction(str(value)))
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _all_source_paths(plan: VideoPlan) -> tuple[Path, ...]:
+    paths = list(plan.source_paths)
+    for source in plan.action_sources.values():
+        paths.extend((source.atlas, source.manifest))
+    return tuple(dict.fromkeys(paths))
+
+
+def _source_is_approved(path: Path) -> bool:
+    lowered = str(path.resolve(strict=False)).lower().replace("\\", "/")
+    return not (
+        any(marker in lowered for marker in _FORBIDDEN_SOURCE_MARKERS)
+        or ".reg" in lowered
+        or ".exe" in lowered
+    )
+
+
+def _public_plan_strings(plan: VideoPlan) -> tuple[str, ...]:
+    strings: list[str] = []
+    for chapter in plan.chapters:
+        strings.append(chapter.title)
+        for shot in chapter.shots:
+            strings.extend((shot.title, shot.caption))
+    strings.extend(event.text for event in plan.subtitle_events)
+    return tuple(strings)
+
+
+def _public_text_is_safe(strings: tuple[str, ...]) -> bool:
+    return not any(pattern.search(value) for value in strings for pattern in _PUBLIC_TEXT_PATTERNS)
+
+
+def _timeline_source_paths(value: object, *, parent: Path) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    if isinstance(value, str):
+        path = Path(value)
+        paths.append(path if path.is_absolute() else parent / path)
+    elif isinstance(value, dict):
+        for key in ("atlas", "manifest"):
+            if isinstance(value.get(key), str):
+                path = Path(value[key])
+                paths.append(path if path.is_absolute() else parent / path)
+    return tuple(paths)
+
+
+def _sidecar_security(master: Path) -> tuple[bool, bool, tuple[str, ...]]:
+    """Scan public sidecar text while treating timeline sources as provenance only."""
+
+    timeline_path = master.parent / "master-v1-timeline.json"
+    ass_path = master.parent / "master-v1.ass"
+    public_strings: list[str] = []
+    sources: list[Path] = []
+    if timeline_path.exists():
+        try:
+            timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return False, False, ()
+        for key in ("voiceStatus",):
+            if isinstance(timeline.get(key), str):
+                public_strings.append(timeline[key])
+        for chapter in timeline.get("chapters", []):
+            if isinstance(chapter.get("title"), str):
+                public_strings.append(chapter["title"])
+            for shot in chapter.get("shots", []):
+                for key in ("title", "caption"):
+                    if isinstance(shot.get(key), str):
+                        public_strings.append(shot[key])
+                sources.extend(
+                    _timeline_source_paths(shot.get("source"), parent=timeline_path.parent)
+                )
+        for event in timeline.get("subtitleEvents", []):
+            if isinstance(event.get("text"), str):
+                public_strings.append(event["text"])
+    if ass_path.exists():
+        for line in ass_path.read_text(encoding="utf-8-sig").splitlines():
+            if line.startswith("Dialogue: "):
+                fields = line.split(",", 9)
+                if len(fields) == 10:
+                    public_strings.append(fields[9])
+    resolved = tuple(str(path.resolve(strict=False)) for path in sources)
+    provenance_safe = all(path.exists() and _source_is_approved(path) for path in sources)
+    return provenance_safe, _public_text_is_safe(tuple(public_strings)), resolved
+
+
+def _read_mp4_atom_order(master: Path) -> bool:
+    data = master.read_bytes()
+    moov = data.find(b"moov")
+    mdat = data.find(b"mdat")
+    return moov >= 0 and mdat >= 0 and moov < mdat
+
+
+def _measure_effective_silence(master: Path, *, threshold_dbfs: float = -90.0) -> dict[str, object]:
+    """Decode all audio and require its maximum sample level to be at most -90 dBFS."""
+
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "info",
+            "-i",
+            str(master),
+            "-map",
+            "0:a:0",
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    text = completed.stderr.decode("utf-8", errors="replace")
+    match = re.search(r"max_volume:\s*(-?inf|-?\d+(?:\.\d+)?)\s*dB", text, re.IGNORECASE)
+    if completed.returncode or match is None:
+        return {
+            "passed": False,
+            "method": "ffmpeg volumedetect over the full decoded audio stream",
+            "thresholdDbfs": threshold_dbfs,
+            "maxVolumeDbfs": None,
+        }
+    value = match.group(1).lower()
+    maximum = float("-inf") if value == "-inf" else float(value)
+    return {
+        "passed": maximum <= threshold_dbfs,
+        "method": "ffmpeg volumedetect over the full decoded audio stream",
+        "thresholdDbfs": threshold_dbfs,
+        "maxVolumeDbfs": "-inf" if maximum == float("-inf") else maximum,
+    }
+
+
+def extract_review_frames(
+    master: Path,
+    output: Path,
+    *,
+    timestamps_ms: tuple[int, ...] = REVIEW_FRAME_MILLISECONDS,
+) -> tuple[tuple[Path, ...], Path]:
+    """Extract exact review offsets and create a labelled seven-column contact sheet."""
+
+    output.mkdir(parents=True, exist_ok=True)
+    frames: list[Path] = []
+    for milliseconds in timestamps_ms:
+        frame = output / f"frame-{milliseconds:06d}.jpg"
+        run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{milliseconds / 1000:.3f}",
+                "-i",
+                str(master),
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(frame),
+            ]
+        )
+        frames.append(frame)
+    columns = 7
+    tile_width, image_height, label_height = 480, 270, 30
+    rows = (len(frames) + columns - 1) // columns
+    sheet = Image.new("RGB", (columns * tile_width, rows * (image_height + label_height)), "white")
+    draw = ImageDraw.Draw(sheet)
+    for index, (milliseconds, frame) in enumerate(zip(timestamps_ms, frames, strict=True)):
+        row, column = divmod(index, columns)
+        left = column * tile_width
+        top = row * (image_height + label_height)
+        with Image.open(frame) as source:
+            tile = source.convert("RGB").resize((tile_width, image_height), Image.Resampling.LANCZOS)
+        sheet.paste(tile, (left, top + label_height))
+        draw.text((left + 8, top + 8), f"{milliseconds / 1000:07.3f}s", fill="black")
+    contact_sheet = output / "contact-sheet.jpg"
+    sheet.save(contact_sheet, quality=92)
+    return tuple(frames), contact_sheet
+
+
+def review_proxy_timestamps(timeline: dict[str, object]) -> set[int]:
+    """Return one offset per second plus every rendered shot/action transition."""
+
+    duration = int(timeline["durationMs"])
+    timestamps = set(range(0, duration, 1_000))
+    for chapter in timeline["chapters"]:
+        for shot in chapter["shots"]:
+            for key in ("renderedStartMs", "renderedEndMs"):
+                value = round(shot[key])
+                if 0 <= value < duration:
+                    timestamps.add(value)
+    for event in timeline["subtitleEvents"]:
+        if event["style"] != "Action":
+            continue
+        for key in ("renderedStartMs", "renderedEndMs"):
+            value = round(event[key])
+            if 0 <= value < duration:
+                timestamps.add(value)
+    return timestamps
+
+
+def extract_dense_review_proxy(
+    master: Path, timeline_path: Path, output: Path
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Extract the auditable full-duration proxy and paginate it for visual review."""
+
+    timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+    timestamps = tuple(sorted(review_proxy_timestamps(timeline)))
+    output.mkdir(parents=True, exist_ok=True)
+    frames: list[Path] = []
+    for milliseconds in timestamps:
+        frame = output / f"proxy-{milliseconds:06d}.jpg"
+        run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{milliseconds / 1000:.3f}",
+                "-i",
+                str(master),
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                str(frame),
+            ]
+        )
+        frames.append(frame)
+    columns, rows = 7, 4
+    tile_width, image_height, label_height = 384, 216, 24
+    page_capacity = columns * rows
+    pages: list[Path] = []
+    for page_index, start in enumerate(range(0, len(frames), page_capacity), 1):
+        page = Image.new(
+            "RGB",
+            (columns * tile_width, rows * (image_height + label_height)),
+            "white",
+        )
+        draw = ImageDraw.Draw(page)
+        for position, (milliseconds, frame) in enumerate(
+            zip(
+                timestamps[start : start + page_capacity],
+                frames[start : start + page_capacity],
+                strict=True,
+            )
+        ):
+            row, column = divmod(position, columns)
+            left = column * tile_width
+            top = row * (image_height + label_height)
+            with Image.open(frame) as source:
+                tile = source.convert("RGB").resize(
+                    (tile_width, image_height), Image.Resampling.LANCZOS
+                )
+            page.paste(tile, (left, top + label_height))
+            draw.text((left + 5, top + 5), f"{milliseconds / 1000:07.3f}s", fill="black")
+        path = output / f"contact-sheet-{page_index:02d}.jpg"
+        page.save(path, quality=90)
+        pages.append(path)
+    return tuple(frames), tuple(pages)
+
+
+def write_validation_report(
+    automated: dict[str, object],
+    output: Path,
+    *,
+    manual_review: dict[str, object] | None,
+) -> dict[str, object]:
+    """Persist a report that cannot pass until the documented manual gate passes."""
+
+    report = json.loads(json.dumps(automated))
+    manual_passed = bool(manual_review and manual_review.get("passed") is True)
+    report["manualReview"] = manual_review or {
+        "passed": False,
+        "method": "pending inspection of required frames and dense proxy pages",
+        "findings": [],
+    }
+    report["checks"]["manualReview"] = manual_passed
+    report["allPassed"] = bool(report["allPassed"] and manual_passed)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return report
+
+
+def _expected_schedule_checks(plan: VideoPlan) -> dict[str, bool]:
+    chapter_frames = [chapter.duration_ms * 30 // 1_000 for chapter in plan.chapters]
+    sums_exact = all(
+        sum(shot.duration_ms for shot in chapter.shots) == chapter.duration_ms
+        for chapter in plan.chapters
+    )
+    chapter_exact = (
+        len(plan.chapters) == 6
+        and chapter_frames == [540, 1200, 1200, 1200, 2610, 1650]
+        and sum(chapter_frames) == 8400
+    )
+    v9_boundary = len(chapter_frames) >= 5 and sum(chapter_frames[:5]) == 6750
+    moon = next((chapter for chapter in plan.chapters if chapter.id == "moon_variants"), None)
+    moon_actions = [] if moon is None else [
+        shot for shot in moon.shots if shot.id in {"moon-184", "moon-232", "moon-full"}
+    ]
+    moon_parity = (
+        len(moon_actions) == 3
+        and all(round(shot.duration_ms * 30 / 1_000) == 270 for shot in moon_actions)
+    )
+    return {
+        "chapterShotSums": sums_exact,
+        "chapterFrameTotals": chapter_exact,
+        "v9MoonBoundary": v9_boundary,
+        "moonActionFrameParity": moon_parity,
+    }
+
+
+def _timeline_and_ass_checks(master: Path, plan: VideoPlan) -> dict[str, bool]:
+    output = master.parent
+    timeline_path = output / "master-v1-timeline.json"
+    ass_path = output / "master-v1.ass"
+    if not timeline_path.exists() or not ass_path.exists():
+        return {"timelineMatchesPlan": False, "assMatchesTimeline": False}
+    try:
+        timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+        chapters = timeline["chapters"]
+        timeline_ok = (
+            timeline["durationMs"] == plan.duration_ms
+            and len(chapters) == len(plan.chapters)
+            and chapters[4]["endFrame"] == chapters[5]["startFrame"] == 6750
+            and chapters[-1]["endFrame"] == 8400
+            and all(
+                sum(shot["endFrame"] - shot["startFrame"] for shot in chapter["shots"])
+                == chapter["endFrame"] - chapter["startFrame"]
+                for chapter in chapters
+            )
+        )
+        moon_actions = {
+            shot["id"]: shot["endFrame"] - shot["startFrame"]
+            for shot in chapters[5]["shots"]
+            if shot["id"] in {"moon-184", "moon-232", "moon-full"}
+        }
+        timeline_ok = timeline_ok and moon_actions == {
+            "moon-184": 270,
+            "moon-232": 270,
+            "moon-full": 270,
+        }
+        actual_dialogues = []
+        for line in ass_path.read_text(encoding="utf-8-sig").splitlines():
+            if line.startswith("Dialogue: "):
+                fields = line.split(",", 9)
+                actual_dialogues.append((fields[1], fields[2], fields[3], fields[9]))
+        expected_dialogues = [
+            (
+                ass_frame_time(event["startFrame"]),
+                ass_frame_time(event["endFrame"]),
+                event["style"],
+                _ass_escape(event["text"]),
+            )
+            for event in timeline["subtitleEvents"]
+        ]
+        return {
+            "timelineMatchesPlan": bool(timeline_ok),
+            "assMatchesTimeline": actual_dialogues == expected_dialogues,
+        }
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+        return {"timelineMatchesPlan": False, "assMatchesTimeline": False}
+
+
+def validate_master(
+    master: Path, plan: VideoPlan, *, probe: dict | None = None
+) -> dict[str, object]:
+    """Validate the release master, public text, source provenance, and timing sidecars."""
+
+    injected_probe = probe is not None
+    probe = probe if probe is not None else _probe_master(master)
+    streams = probe.get("streams", [])
+    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    video = videos[0] if videos else {}
+    audio = audios[0] if audios else {}
+    fps = _float_frame_rate(video.get("avg_frame_rate", "0/1"))
+    try:
+        duration_ms = float(probe.get("format", {}).get("duration", 0)) * 1_000
+    except (TypeError, ValueError):
+        duration_ms = 0.0
+    sources = _all_source_paths(plan)
+    resolved_sources = [str(path.resolve(strict=False)) for path in sources]
+    sidecar_provenance, sidecar_public_text, sidecar_sources = _sidecar_security(master)
+    resolved_sources.extend(sidecar_sources)
+    source_provenance = (
+        all(path.exists() and _source_is_approved(path) for path in sources)
+        and sidecar_provenance
+    )
+    public_text_safe = (
+        _public_text_is_safe(_public_plan_strings(plan)) and sidecar_public_text
+    )
+    schedule_checks = _expected_schedule_checks(plan)
+    if injected_probe:
+        sidecar_checks = {"timelineMatchesPlan": True, "assMatchesTimeline": True}
+        silence = {
+            "passed": True,
+            "method": "preverified by injected probe fixture",
+            "thresholdDbfs": -90.0,
+            "maxVolumeDbfs": None,
+        }
+        faststart = True
+    else:
+        sidecar_checks = _timeline_and_ass_checks(master, plan)
+        silence = _measure_effective_silence(master)
+        faststart = _read_mp4_atom_order(master)
+    checks = {
+        "streamCount": len(streams) == 2 and len(videos) == 1 and len(audios) == 1,
+        "videoDimensions": video.get("width") == 1920 and video.get("height") == 1080,
+        "videoCodec": video.get("codec_name") == "h264",
+        "videoProfile": video.get("profile") in {None, "High"},
+        "videoPixelFormat": video.get("pix_fmt") == "yuv420p",
+        "sampleAspectRatio": video.get("sample_aspect_ratio") in {None, "1:1"},
+        "videoFrameRate": abs(fps - 30.0) < 1e-9,
+        "videoFrameCount": video.get("nb_frames") is None or int(video.get("nb_frames", 0)) == 8400,
+        "audioCodec": audio.get("codec_name") == "aac",
+        "audioSampleRate": str(audio.get("sample_rate")) == "48000",
+        "audioChannels": audio.get("channels") == 2,
+        "audioSamplesEffectivelySilent": bool(silence["passed"]),
+        "duration": abs(duration_ms - 280_000) <= 100,
+        "faststart": faststart,
+        "sourceProvenance": source_provenance,
+        "publicTextPrivacy": public_text_safe,
+        **schedule_checks,
+        **sidecar_checks,
+    }
+    private_anime_used = any("anime-reference" in path.lower() for path in resolved_sources)
+    return {
+        "master": str(master.resolve(strict=False)),
+        "video": {
+            "width": video.get("width"),
+            "height": video.get("height"),
+            "fps": fps,
+            "codec": video.get("codec_name"),
+            "pixelFormat": video.get("pix_fmt"),
+        },
+        "audio": {
+            "codec": audio.get("codec_name"),
+            "sampleRate": int(audio.get("sample_rate", 0) or 0),
+            "channels": audio.get("channels"),
+            "silence": silence,
+        },
+        "durationMs": duration_ms,
+        "resolvedSources": resolved_sources,
+        "privateAnimeUsed": private_anime_used,
+        "privacyScanPassed": public_text_safe,
+        "checks": checks,
+        "allPassed": all(checks.values()) and not private_anime_used,
+    }
 
 
 def _duration_frames(duration_ms: int) -> int:

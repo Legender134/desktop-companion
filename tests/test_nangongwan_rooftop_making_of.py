@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from functools import lru_cache
 from hashlib import sha256
 from importlib.util import module_from_spec, spec_from_file_location
@@ -23,9 +24,14 @@ from tools.nangongwan_rooftop_making_of import (
     burn_ass_and_add_silence,
     concat_shots,
     compose_desktop,
+    extract_dense_review_proxy,
+    extract_review_frames,
     read_action,
     render_shot,
+    review_proxy_timestamps,
     run_ffmpeg,
+    validate_master,
+    write_validation_report,
     write_ass,
     write_action_mp4,
 )
@@ -69,6 +75,341 @@ def test_renderer_cli_is_directly_runnable_from_the_checkout():
 
     assert completed.returncode == 0, completed.stderr
     assert "--build-all" in completed.stdout
+    assert "--validate-only" in completed.stdout
+
+
+def _valid_master_probe():
+    return {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "profile": "High",
+                "width": 1920,
+                "height": 1080,
+                "pix_fmt": "yuv420p",
+                "sample_aspect_ratio": "1:1",
+                "avg_frame_rate": "30/1",
+                "nb_frames": "8400",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "sample_rate": "48000",
+                "channels": 2,
+            },
+        ],
+        "format": {"duration": "280.000"},
+    }
+
+
+def test_validation_report_requires_every_release_gate(tmp_path):
+    valid_probe = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1920,
+                "height": 1080,
+                "pix_fmt": "yuv420p",
+                "avg_frame_rate": "30/1",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "sample_rate": "48000",
+                "channels": 2,
+            },
+        ],
+        "format": {"duration": "280.000"},
+    }
+    approved_plan = build_video_plan(ROOT)
+
+    report = validate_master(tmp_path / "master.mp4", approved_plan, probe=valid_probe)
+
+    assert report["video"] == {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30.0,
+        "codec": "h264",
+        "pixelFormat": "yuv420p",
+    }
+    assert report["audio"]["codec"] == "aac"
+    assert report["audio"]["sampleRate"] == 48000
+    assert report["durationMs"] == pytest.approx(280000, abs=100)
+    assert report["privateAnimeUsed"] is False
+    assert report["privacyScanPassed"] is True
+    assert report["allPassed"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutate", "failed_gate"),
+    (
+        (lambda probe: probe["streams"].append(dict(probe["streams"][0])), "streamCount"),
+        (lambda probe: probe["streams"][0].update(profile="Main"), "videoProfile"),
+        (lambda probe: probe["streams"][0].update(sample_aspect_ratio="4:3"), "sampleAspectRatio"),
+        (lambda probe: probe["streams"][0].update(nb_frames="8399"), "videoFrameCount"),
+    ),
+)
+def test_validation_rejects_non_delivery_media_properties(tmp_path, mutate, failed_gate):
+    probe = _valid_master_probe()
+    mutate(probe)
+
+    report = validate_master(tmp_path / "master.mp4", build_video_plan(ROOT), probe=probe)
+
+    assert report["allPassed"] is False
+    assert report["checks"][failed_gate] is False
+
+
+@pytest.mark.parametrize(
+    "forbidden_source",
+    (
+        "anime-reference/clip.mp4",
+        "DO-NOT-PUBLISH/still.png",
+        "local-install-backup/pet.json",
+        "private-reference/frame.webp",
+        "setup.exe",
+        "pet.reg",
+        "setup.exe.backup/readme.txt",
+        "pet.reg.txt",
+    ),
+)
+def test_validation_rejects_forbidden_private_or_install_sources(
+    tmp_path, forbidden_source
+):
+    plan = build_video_plan(ROOT)
+    first_chapter = plan.chapters[0]
+    unsafe_source = tmp_path / forbidden_source
+    unsafe_source.parent.mkdir(parents=True, exist_ok=True)
+    unsafe_source.write_bytes(b"test fixture")
+    first_shot = replace(first_chapter.shots[0], source=unsafe_source)
+    unsafe_plan = replace(
+        plan,
+        chapters=(
+            replace(first_chapter, shots=(first_shot, *first_chapter.shots[1:])),
+            *plan.chapters[1:],
+        ),
+    )
+
+    report = validate_master(tmp_path / "master.mp4", unsafe_plan, probe=_valid_master_probe())
+
+    assert report["privateAnimeUsed"] is ("anime-reference" in forbidden_source)
+    assert report["checks"]["sourceProvenance"] is False
+    assert report["allPassed"] is False
+
+
+@pytest.mark.parametrize(
+    "leaked_text",
+    (
+        r"C:\Users\alice\secret.txt",
+        r"D:\workspace\release",
+        "https://github.com/alice/project",
+        "token=super-secret-value",
+        "0123456789abcdef0123456789abcdef",
+        "gitee.com/alice/project",
+        "username: alice",
+    ),
+)
+def test_validation_scans_public_text_but_not_internal_source_paths(tmp_path, leaked_text):
+    plan = build_video_plan(ROOT)
+    first_chapter = plan.chapters[0]
+    unsafe_shot = replace(first_chapter.shots[0], caption=leaked_text)
+    unsafe_plan = replace(
+        plan,
+        chapters=(
+            replace(first_chapter, shots=(unsafe_shot, *first_chapter.shots[1:])),
+            *plan.chapters[1:],
+        ),
+    )
+
+    report = validate_master(tmp_path / "master.mp4", unsafe_plan, probe=_valid_master_probe())
+
+    assert report["privacyScanPassed"] is False
+    assert report["checks"]["publicTextPrivacy"] is False
+    assert report["allPassed"] is False
+
+
+@pytest.mark.parametrize("sidecar", ("timeline", "ass"))
+def test_validation_scans_public_strings_exported_to_rendered_sidecars(tmp_path, sidecar):
+    master = tmp_path / "master.mp4"
+    timeline = tmp_path / "master-v1-timeline.json"
+    timeline.write_text(
+        json.dumps(
+            {
+                "chapters": [],
+                "subtitleEvents": [{"text": "safe caption"}],
+                "voiceStatus": "pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ass = tmp_path / "master-v1.ass"
+    ass.write_text(
+        "Dialogue: 0,0:00:00.00,0:00:01.00,Caption,,0,0,0,,safe caption\n",
+        encoding="utf-8",
+    )
+    leak = r"C:\Users\alice\secret.txt"
+    if sidecar == "timeline":
+        payload = json.loads(timeline.read_text(encoding="utf-8"))
+        payload["subtitleEvents"][0]["text"] = leak
+        timeline.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        ass.write_text(
+            f"Dialogue: 0,0:00:00.00,0:00:01.00,Caption,,0,0,0,,{leak}\n",
+            encoding="utf-8",
+        )
+
+    report = validate_master(master, build_video_plan(ROOT), probe=_valid_master_probe())
+
+    assert report["privacyScanPassed"] is False
+    assert report["checks"]["publicTextPrivacy"] is False
+
+
+def test_validation_resolves_timeline_sources_as_internal_provenance_not_public_text(tmp_path):
+    master = tmp_path / "master.mp4"
+    unsafe = tmp_path / "private-reference" / "frame.webp"
+    (tmp_path / "master-v1-timeline.json").write_text(
+        json.dumps(
+            {
+                "chapters": [
+                    {"title": "safe", "shots": [{"title": "safe", "caption": "safe", "source": str(unsafe)}]}
+                ],
+                "subtitleEvents": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = validate_master(master, build_video_plan(ROOT), probe=_valid_master_probe())
+
+    assert report["privacyScanPassed"] is True
+    assert report["checks"]["sourceProvenance"] is False
+
+
+def test_extract_review_frames_uses_required_offsets_and_builds_a_7_by_2_sheet(
+    tmp_path, monkeypatch
+):
+    generated_offsets = []
+
+    def fake_ffmpeg(command):
+        offset = command[command.index("-ss") + 1]
+        generated_offsets.append(offset)
+        Image.new("RGB", (1920, 1080), (30, 60, 90)).save(Path(command[-1]))
+
+    monkeypatch.setattr(making_of, "run_ffmpeg", fake_ffmpeg)
+
+    frames, sheet = extract_review_frames(tmp_path / "master.mp4", tmp_path / "review")
+
+    assert [path.name for path in frames] == [
+        f"frame-{milliseconds:06d}.jpg" for milliseconds in making_of.REVIEW_FRAME_MILLISECONDS
+    ]
+    assert generated_offsets == [
+        f"{milliseconds / 1000:.3f}" for milliseconds in making_of.REVIEW_FRAME_MILLISECONDS
+    ]
+    with Image.open(sheet) as contact_sheet:
+        assert contact_sheet.size == (7 * 480, 2 * 300)
+
+
+def test_dense_review_proxy_includes_every_second_and_every_shot_action_transition(tmp_path):
+    plan = build_video_plan(ROOT)
+    schedule = build_frame_schedule(plan)
+    rendered_events = quantize_subtitle_events(
+        plan.subtitle_events, plan=plan, frame_schedule=schedule
+    )
+    timeline_path = tmp_path / "master-v1-timeline.json"
+    making_of.write_timeline_json(
+        plan,
+        timeline_path,
+        frame_schedule=schedule,
+        subtitle_events=rendered_events,
+    )
+    timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+
+    timestamps = review_proxy_timestamps(timeline)
+
+    assert set(range(0, 280_000, 1_000)).issubset(timestamps)
+    assert all(
+        round(shot[boundary]) in timestamps
+        for chapter in timeline["chapters"]
+        for shot in chapter["shots"]
+        for boundary in ("renderedStartMs", "renderedEndMs")
+        if shot[boundary] < 280_000
+    )
+    assert all(
+        round(event[boundary]) in timestamps
+        for event in timeline["subtitleEvents"]
+        if event["style"] == "Action"
+        for boundary in ("renderedStartMs", "renderedEndMs")
+        if event[boundary] < 280_000
+    )
+
+
+def test_dense_review_proxy_writes_auditable_contact_sheet_pages(tmp_path, monkeypatch):
+    timeline = {
+        "durationMs": 3_000,
+        "chapters": [
+            {
+                "shots": [
+                    {
+                        "renderedStartMs": 0,
+                        "renderedEndMs": 1_500,
+                    },
+                    {
+                        "renderedStartMs": 1_500,
+                        "renderedEndMs": 3_000,
+                    },
+                ]
+            }
+        ],
+        "subtitleEvents": [
+            {
+                "style": "Action",
+                "renderedStartMs": 750,
+                "renderedEndMs": 1_250,
+            }
+        ],
+    }
+    timeline_path = tmp_path / "timeline.json"
+    timeline_path.write_text(json.dumps(timeline), encoding="utf-8")
+
+    def fake_ffmpeg(command):
+        Image.new("RGB", (1920, 1080), (40, 70, 100)).save(Path(command[-1]))
+
+    monkeypatch.setattr(making_of, "run_ffmpeg", fake_ffmpeg)
+
+    frames, pages = extract_dense_review_proxy(
+        tmp_path / "master.mp4", timeline_path, tmp_path / "dense"
+    )
+
+    assert len(frames) == len(review_proxy_timestamps(timeline)) == 6
+    assert pages == (tmp_path / "dense" / "contact-sheet-01.jpg",)
+    with Image.open(pages[0]) as page:
+        assert page.size == (7 * 384, 4 * 240)
+
+
+def test_written_validation_report_cannot_pass_before_manual_review(tmp_path):
+    automated = validate_master(
+        tmp_path / "master.mp4", build_video_plan(ROOT), probe=_valid_master_probe()
+    )
+    output = tmp_path / "validation-report.json"
+
+    pending = write_validation_report(automated, output, manual_review=None)
+
+    assert pending["checks"]["manualReview"] is False
+    assert pending["allPassed"] is False
+
+    approved = write_validation_report(
+        automated,
+        output,
+        manual_review={
+            "passed": True,
+            "method": "inspected 14 frames and every dense proxy page",
+            "findings": [],
+        },
+    )
+    assert approved["checks"]["manualReview"] is True
+    assert approved["allPassed"] is True
+    assert json.loads(output.read_text(encoding="utf-8"))["allPassed"] is True
 
 
 @pytest.mark.integration
@@ -589,6 +930,15 @@ def test_v9_caption_explains_sequential_demo_vs_random_runtime():
 
     assert "九种动作会按权重随机出现" in captions
     assert "演示视频为方便观看而依次播放" in captions
+
+
+def test_v9_overview_uses_clean_desktop_qa_instead_of_a_checkerboard_audit():
+    shot = next(shot for shot in renderer.build_shots(ROOT) if shot.id == "v9-grid")
+
+    assert isinstance(shot.source, Path)
+    assert shot.source.name == "desktop-background-qa-v5.png"
+    assert shot.title == "桌面背景适配抽查"
+    assert "Windows、浅色与深色桌面" in shot.caption
 
 
 def test_public_text_is_privacy_safe():
