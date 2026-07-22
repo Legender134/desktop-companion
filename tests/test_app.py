@@ -762,7 +762,7 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.dispatch_menu(MenuCommand("center"))
     controller.dispatch_menu(MenuCommand("about"))
     assert about == [
-        ("关于桌面灵伴", "桌面灵伴 2.4.5\n可用宠物：3（南宫婉、十一、紫灵）")
+        ("关于桌面灵伴", "桌面灵伴 2.4.4\n可用宠物：3（南宫婉、十一、紫灵）")
     ]
 
     hooks[0].digit_pressed.emit(4)

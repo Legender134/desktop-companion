@@ -1,4 +1,4 @@
-# 桌面灵伴 2.4.5
+# 桌面灵伴 2.4.4
 
 桌面灵伴是面向 Windows 10/11 x64 的透明桌面宠物。它内置“十一”“紫灵”和同人宠物“南宫婉”，支持切换宠物、单击互动、看向鼠标、自动闲逛、自主小动作和自制宠物包。程序本身不发起网络请求。
 
@@ -6,18 +6,18 @@
 
 | 你想做什么 | 应该点击哪里 |
 |---|---|
-| 只想安装使用 | [Gitee 直接下载](https://gitee.com/legender134/desktop-companion/releases/download/v2.4.5/DesktopCompanion-2.4.5-setup.exe) / [GitHub 直接下载](https://github.com/Legender134/desktop-companion/releases/download/v2.4.5/DesktopCompanion-2.4.5-setup.exe) |
+| 只想安装使用 | [Gitee 直接下载](https://gitee.com/legender134/desktop-companion/releases/download/v2.4.4/DesktopCompanion-2.4.4-setup.exe) / [GitHub 直接下载](https://github.com/Legender134/desktop-companion/releases/download/v2.4.4/DesktopCompanion-2.4.4-setup.exe) |
 | 完全不懂代码托管网站 | [查看新手使用指南](docs/新手使用指南.md) |
 | 想知道每版更新了什么 | [查看完整更新日志](CHANGELOG.md) |
 | 想添加自己的宠物 | [查看添加新宠物指南](docs/添加新宠物指南.md) |
 | 已经会制作图集，需要查精确标准 | [查看 v3 动态宠物包技术规范](docs/pet-pack-format-v3.md) |
 | 想修改或构建程序 | 跳到[从源码准备、构建与验证](#从源码准备构建与验证) |
 
-> 普通用户只需要下载其中一个平台的 `DesktopCompanion-2.4.5-setup.exe`。不要下载名字中带有 `Source`、`源代码` 的压缩包，它们是给开发者看的源码，不能直接安装。
+> 普通用户只需要下载其中一个平台的 `DesktopCompanion-2.4.4-setup.exe`。不要下载名字中带有 `Source`、`源代码` 的压缩包，它们是给开发者看的源码，不能直接安装。
 
 ### 三步开始使用
 
-1. 从 Gitee 或 GitHub 下载并双击 `DesktopCompanion-2.4.5-setup.exe`。
+1. 从 Gitee 或 GitHub 下载并双击 `DesktopCompanion-2.4.4-setup.exe`。
 2. 按安装向导完成安装；不需要安装 Python、Qt、Codex 或开发工具。
 3. 从桌面“桌面灵伴”快捷方式启动。右键宠物或右下角托盘图标即可切换宠物、播放动作和修改设置。
 
@@ -34,22 +34,21 @@
 
 ## 下载文件怎么选
 
-[Gitee v2.4.5 发布页](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.5)和 [GitHub 最新版发布页](https://github.com/Legender134/desktop-companion/releases/latest)都提供可直接下载的安装程序：
+[Gitee v2.4.4 发布页](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.4)和 [GitHub 最新版发布页](https://github.com/Legender134/desktop-companion/releases/latest)都提供可直接下载的安装程序：
 
 | 文件 | 用途 | 普通用户需要吗 |
 |---|---|---|
-| `DesktopCompanion-2.4.5-setup.exe` | Windows 安装程序 | **需要，下载这个** |
+| `DesktopCompanion-2.4.4-setup.exe` | Windows 安装程序 | **需要，下载这个** |
 | GitHub 自动生成的 `Source code` | 标签源码快照 | 不需要 |
 
-本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。v2.4.5 发布验证结果见 [docs/manual-qa-v2.4.5.md](docs/manual-qa-v2.4.5.md)，每个正式版本的主要变化见[更新日志](CHANGELOG.md)。
+本项目已经完成源码测试、PyInstaller 冻结、Inno Setup 当前用户安装、真实安装/升级/卸载冒烟测试和 Windows 桌面交互验收。v2.4.4 发布验证结果见 [docs/manual-qa-v2.4.4.md](docs/manual-qa-v2.4.4.md)，每个正式版本的主要变化见[更新日志](CHANGELOG.md)。
 
 ### 历史版本
 
-新用户应优先安装 v2.4.5。旧版本仍保留用于学习、比较和回退：
+新用户应优先安装 v2.4.4。旧版本仍保留用于学习、比较和回退：
 
 | 版本 | 主要内容 | Gitee 下载页 | GitHub 下载页 |
 |---|---|---|---|
-| v2.4.5 | 重做南宫婉月下含栗：栗子由紫色灵光召来并减速入手，六组屋檐动作的下半身逐像素固定 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.5) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.5) |
 | v2.4.4 | 锁定南宫婉屋檐坐姿的骨盆接触点，消除坐着时的左右与上下漂移 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.4) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.4) |
 | v2.4.3 | 修复南宫婉屋檐坐姿横向跳动，恢复醒目的大型标志性月轮 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.3) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.3) |
 | v2.4.2 | 南宫婉透明“月下屋檐”状态、自然落座与 20–60 秒随机驻留动作 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.2) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.2) |

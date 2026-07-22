@@ -207,7 +207,6 @@ def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
     assert spec.loops == 1
 
     boundary = frames[-1].image.constBits().tobytes()
-    boundary_lower_body = frames[-1].image.copy(0, 136, 192, 72).constBits().tobytes()
     for resident_action in (
         "rooftopIdle",
         "rooftopMoonGaze",
@@ -219,12 +218,6 @@ def test_moonlit_rooftop_clips_share_exact_resident_boundaries():
         resident = catalog.frames(resident_action)
         assert resident[0].image.constBits().tobytes() == boundary
         assert resident[-1].image.constBits().tobytes() == boundary
-        assert all(
-            frame.image.copy(0, 136, 192, 72).constBits().tobytes()
-            == boundary_lower_body
-            for frame in resident
-        )
-    assert len(catalog.frames("rooftopChestnut")) == 28
     assert catalog.frames("rooftopExit")[0].image.constBits().tobytes() == boundary
 
     timeline = AnimationTimeline()
