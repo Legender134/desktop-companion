@@ -22,6 +22,14 @@ def _history(root: Path) -> Path:
     return root / "work" / "nangongwan-moonlit-rooftop-history"
 
 
+def _validate_public_path(path: Path) -> None:
+    if not path.is_file():
+        raise ValueError(f"showcase source is missing: {path}")
+    resolved = str(path.resolve()).lower()
+    if any(marker in resolved for marker in _FORBIDDEN_SOURCE_MARKERS):
+        raise ValueError(f"showcase source is not public: {path}")
+
+
 def _source(
     atlas: Path,
     manifest: Path,
@@ -41,11 +49,7 @@ def _source(
 
 def _action_metadata(source: ActionSource) -> tuple[int, int]:
     for path in (source.atlas, source.manifest):
-        if not path.is_file():
-            raise ValueError(f"showcase source is missing: {path}")
-        resolved = str(path.resolve()).lower()
-        if any(marker in resolved for marker in _FORBIDDEN_SOURCE_MARKERS):
-            raise ValueError(f"showcase source is not public: {path}")
+        _validate_public_path(path)
 
     document = json.loads(source.manifest.read_text(encoding="utf-8"))
     if source.manifest_kind == "action":
@@ -126,8 +130,7 @@ def build_showcase_plan(root: Path, background_source: Path) -> ShowcasePlan:
         / "render-history-v2-v9"
         / "preview-sequence-v9.json"
     )
-    if not preview_path.is_file():
-        raise ValueError(f"showcase source is missing: {preview_path}")
+    _validate_public_path(preview_path)
     preview = json.loads(preview_path.read_text(encoding="utf-8"))
     sequence = preview.get("sequence")
     if not isinstance(sequence, list) or not all(isinstance(action_id, str) for action_id in sequence):
