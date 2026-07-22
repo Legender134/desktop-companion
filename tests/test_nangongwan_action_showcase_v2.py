@@ -1514,6 +1514,26 @@ def test_retained_moonlit_clis_default_to_archive_and_never_write_it():
     assert "archived 48-frame" in builder._parser().format_help().lower()
 
 
+@pytest.mark.parametrize(
+    "script",
+    (
+        "tools/build_nangongwan_moonlit_chestnut.py",
+        "tools/preview_nangongwan_moonlit_chestnut.py",
+    ),
+)
+def test_retained_moonlit_clis_run_directly_from_the_repository_root(script):
+    completed = subprocess.run(
+        [sys.executable, script, "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "archived 48-frame" in completed.stdout.lower()
+
+
 @pytest.mark.parametrize("protected_kind", ("archive", "live"))
 def test_retained_moonlit_clis_reject_any_output_inside_protected_trees(
     tmp_path, protected_kind
@@ -1538,6 +1558,87 @@ def test_retained_moonlit_clis_reject_any_output_inside_protected_trees(
     safe_directory = tmp_path / "preview"
     builder._validate_output_location(safe_file)
     previewer._validate_output_location(safe_directory)
+
+
+@pytest.mark.parametrize("input_kind", ("atlas", "manifest"))
+def test_retained_preview_rejects_transition_report_input_collision_before_writes(
+    tmp_path, monkeypatch, input_kind
+):
+    import tools.preview_nangongwan_moonlit_chestnut as previewer
+
+    output = tmp_path / "preview"
+    output.mkdir()
+    collision = output / "transition-metrics.json"
+    collision.write_bytes(b"approved input bytes")
+    other_input = tmp_path / "other-input"
+    other_input.write_bytes(b"other approved input bytes")
+    atlas = collision if input_kind == "atlas" else other_input
+    manifest = collision if input_kind == "manifest" else other_input
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preview_nangongwan_moonlit_chestnut.py",
+            "--atlas",
+            str(atlas),
+            "--manifest",
+            str(manifest),
+            "--output-dir",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="planned output collides with input"):
+        previewer.main()
+
+    assert collision.read_bytes() == b"approved input bytes"
+    assert tuple(path.relative_to(output) for path in output.rglob("*") if path.is_file()) == (
+        Path("transition-metrics.json"),
+    )
+
+
+@pytest.mark.parametrize("input_kind", ("atlas", "manifest"))
+@pytest.mark.parametrize(
+    "collision_relative", (Path("audit-48.png"), Path("frames/frame-01.png"))
+)
+def test_retained_builder_rejects_secondary_output_input_collision_before_writes(
+    tmp_path, monkeypatch, input_kind, collision_relative
+):
+    import tools.build_nangongwan_moonlit_chestnut as builder
+
+    output_directory = tmp_path / "builder"
+    collision = output_directory / collision_relative
+    collision.parent.mkdir(parents=True)
+    collision.write_bytes(b"approved input bytes")
+    other_input = tmp_path / "other-input"
+    other_input.write_bytes(b"other approved input bytes")
+    atlas = collision if input_kind == "atlas" else other_input
+    manifest = collision if input_kind == "manifest" else other_input
+    output_atlas = output_directory / "candidate.webp"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_nangongwan_moonlit_chestnut.py",
+            "--archive-atlas",
+            str(atlas),
+            "--archive-manifest",
+            str(manifest),
+            "--output-atlas",
+            str(output_atlas),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="planned output collides with input"):
+        builder.main()
+
+    assert collision.read_bytes() == b"approved input bytes"
+    assert not output_atlas.exists()
+    assert tuple(
+        path.relative_to(output_directory)
+        for path in output_directory.rglob("*")
+        if path.is_file()
+    ) == (collision_relative,)
 
 
 def test_live_rooftop_user_text_matches_final_duration_and_resident_count():

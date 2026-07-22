@@ -171,8 +171,17 @@ def write_ass(
 ) -> None:
     """Write the review subtitles as a human-editable UTF-8 ASS script."""
 
+    declared_styles = {
+        line.removeprefix("Style: ").split(",", 1)[0]
+        for line in ASS_HEADER.splitlines()
+        if line.startswith("Style: ")
+    }
     rows = [ASS_HEADER]
     for event in events:
+        if event.style not in declared_styles:
+            raise ValueError(
+                f"subtitle style is not declared in ASS header: {event.style}"
+            )
         if isinstance(event, RenderedSubtitleEvent):
             if event.end_frame <= event.start_frame:
                 raise ValueError("subtitle events must have a positive duration")

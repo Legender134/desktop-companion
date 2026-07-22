@@ -1194,6 +1194,16 @@ def test_ass_writer_uses_editable_styles_and_escapes_dialogue_text(tmp_path):
     assert making_of.ass_time(3_661_239) == "1:01:01.23"
 
 
+def test_ass_writer_rejects_an_event_style_absent_from_the_declared_header(tmp_path):
+    output = tmp_path / "not-created" / "invalid-style.ass"
+    event = making_of.SubtitleEvent(0, 1_000, "unknown style", "Missing")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="style is not declared in ASS header: Missing"):
+        making_of.write_ass((event,), output)
+
+    assert not output.parent.exists()
+
+
 def test_timeline_json_records_shots_subtitles_and_public_disclosures(tmp_path):
     plan = build_video_plan(ROOT)
     output = tmp_path / "master-v1-timeline.json"

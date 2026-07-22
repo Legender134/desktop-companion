@@ -10,6 +10,11 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw
 
+if __package__ in {None, ""}:
+    from nangongwan_output_preflight import validate_planned_outputs
+else:
+    from tools.nangongwan_output_preflight import validate_planned_outputs
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE_ROOT = (
@@ -218,15 +223,36 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate_output_location(path: Path) -> None:
-    resolved = path.resolve(strict=False)
-    protected = (ARCHIVE_ROOT.resolve(), LIVE_PET_ROOT.resolve())
-    if any(resolved == root or resolved.is_relative_to(root) for root in protected):
-        raise ValueError("output must not be inside a protected archive or live pet tree")
+    validate_planned_outputs(
+        inputs=(),
+        outputs=(path,),
+        protected_roots=(ARCHIVE_ROOT, LIVE_PET_ROOT),
+    )
+
+
+def _planned_output_paths(output_directory: Path) -> tuple[Path, ...]:
+    return (
+        output_directory,
+        output_directory / "moonlit-chestnut-9600ms.gif",
+        output_directory / "moonlit-chestnut-75pct.gif",
+        output_directory / "moonlit-chestnut-125pct.gif",
+        output_directory / "moonlit-chestnut-9600ms.mp4",
+        output_directory / "transition-metrics.json",
+        output_directory / "hardest-seams.png",
+    )
+
+
+def _preflight_paths(atlas: Path, manifest: Path, output_directory: Path) -> None:
+    validate_planned_outputs(
+        inputs=(atlas, manifest),
+        outputs=_planned_output_paths(output_directory),
+        protected_roots=(ARCHIVE_ROOT, LIVE_PET_ROOT),
+    )
 
 
 def main() -> None:
     args = _parser().parse_args()
-    _validate_output_location(args.output_dir)
+    _preflight_paths(args.atlas, args.manifest, args.output_dir)
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     action = manifest["actions"]["moonlitChestnut"]
     durations = action["frameDurations"]

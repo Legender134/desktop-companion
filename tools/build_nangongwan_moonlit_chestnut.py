@@ -15,6 +15,11 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+if __package__ in {None, ""}:
+    from nangongwan_output_preflight import validate_planned_outputs
+else:
+    from tools.nangongwan_output_preflight import validate_planned_outputs
+
 
 CELL_SIZE = (192, 208)
 ATLAS_WIDTH = 3072
@@ -353,20 +358,50 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate_output_location(path: Path) -> None:
-    resolved = path.resolve(strict=False)
-    protected = (ARCHIVE_ROOT.resolve(), LIVE_PET_ROOT.resolve())
-    if any(resolved == root or resolved.is_relative_to(root) for root in protected):
-        raise ValueError("output must not be inside a protected archive or live pet tree")
+    validate_planned_outputs(
+        inputs=(),
+        outputs=(path,),
+        protected_roots=(ARCHIVE_ROOT, LIVE_PET_ROOT),
+    )
+
+
+def _planned_output_paths(output_atlas: Path) -> tuple[Path, ...]:
+    directory = output_atlas.parent
+    frame_directory = directory / "frames"
+    return (
+        directory,
+        frame_directory,
+        output_atlas,
+        directory / "audit-48.png",
+        *(
+            frame_directory / f"frame-{index:02d}.png"
+            for index in range(1, FRAME_COUNT + 1)
+        ),
+    )
+
+
+def _preflight_paths(
+    archive_atlas: Path, archive_manifest: Path, output_atlas: Path
+) -> None:
+    validate_planned_outputs(
+        inputs=(
+            SIT_PATH,
+            TASTE_PATH,
+            RECOVER_PATH,
+            STAND_PATH,
+            MOON_PATH,
+            ROOF_PATH,
+            archive_atlas,
+            archive_manifest,
+        ),
+        outputs=_planned_output_paths(output_atlas),
+        protected_roots=(ARCHIVE_ROOT, LIVE_PET_ROOT),
+    )
 
 
 def main() -> None:
     args = _parser().parse_args()
-    _validate_output_location(args.output_atlas)
-    if args.output_atlas.resolve() in {
-        args.archive_atlas.resolve(),
-        args.archive_manifest.resolve(),
-    }:
-        raise ValueError("output atlas must not overwrite an archived source")
+    _preflight_paths(args.archive_atlas, args.archive_manifest, args.output_atlas)
     required = (
         SIT_PATH,
         TASTE_PATH,
