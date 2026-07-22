@@ -1,16 +1,20 @@
 import json
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
 from tools.nangongwan_rooftop_making_of import (
     ActionSource,
     ChapterSpec,
     ShotSpec,
     SubtitleEvent,
     VideoPlan,
+    read_action,
 )
 
 
 CHAPTER_DURATIONS = (18_000, 40_000, 40_000, 40_000, 87_000, 55_000)
+MOON_COMPARISON_FRAME_INDEX = 20
 
 
 def _sources(root: Path) -> tuple[dict[str, ActionSource], dict[str, Path], dict[str, Path]]:
@@ -68,12 +72,46 @@ def _sources(root: Path) -> tuple[dict[str, ActionSource], dict[str, Path], dict
         "moon_full": actions / "moon-full-frame-chestnut.mp4",
     }
     stills = {
-        "cinematic_sheet": history / "01-cinematic-36f-v2.4.1" / "spritesheet.webp",
+        "cinematic_sheet": output / "intermediates" / "stills" / "cinematic-36-contact-sheet.png",
         "anchored_compare": history / "02-anchored-48f-v1" / "complete-archive" / "audit-48.png",
         "v9_grid": render_history / "audit-166-transparent-v9.png",
-        "moon_compare": render_history / "current-background-compare.png",
+        "moon_compare": output / "intermediates" / "stills" / "moon-variants-three-panel.png",
     }
     return action_sources, videos, stills
+
+
+def build_review_stills(root: Path) -> tuple[Path, Path]:
+    """Generate the two review stills from only their approved action frames."""
+
+    action_sources, _, stills = _sources(root)
+    cinematic_frames = read_action(action_sources["cinematic"]).frames
+    if len(cinematic_frames) != 36:
+        raise ValueError("cinematic contact sheet requires exactly 36 frames")
+    contact_sheet = Image.new("RGBA", (6 * 192, 6 * 208), (0, 0, 0, 0))
+    for index, frame in enumerate(cinematic_frames):
+        row, column = divmod(index, 6)
+        contact_sheet.alpha_composite(frame, (column * 192, row * 208))
+    contact_sheet_path = stills["cinematic_sheet"]
+    contact_sheet_path.parent.mkdir(parents=True, exist_ok=True)
+    contact_sheet.save(contact_sheet_path)
+
+    variant_names = ("moon_184", "moon_232", "moon_full")
+    variant_frames = [
+        read_action(action_sources[name]).frames[MOON_COMPARISON_FRAME_INDEX]
+        for name in variant_names
+    ]
+    comparison = Image.new("RGBA", (3 * 192, 208 + 36), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(comparison)
+    draw.rectangle((0, 0, comparison.width, 35), fill=(14, 24, 42, 255))
+    for column, (label, frame) in enumerate(
+        zip(("Moon 184", "Moon 232", "Full Moon"), variant_frames, strict=True)
+    ):
+        left = column * 192
+        draw.text((left + 8, 11), label, fill=(255, 255, 255, 255))
+        comparison.alpha_composite(frame, (left, 36))
+    comparison_path = stills["moon_compare"]
+    comparison.save(comparison_path)
+    return contact_sheet_path, comparison_path
 
 
 def build_shots(root: Path) -> tuple[ShotSpec, ...]:
@@ -149,7 +187,7 @@ def _subtitle_events(root: Path, chapters: tuple[ChapterSpec, ...]) -> tuple[Sub
     for chapter in chapters:
         for shot in chapter.shots:
             end = cursor + shot.duration_ms
-            if shot.title:
+            if shot.title and shot.id not in {"v9-sequence", "v9-replay"}:
                 events.append(SubtitleEvent(cursor, min(cursor + 2_700, end), shot.title, "Title"))
             if shot.caption:
                 events.append(SubtitleEvent(cursor, end, shot.caption, "Caption"))

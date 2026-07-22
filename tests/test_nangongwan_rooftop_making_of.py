@@ -412,3 +412,63 @@ def test_v9_action_labels_follow_manifest_frame_durations_not_even_slices(tmp_pa
         (146_080, 155_070),
         (176_760, 185_750),
     ]
+
+
+def test_cinematic_contact_sheet_uses_all_and_only_the_36_approved_action_frames():
+    plan = build_video_plan(ROOT)
+    source = plan.action_sources["cinematic"]
+    source_frames = read_action(source).frames
+
+    renderer.build_review_stills(ROOT)
+
+    sheet_path = next(
+        shot.source
+        for chapter in plan.chapters
+        for shot in chapter.shots
+        if shot.id == "cinematic-sheet"
+    )
+    assert isinstance(sheet_path, Path)
+    with Image.open(sheet_path) as source_sheet:
+        sheet = source_sheet.convert("RGBA")
+    assert len(source_frames) == 36
+    assert sheet.size == (6 * 192, 6 * 208)
+    assert sheet.crop((0, 0, 192, 208)).tobytes() == source_frames[0].tobytes()
+    assert sheet.crop((5 * 192, 5 * 208, 6 * 192, 6 * 208)).tobytes() == source_frames[-1].tobytes()
+
+
+def test_moon_comparison_uses_three_approved_rooftop_chestnut_frames_at_one_index():
+    plan = build_video_plan(ROOT)
+    renderer.build_review_stills(ROOT)
+    comparison_path = next(
+        shot.source
+        for chapter in plan.chapters
+        for shot in chapter.shots
+        if shot.id == "moon-compare"
+    )
+    assert isinstance(comparison_path, Path)
+    with Image.open(comparison_path) as source_comparison:
+        comparison = source_comparison.convert("RGBA")
+
+    assert comparison.size == (3 * 192, 208 + 36)
+    frame_index = renderer.MOON_COMPARISON_FRAME_INDEX
+    expected = [
+        read_action(plan.action_sources[name]).frames[frame_index]
+        for name in ("moon_184", "moon_232", "moon_full")
+    ]
+    actual = [
+        comparison.crop((column * 192, 36, (column + 1) * 192, 36 + 208))
+        for column in range(3)
+    ]
+    assert [frame.tobytes() for frame in actual] == [frame.tobytes() for frame in expected]
+
+
+def test_v9_top_titles_never_overlap_top_action_labels():
+    events = build_video_plan(ROOT).subtitle_events
+    titles = [event for event in events if event.style == "Title"]
+    actions = [event for event in events if event.style == "Action"]
+
+    assert all(
+        title.end_ms <= action.start_ms or action.end_ms <= title.start_ms
+        for title in titles
+        for action in actions
+    )
