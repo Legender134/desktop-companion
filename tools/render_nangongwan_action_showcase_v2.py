@@ -2,20 +2,44 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
+import sys
+from typing import Any
+
+from PIL import Image
+
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.nangongwan_action_showcase_v2 import (
     BACKGROUND_SHA256,
+    FPS,
+    FRAME_SIZE,
+    SPRITE_ORIGIN,
+    SPRITE_SIZE,
     ShowcasePlan,
     ShowcaseSegment,
     ShowcaseSource,
     _verified_background_pixels,
+    add_silent_aac,
+    build_segment_frames,
+    concat_clips,
+    copy_verified_background,
+    probe_media,
+    write_silent_video,
 )
 from tools.nangongwan_rooftop_making_of import ActionSource
 
 
 _FORBIDDEN_SOURCE_MARKERS = ("anime-reference", "do-not-publish")
+_DEFAULT_BACKGROUND = Path(
+    r"C:\Users\23644\AppData\Local\Temp\codex-clipboard-fa2f4101-2de0-4c4a-a1c9-01fc1c2a4412.png"
+)
+_OUTPUT_DIRECTORY = Path("work") / "nangongwan-action-showcase-v2"
+_MASTER_NAME = "nangongwan-action-showcase-v2-1600x900.mp4"
 
 
 def _history(root: Path) -> Path:
@@ -184,3 +208,152 @@ def build_showcase_plan(root: Path, background_source: Path) -> ShowcasePlan:
         ShowcaseSegment("blink-07", blink, 15),
     )
     return ShowcasePlan(background_source, segments)
+
+
+def _timeline_document(plan: ShowcasePlan, background_hash: str) -> dict[str, Any]:
+    """Describe the exact frame-exclusive segment boundaries without display text."""
+
+    start_frame = 0
+    entries: list[dict[str, object]] = []
+    for segment in plan.segments:
+        end_frame = start_frame + segment.output_frames
+        entries.append(
+            {
+                "id": segment.id,
+                "sourceActionIds": [action.action_id for action in segment.source.actions],
+                "startFrame": start_frame,
+                "endFrame": end_frame,
+                "outputFrames": segment.output_frames,
+                "sourceDurationMs": _validate_source(segment.source)[1],
+            }
+        )
+        start_frame = end_frame
+    if start_frame != plan.total_frames:
+        raise ValueError("timeline boundaries do not match the showcase plan")
+    return {
+        "schemaVersion": 1,
+        "backgroundSha256": background_hash,
+        "frameSize": list(FRAME_SIZE),
+        "spriteRectangle": {
+            "x": SPRITE_ORIGIN[0],
+            "y": SPRITE_ORIGIN[1],
+            "width": SPRITE_SIZE[0],
+            "height": SPRITE_SIZE[1],
+        },
+        "totalFrames": plan.total_frames,
+        "segments": entries,
+    }
+
+
+def _write_timeline(plan: ShowcasePlan, background_hash: str, output: Path) -> None:
+    document = _timeline_document(plan, background_hash)
+    output.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def build_showcase(root: Path, background_source: Path) -> Path:
+    """Build all fifteen silent clips, their timeline, and the silent-AAC master."""
+
+    output = root / _OUTPUT_DIRECTORY
+    clips_directory = output / "clips"
+    clips_directory.mkdir(parents=True, exist_ok=True)
+    background_copy = output / "background.png"
+    background_hash = copy_verified_background(background_source, background_copy)
+    plan = build_showcase_plan(root, background_copy)
+    if len(plan.segments) != 15 or plan.total_frames != 2473:
+        raise ValueError("showcase build requires the approved 15 segments and 2473 frames")
+
+    with Image.open(background_copy) as source:
+        background = source.copy()
+    clip_paths: list[Path] = []
+    for index, segment in enumerate(plan.segments, start=1):
+        clip = clips_directory / f"{index:02d}-{segment.id}.mp4"
+        write_silent_video(build_segment_frames(segment, background), clip)
+        clip_paths.append(clip)
+
+    _write_timeline(plan, background_hash, output / "timeline.json")
+    video_only = output / "nangongwan-action-showcase-v2-video-only.mp4"
+    master = output / _MASTER_NAME
+    concat_clips(tuple(clip_paths), video_only)
+    completed = False
+    try:
+        add_silent_aac(video_only, master, expected_frames=plan.total_frames)
+        completed = True
+    finally:
+        if completed:
+            video_only.unlink(missing_ok=True)
+    return master
+
+
+def _validate_existing(root: Path, background_source: Path) -> Path:
+    """Check Task 3 file/timeline/media invariants without rebuilding artifacts."""
+
+    output = root / _OUTPUT_DIRECTORY
+    background_copy = output / "background.png"
+    if not background_copy.is_file():
+        raise ValueError(f"built background is missing: {background_copy}")
+    background_hash, _ = _verified_background_pixels(background_copy)
+    if background_hash != BACKGROUND_SHA256:
+        raise ValueError("built background does not match the approved SHA-256")
+    source_hash, _ = _verified_background_pixels(background_source)
+    if source_hash != background_hash:
+        raise ValueError("current approved background does not match the built copy")
+    plan = build_showcase_plan(root, background_copy)
+    timeline_path = output / "timeline.json"
+    try:
+        actual_timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"timeline is missing or invalid: {timeline_path}") from error
+    if actual_timeline != _timeline_document(plan, background_hash):
+        raise ValueError("timeline does not match the approved showcase plan")
+    expected_clips = tuple(
+        output / "clips" / f"{index:02d}-{segment.id}.mp4"
+        for index, segment in enumerate(plan.segments, start=1)
+    )
+    if not all(clip.is_file() for clip in expected_clips):
+        raise ValueError("one or more of the fifteen showcase clips is missing")
+    master = output / _MASTER_NAME
+    probe = probe_media(master, count_frames=True)
+    if not (
+        probe.video.width == FRAME_SIZE[0]
+        and probe.video.height == FRAME_SIZE[1]
+        and probe.video.codec == "h264"
+        and probe.video.profile == "High"
+        and probe.video.pixel_format == "yuv420p"
+        and probe.video.sample_aspect_ratio == "1:1"
+        and probe.video.frame_rate == FPS
+        and probe.video.nb_read_frames == plan.total_frames
+        and probe.audio is not None
+        and probe.audio.codec == "aac"
+        and probe.audio.sample_rate == 48_000
+        and probe.audio.channels == 2
+        and probe.subtitle_streams == 0
+        and probe.data_streams == 0
+    ):
+        raise ValueError("existing master does not satisfy the Task 3 media contract")
+    return master
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--background", type=Path, default=_DEFAULT_BACKGROUND)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--build-all", action="store_true")
+    mode.add_argument("--validate-only", action="store_true")
+    return parser
+
+
+def main() -> None:
+    args = _parser().parse_args()
+    root = Path(__file__).resolve().parents[1]
+    if args.build_all:
+        master = build_showcase(root, args.background)
+        print(f"Built {master}")
+    else:
+        master = _validate_existing(root, args.background)
+        print(f"Validated {master}")
+
+
+if __name__ == "__main__":
+    main()

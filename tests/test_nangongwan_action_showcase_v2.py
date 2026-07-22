@@ -1,12 +1,27 @@
 from io import BytesIO
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from PIL import Image, ImageChops
 
 import tools.nangongwan_action_showcase_v2 as showcase_module
-from tools.render_nangongwan_action_showcase_v2 import build_showcase_plan
-from tools.nangongwan_action_showcase_v2 import copy_verified_background
+from tools.render_nangongwan_action_showcase_v2 import (
+    _timeline_document,
+    build_showcase,
+    build_showcase_plan,
+)
+from tools.nangongwan_action_showcase_v2 import (
+    BACKGROUND_SHA256,
+    SegmentFrames,
+    add_silent_aac,
+    concat_clips,
+    copy_verified_background,
+    probe_media,
+    write_silent_video,
+)
 from tools.nangongwan_rooftop_making_of import TimedFrames, read_action
 
 
@@ -30,6 +45,137 @@ def background_image():
 @pytest.fixture
 def idle_frames(showcase_plan):
     return read_action(showcase_plan.segments[0].source.actions[0])
+
+
+@pytest.fixture
+def tiny_segments():
+    return tuple(
+        SegmentFrames(
+            tuple(Image.new("RGB", (1600, 900), color) for _ in range(15))
+        )
+        for color in ((20, 40, 80), (80, 40, 20))
+    )
+
+
+def test_two_segment_encode_has_exact_frames_and_no_subtitle_stream(
+    tmp_path, tiny_segments
+):
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    joined = tmp_path / "joined.mp4"
+    final = tmp_path / "final.mp4"
+    write_silent_video(tiny_segments[0], first)
+    write_silent_video(tiny_segments[1], second)
+    concat_clips((first, second), joined)
+    add_silent_aac(joined, final, expected_frames=30)
+
+    probe = probe_media(final, count_frames=True)
+
+    assert probe.video.nb_read_frames == 30
+    assert probe.video.width == 1600 and probe.video.height == 900
+    assert probe.video.codec == "h264" and probe.video.profile == "High"
+    assert probe.audio is not None
+    assert probe.audio.codec == "aac" and probe.audio.sample_rate == 48000
+    assert probe.subtitle_streams == 0
+
+
+def test_timeline_has_exact_contiguous_segments_and_no_text_fields(showcase_plan):
+    timeline = _timeline_document(showcase_plan, BACKGROUND_SHA256)
+
+    assert timeline["schemaVersion"] == 1
+    assert timeline["backgroundSha256"] == BACKGROUND_SHA256
+    assert timeline["frameSize"] == [1600, 900]
+    assert timeline["spriteRectangle"] == {
+        "x": 704,
+        "y": 346,
+        "width": 192,
+        "height": 208,
+    }
+    assert timeline["totalFrames"] == 2473
+    assert len(timeline["segments"]) == 15
+    assert [entry["startFrame"] for entry in timeline["segments"]] == [
+        0,
+        *[entry["endFrame"] for entry in timeline["segments"][:-1]],
+    ]
+    assert timeline["segments"][-1]["endFrame"] == 2473
+    assert all(
+        set(entry)
+        == {
+            "id",
+            "sourceActionIds",
+            "startFrame",
+            "endFrame",
+            "outputFrames",
+            "sourceDurationMs",
+        }
+        for entry in timeline["segments"]
+    )
+    serialized = json.dumps(timeline).lower()
+    assert all(field not in serialized for field in ("title", "caption", "text"))
+
+
+def test_build_showcase_writes_only_v2_background_clips_timeline_and_master(
+    tmp_path, monkeypatch, showcase_plan
+):
+    encoded_clips = []
+
+    monkeypatch.setattr(
+        "tools.render_nangongwan_action_showcase_v2.build_showcase_plan",
+        lambda root, background_source: showcase_plan,
+    )
+    monkeypatch.setattr(
+        "tools.render_nangongwan_action_showcase_v2.build_segment_frames",
+        lambda segment, background: SegmentFrames((background.copy(),) * segment.output_frames),
+    )
+
+    def fake_encode(frames, output):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"clip")
+        encoded_clips.append((output.name, len(frames.frames)))
+
+    monkeypatch.setattr(
+        "tools.render_nangongwan_action_showcase_v2.write_silent_video", fake_encode
+    )
+    monkeypatch.setattr(
+        "tools.render_nangongwan_action_showcase_v2.concat_clips",
+        lambda clips, output: output.write_bytes(b"joined"),
+    )
+    monkeypatch.setattr(
+        "tools.render_nangongwan_action_showcase_v2.add_silent_aac",
+        lambda video, output, expected_frames: output.write_bytes(b"final"),
+    )
+
+    master = build_showcase(tmp_path, BACKGROUND)
+
+    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    assert master == output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    assert len(encoded_clips) == 15
+    assert [frame_count for _, frame_count in encoded_clips] == [
+        segment.output_frames for segment in showcase_plan.segments
+    ]
+    assert (output / "background.png").read_bytes() == BACKGROUND.read_bytes()
+    assert (output / "timeline.json").is_file()
+    assert not tuple(output.rglob("*.ass"))
+    assert not (output / "review").exists()
+
+
+def test_render_cli_can_run_directly_from_the_repository_root():
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "render_nangongwan_action_showcase_v2.py"),
+            "--help",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--build-all" in completed.stdout
+    assert "--validate-only" in completed.stdout
 
 
 def test_blink_is_exactly_fifteen_frames_and_returns_to_open_pose(idle_frames):
