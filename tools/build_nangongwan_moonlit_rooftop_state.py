@@ -283,8 +283,10 @@ def _normalize_seated_geometry(
     return result
 
 
-def _prepared_local_moon(source: Image.Image) -> Image.Image:
-    """Create the large, unmistakable partial moon behind the seated pet."""
+def _prepared_local_moon(
+    source: Image.Image, *, variant: str = "current"
+) -> Image.Image:
+    """Create either the current local moon or an anime-framed giant moon."""
 
     moon = source.convert("RGBA")
     box = moon.getbbox()
@@ -292,6 +294,25 @@ def _prepared_local_moon(source: Image.Image) -> Image.Image:
         raise ValueError("partial moon asset is empty")
     width = box[2] - box[0]
     height = box[3] - box[1]
+    if variant == "anime":
+        # The episode's establishing shot uses the moon as the scene itself:
+        # its illuminated surface fills almost the whole frame while only a
+        # curved edge remains visible behind the eave.  Keep the transparent
+        # outside of the source disc so this still behaves like a desktop pet,
+        # rather than turning into an opaque rectangular video card.
+        side = max(1, round(min(width, height) * 0.70))
+        left = box[0] + round((width - side) * 0.16)
+        top = box[1] + round((height - side) * 0.16)
+        moon = moon.crop((left, top, left + side, top + side)).convert("RGB")
+        moon = moon.resize((184, 184), Image.Resampling.LANCZOS).convert("RGBA")
+        mask = Image.new("L", moon.size, 0)
+        ImageDraw.Draw(mask).ellipse((2, 2, 181, 181), fill=255)
+        moon.putalpha(mask.filter(ImageFilter.GaussianBlur(1.2)))
+        result = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+        result.alpha_composite(moon, (4, 2))
+        return result
+    if variant != "current":
+        raise ValueError(f"unsupported rooftop moon variant: {variant}")
     side = max(1, round(min(width, height) * 0.70))
     left = box[0] + round((width - side) * 0.16)
     top = box[1] + round((height - side) * 0.16)
@@ -536,6 +557,8 @@ def _chestnut_flight_frame(
 
 def _validate_desktop_transparency(
     clips: dict[str, tuple[Image.Image, ...]],
+    *,
+    giant_moon: bool = False,
 ) -> None:
     """Reject scene-card frames before they can reach the installed app."""
 
@@ -548,17 +571,21 @@ def _validate_desktop_transparency(
     for action_id, frames in clips.items():
         for index, frame in enumerate(frames, start=1):
             alpha = frame.getchannel("A")
-            if any(alpha.getpixel(point) > 0 for point in corners):
+            painted_corners = sum(alpha.getpixel(point) > 0 for point in corners)
+            if (not giant_moon and painted_corners) or (
+                giant_moon and painted_corners == len(corners)
+            ):
                 raise ValueError(
                     f"{action_id} frame {index} paints a canvas corner"
                 )
             visible_pixels = sum(alpha.histogram()[8:])
-            if visible_pixels > MAX_VISIBLE_PIXELS:
+            visible_limit = 39_500 if giant_moon else MAX_VISIBLE_PIXELS
+            if visible_pixels > visible_limit:
                 raise ValueError(
                     f"{action_id} frame {index} covers too much of the desktop canvas: "
                     f"{visible_pixels} pixels"
                 )
-            if alpha.getbbox() == (0, 0, *CELL_SIZE):
+            if not giant_moon and alpha.getbbox() == (0, 0, *CELL_SIZE):
                 raise ValueError(
                     f"{action_id} frame {index} forms a full-canvas scene card"
                 )
@@ -581,6 +608,7 @@ def build_clips(
     seated_source_anchors: dict[
         str, tuple[tuple[float, float], ...]
     ] | None = None,
+    moon_variant: str = "current",
 ) -> dict[str, tuple[Image.Image, ...]]:
     if len(idle_frames) < 3:
         raise ValueError("at least three idle frames are required")
@@ -623,7 +651,7 @@ def build_clips(
         "bracelet",
     }:
         raise ValueError("seated source anchors must cover all resident sheets")
-    moon = _prepared_local_moon(moon_source)
+    moon = _prepared_local_moon(moon_source, variant=moon_variant)
     roof = _prepared_local_roof(roof_source)
     transition = _placed_sequence(transition_panels, target_height=192)
     resident = _placed_sequence(
@@ -956,7 +984,7 @@ def build_clips(
         raise AssertionError("enter clip must end on the resident boundary")
     if clips["rooftopExit"][0].tobytes() != boundary.tobytes():
         raise AssertionError("exit clip must start on the resident boundary")
-    _validate_desktop_transparency(clips)
+    _validate_desktop_transparency(clips, giant_moon=moon_variant == "anime")
     return {key: clips[key] for key in CLIP_ORDER}
 
 

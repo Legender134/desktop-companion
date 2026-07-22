@@ -369,3 +369,16 @@ def test_prepared_moon_is_large_bright_and_keeps_canvas_corners_clear():
         alpha.getpixel(point) == 0
         for point in ((0, 0), (191, 0), (0, 207), (191, 207))
     )
+
+
+def test_anime_moon_variant_fills_the_pet_backdrop_without_a_scene_card():
+    moon, _ = _moon_and_roof()
+    current = _prepared_local_moon(moon).getchannel("A")
+    anime = _prepared_local_moon(moon, variant="anime").getchannel("A")
+
+    assert anime.getbbox() == (4, 2, 188, 186)
+    assert sum(anime.histogram()[17:]) > sum(current.histogram()[17:]) * 2
+    assert all(
+        anime.getpixel(point) == 0
+        for point in ((0, 0), (191, 0), (0, 207), (191, 207))
+    )
