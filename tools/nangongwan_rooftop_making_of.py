@@ -110,11 +110,13 @@ def read_action(source: ActionSource) -> TimedFrames:
             if start < 0:
                 raise ValueError(f"invalid atlas start for {source.action_id}")
             crops = tuple(divmod(start + offset, ATLAS_COLUMNS) for offset in range(frame_count))
+            crop_columns = ATLAS_COLUMNS
         else:
             crops = tuple((0, offset) for offset in range(frame_count))
+            crop_columns = frame_count
 
         rows = height // CELL_SIZE[1]
-        if any(row >= rows or column >= ATLAS_COLUMNS for row, column in crops):
+        if any(row >= rows or column >= crop_columns for row, column in crops):
             raise ValueError(f"atlas crop exceeds bounds for {source.action_id}")
 
         atlas = atlas_source.convert("RGBA")
