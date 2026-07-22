@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -131,10 +132,6 @@ def _pet_source(history: Path, variant: str, action_id: str) -> ActionSource:
 def build_showcase_plan(root: Path, background_source: Path) -> ShowcasePlan:
     """Build and validate the approved fifteen-segment action sequence."""
 
-    background_hash, _ = _verified_background_pixels(background_source)
-    if background_hash != BACKGROUND_SHA256:
-        raise ValueError("background SHA-256 does not match the approved source")
-
     history = _history(root)
     small = "01-small-moon-current"
     blink_action = _pet_source(history, small, "idle")
@@ -164,7 +161,32 @@ def build_showcase_plan(root: Path, background_source: Path) -> ShowcasePlan:
         / "render-history-v2-v9"
         / "preview-sequence-v9.json"
     )
-    _validate_public_path(preview_path)
+    moon_184 = _pet_source(history, "02-full-circle-184", "rooftopChestnut")
+    moon_232 = _pet_source(history, "03-cropped-disc-232", "rooftopChestnut")
+    moon_full = _pet_source(history, "04-full-frame-moon-surface", "rooftopChestnut")
+
+    declared_actions = (
+        blink_action,
+        standing,
+        cinematic,
+        anchored,
+        moon_184,
+        moon_232,
+        moon_full,
+    )
+    public_paths = [background_source, preview_path]
+    public_paths.extend(
+        path
+        for action in declared_actions
+        for path in (action.atlas, action.manifest)
+    )
+    for path in public_paths:
+        _validate_public_path(path)
+
+    background_hash, _ = _verified_background_pixels(background_source)
+    if background_hash != BACKGROUND_SHA256:
+        raise ValueError("background SHA-256 does not match the approved source")
+
     preview = json.loads(preview_path.read_text(encoding="utf-8"))
     sequence = preview.get("sequence")
     if not isinstance(sequence, list) or not all(isinstance(action_id, str) for action_id in sequence):
@@ -172,9 +194,6 @@ def build_showcase_plan(root: Path, background_source: Path) -> ShowcasePlan:
     v9 = ShowcaseSource(
         "sequence", tuple(_pet_source(history, small, action_id) for action_id in sequence)
     )
-    moon_184 = _pet_source(history, "02-full-circle-184", "rooftopChestnut")
-    moon_232 = _pet_source(history, "03-cropped-disc-232", "rooftopChestnut")
-    moon_full = _pet_source(history, "04-full-frame-moon-surface", "rooftopChestnut")
 
     blink = ShowcaseSource("blink", (blink_action,))
     action_sources = {
@@ -223,7 +242,7 @@ def build_showcase_plan(root: Path, background_source: Path) -> ShowcasePlan:
         ShowcaseSegment("moon-full", action_sources["moon-full"], 270),
         ShowcaseSegment("blink-07", blink, 15),
     )
-    return ShowcasePlan(background_source, segments)
+    return ShowcasePlan(background_source, segments, (preview_path,))
 
 
 def _timeline_document(plan: ShowcasePlan, background_hash: str) -> dict[str, Any]:
@@ -271,12 +290,15 @@ def _write_timeline(plan: ShowcasePlan, background_hash: str, output: Path) -> N
 def build_showcase(root: Path, background_source: Path) -> Path:
     """Build all fifteen silent clips, their timeline, and the silent-AAC master."""
 
+    source_plan = build_showcase_plan(root, background_source)
     output = root / _OUTPUT_DIRECTORY
     clips_directory = output / "clips"
     clips_directory.mkdir(parents=True, exist_ok=True)
     background_copy = output / "background.png"
     background_hash = copy_verified_background(background_source, background_copy)
-    plan = build_showcase_plan(root, background_copy)
+    plan = ShowcasePlan(
+        background_copy, source_plan.segments, source_plan.sequence_sources
+    )
     if len(plan.segments) != 15 or plan.total_frames != 2473:
         raise ValueError("showcase build requires the approved 15 segments and 2473 frames")
 
@@ -305,17 +327,18 @@ def build_showcase(root: Path, background_source: Path) -> Path:
 def _validate_existing(root: Path, background_source: Path) -> Path:
     """Check Task 3 file/timeline/media invariants without rebuilding artifacts."""
 
+    _validate_public_path(background_source)
     output = root / _OUTPUT_DIRECTORY
     background_copy = output / "background.png"
     if not background_copy.is_file():
         raise ValueError(f"built background is missing: {background_copy}")
+    plan = build_showcase_plan(root, background_copy)
     background_hash, _ = _verified_background_pixels(background_copy)
     if background_hash != BACKGROUND_SHA256:
         raise ValueError("built background does not match the approved SHA-256")
     source_hash, _ = _verified_background_pixels(background_source)
     if source_hash != background_hash:
         raise ValueError("current approved background does not match the built copy")
-    plan = build_showcase_plan(root, background_copy)
     timeline_path = output / "timeline.json"
     try:
         actual_timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
@@ -355,6 +378,7 @@ def _validate_existing(root: Path, background_source: Path) -> Path:
             and clip_probe.audio is None
             and clip_probe.subtitle_streams == 0
             and clip_probe.data_streams == 0
+            and clip_probe.other_streams == 0
         ):
             raise ValueError(f"showcase clip does not satisfy its media contract: {clip}")
     master = output / _MASTER_NAME
@@ -372,8 +396,11 @@ def _validate_existing(root: Path, background_source: Path) -> Path:
         and probe.audio.codec == "aac"
         and probe.audio.sample_rate == 48_000
         and probe.audio.channels == 2
+        and abs(probe.audio.duration - Fraction(plan.total_frames, FPS))
+        <= Fraction(1024, 48_000)
         and probe.subtitle_streams == 0
         and probe.data_streams == 0
+        and probe.other_streams == 0
     ):
         raise ValueError("existing master does not satisfy the Task 3 media contract")
     return master

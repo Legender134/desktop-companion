@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 import pytest
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageStat
 
 import tools.nangongwan_action_showcase_v2 as showcase_module
 import tools.render_nangongwan_action_showcase_v2 as render_module
@@ -20,6 +20,7 @@ from tools.nangongwan_action_showcase_v2 import (
     BACKGROUND_SHA256,
     MediaProbe,
     SegmentFrames,
+    ShowcasePlan,
     VideoProbe,
     add_silent_aac,
     concat_clips,
@@ -36,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKGROUND = Path(
     r"C:\Users\23644\AppData\Local\Temp\codex-clipboard-fa2f4101-2de0-4c4a-a1c9-01fc1c2a4412.png"
 )
+REAL_ENCODED_CENTER_SEQUENCE = showcase_module._encoded_center_sequence
 
 
 @pytest.fixture
@@ -252,6 +254,18 @@ def _test_video_probe(frame_count: int, *, pixel_format: str = "yuv420p") -> Vid
     )
 
 
+def _valid_master_media_probe(
+    *, audio_duration: Fraction = Fraction(2473, 30), other_streams: int = 0
+) -> MediaProbe:
+    return MediaProbe(
+        _test_video_probe(2473),
+        AudioProbe("aac", 48_000, 2, audio_duration),
+        0,
+        0,
+        other_streams,
+    )
+
+
 @pytest.fixture
 def valid_showcase_fixture(tmp_path, monkeypatch, showcase_plan):
     output = tmp_path / "work" / "nangongwan-action-showcase-v2"
@@ -266,9 +280,7 @@ def valid_showcase_fixture(tmp_path, monkeypatch, showcase_plan):
     monkeypatch.setattr(
         showcase_module,
         "probe_media",
-        lambda path, count_frames=False: MediaProbe(
-            _test_video_probe(2473), AudioProbe("aac", 48_000, 2), 0, 0
-        ),
+        lambda path, count_frames=False: _valid_master_media_probe(),
     )
     monkeypatch.setattr(
         showcase_module, "_read_mp4_atom_order", lambda path: True, raising=False
@@ -295,6 +307,25 @@ def valid_showcase_fixture(tmp_path, monkeypatch, showcase_plan):
         lambda plan, background: {"passed": True, "sampledFrames": 45},
         raising=False,
     )
+    monkeypatch.setattr(
+        showcase_module,
+        "_iter_decoded_center_frames",
+        lambda master: showcase_module._iter_expected_center_frames(
+            showcase_plan, showcase_plan.background_source
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        showcase_module,
+        "_encoded_center_sequence",
+        lambda master, plan, background: {
+            "passed": True,
+            "framesCompared": 2473,
+            "minimumPsnrDb": 40.0,
+            "failedFrameCount": 0,
+            "firstFailedFrame": None,
+        },
+    )
     return {"master": master, "plan": showcase_plan, "timeline": timeline}
 
 
@@ -320,6 +351,213 @@ def test_outside_sprite_ssim_is_one_for_identical_background(background_image):
     )
 
 
+@pytest.mark.parametrize("alteration", ("overwrite", "repeat-earlier-action"))
+def test_validation_rejects_altered_or_repeated_encoded_center_frame(
+    valid_showcase_fixture, monkeypatch, alteration
+):
+    def synthetic_frame(index):
+        return Image.new(
+            "RGB",
+            showcase_module.SPRITE_SIZE,
+            ((index * 37) % 256, (index * 73) % 256, (index * 109) % 256),
+        )
+
+    def expected_center_frames(plan, background):
+        for index in range(2473):
+            yield synthetic_frame(index)
+
+    def altered_center_frames(master):
+        for index in range(2473):
+            frame = synthetic_frame(index)
+            if index == 523:
+                if alteration == "overwrite":
+                    changed = frame.copy()
+                    changed.paste((255, 255, 255), (24, 80, 168, 112))
+                    yield changed
+                else:
+                    yield synthetic_frame(45)
+            else:
+                yield frame
+
+    monkeypatch.setattr(
+        showcase_module, "_iter_expected_center_frames", expected_center_frames
+    )
+    monkeypatch.setattr(
+        showcase_module, "_iter_decoded_center_frames", altered_center_frames
+    )
+    monkeypatch.setattr(
+        showcase_module, "_encoded_center_sequence", REAL_ENCODED_CENTER_SEQUENCE
+    )
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["centeredComposition"] is False
+    encoded = report["details"]["centeredComposition"]["encodedSequence"]
+    assert encoded["framesCompared"] == 2473
+    assert encoded["failedFrameCount"] >= 1
+    assert encoded["firstFailedFrame"] == 523
+
+
+def test_validation_checks_privacy_before_reading_any_forbidden_source(
+    tmp_path, monkeypatch, showcase_plan
+):
+    forbidden_background = tmp_path / "DO-NOT-PUBLISH" / "background.png"
+    forbidden_sequence = tmp_path / "anime-reference" / "sequence.json"
+    private_plan = ShowcasePlan(
+        forbidden_background, showcase_plan.segments, (forbidden_sequence,)
+    )
+    timeline = tmp_path / "timeline.json"
+    timeline.write_text(
+        json.dumps(_timeline_document(showcase_plan, BACKGROUND_SHA256)),
+        encoding="utf-8",
+    )
+    master = tmp_path / "master.mp4"
+    master.write_bytes(b"not media")
+    forbidden_reads = []
+    source_operations = []
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+
+    def guarded_read_bytes(path, *args, **kwargs):
+        if any(marker in str(path).lower() for marker in ("anime-reference", "do-not-publish")):
+            forbidden_reads.append(path)
+        return original_read_bytes(path, *args, **kwargs)
+
+    def guarded_read_text(path, *args, **kwargs):
+        if any(marker in str(path).lower() for marker in ("anime-reference", "do-not-publish")):
+            forbidden_reads.append(path)
+        return original_read_text(path, *args, **kwargs)
+
+    def forbidden_read_action(source):
+        source_operations.append(source)
+        raise AssertionError("source-derived reads must be short-circuited")
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    monkeypatch.setattr(showcase_module, "read_action", forbidden_read_action)
+
+    report = validate_showcase(master, private_plan, timeline)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["sourcePrivacy"] is False
+    assert report["checks"]["backgroundHash"] is False
+    assert report["checks"]["centeredComposition"] is False
+    assert forbidden_reads == []
+    assert source_operations == []
+
+
+@pytest.mark.parametrize("damage", ("gap", "malformed"))
+def test_validation_rejects_noncontinuous_or_malformed_timeline_boundaries(
+    valid_showcase_fixture, damage
+):
+    timeline = valid_showcase_fixture["timeline"]
+    document = json.loads(timeline.read_text(encoding="utf-8"))
+    if damage == "gap":
+        document["segments"][4]["startFrame"] += 1
+    else:
+        document["segments"][4]["endFrame"] = "not-an-integer"
+    timeline.write_text(json.dumps(document), encoding="utf-8")
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["totalFrames"] is False
+
+
+def test_validation_rejects_invalid_fast_start_atom_order(
+    valid_showcase_fixture, monkeypatch
+):
+    monkeypatch.setattr(showcase_module, "_read_mp4_atom_order", lambda path: False)
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["videoEncoding"] is False
+
+
+def test_validation_rejects_audible_audio(valid_showcase_fixture, monkeypatch):
+    monkeypatch.setattr(
+        showcase_module,
+        "_measure_audio_silence",
+        lambda path: {"passed": False, "maxVolumeDbfs": -18.0},
+    )
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["silentAudio"] is False
+
+
+def test_validation_rejects_a_one_second_silent_audio_track(
+    valid_showcase_fixture, monkeypatch
+):
+    monkeypatch.setattr(
+        showcase_module,
+        "probe_media",
+        lambda path, count_frames=False: _valid_master_media_probe(
+            audio_duration=Fraction(1, 1)
+        ),
+    )
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["silentAudio"] is False
+    assert report["details"]["audio"]["durationAligned"] is False
+
+
+def test_validation_rejects_attachment_or_unknown_streams(
+    valid_showcase_fixture, monkeypatch
+):
+    monkeypatch.setattr(
+        showcase_module,
+        "probe_media",
+        lambda path, count_frames=False: _valid_master_media_probe(other_streams=1),
+    )
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["noTextSidecarsOrStreams"] is False
+    assert report["details"]["textStreamsAndSidecars"]["otherStreams"] == 1
+
+
+def test_probe_media_reports_audio_duration_and_unknown_stream_count(
+    tmp_path, monkeypatch
+):
+    document = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "width": 1600,
+                "height": 900,
+                "codec_name": "h264",
+                "profile": "High",
+                "pix_fmt": "yuv420p",
+                "sample_aspect_ratio": "1:1",
+                "r_frame_rate": "30/1",
+                "nb_read_frames": "2473",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "sample_rate": "48000",
+                "channels": 2,
+                "duration": "82.432000",
+            },
+            {"codec_type": "attachment", "codec_name": "ttf"},
+        ]
+    }
+    monkeypatch.setattr(showcase_module, "_probe_document", lambda *args, **kwargs: document)
+
+    probe = probe_media(tmp_path / "master.mp4", count_frames=True)
+
+    assert probe.audio is not None
+    assert probe.audio.duration == Fraction("82.432000")
+    assert probe.other_streams == 1
+
+
 def test_extract_review_frames_uses_every_segment_boundary_and_builds_15_by_3_sheet(
     tmp_path, monkeypatch, showcase_plan
 ):
@@ -331,7 +569,13 @@ def test_extract_review_frames_uses_every_segment_boundary_and_builds_15_by_3_sh
     def fake_extract(master, frame_indices, destinations):
         extracted_indices.extend(frame_indices)
         for index, destination in zip(frame_indices, destinations, strict=True):
-            Image.new("RGB", (1600, 900), (index % 256, 40, 80)).save(destination)
+            quotient = index // 256
+            color = (
+                (index * 37 + quotient * 17) % 256,
+                (index * 73 + quotient * 79) % 256,
+                (index * 109 + quotient * 131) % 256,
+            )
+            Image.new("RGB", (1600, 900), color).save(destination)
 
     monkeypatch.setattr(
         showcase_module, "_extract_selected_frames", fake_extract, raising=False
@@ -362,6 +606,16 @@ def test_extract_review_frames_uses_every_segment_boundary_and_builds_15_by_3_sh
     assert all(Image.open(frame).size == (1600, 900) for frame in frames)
     with Image.open(tmp_path / "review" / "contact-sheet.jpg") as sheet:
         assert sheet.size == (15 * 320, 3 * 180)
+        for cell_index, frame_path in enumerate(frames):
+            column = cell_index % 15
+            row = cell_index // 15
+            actual = sheet.crop(
+                (column * 320, row * 180, (column + 1) * 320, (row + 1) * 180)
+            )
+            with Image.open(frame_path) as frame:
+                expected = frame.convert("RGB").resize((320, 180), Image.Resampling.LANCZOS)
+            difference = ImageStat.Stat(ImageChops.difference(actual, expected))
+            assert max(difference.mean) < 3.0, frame_path.name
 
 
 @pytest.fixture
@@ -388,7 +642,7 @@ def existing_validation_output(tmp_path, monkeypatch, showcase_plan):
     master.write_bytes(b"master")
     master_probe = MediaProbe(
         _test_video_probe(showcase_plan.total_frames),
-        AudioProbe("aac", 48_000, 2),
+        AudioProbe("aac", 48_000, 2, Fraction(showcase_plan.total_frames, 30)),
         0,
         0,
     )
@@ -545,19 +799,27 @@ def test_moon_segments_use_one_identical_source_index_mapping(
 
 
 def test_all_segment_frame_counts_and_moon_mapping_are_exact(
-    showcase_plan, background_image
+    monkeypatch, showcase_plan, background_image
 ):
-    built = {
-        segment.id: showcase_module.build_segment_frames(segment, background_image)
+    monkeypatch.setattr(
+        showcase_module, "compose_frame", lambda background, sprite: sprite.copy()
+    )
+    built_counts = {
+        segment.id: len(
+            showcase_module.build_segment_frames(segment, background_image).frames
+        )
         for segment in showcase_plan.segments
     }
 
-    assert {key: len(built[key].frames) for key in ("moon-184", "moon-232", "moon-full")} == {
+    assert {key: built_counts[key] for key in ("moon-184", "moon-232", "moon-full")} == {
         "moon-184": 270,
         "moon-232": 270,
         "moon-full": 270,
     }
-    assert all(len(built[segment.id].frames) == segment.output_frames for segment in showcase_plan.segments)
+    assert all(
+        built_counts[segment.id] == segment.output_frames
+        for segment in showcase_plan.segments
+    )
 
 
 def test_showcase_plan_has_exact_fifteen_segments_and_output_frames():
@@ -641,6 +903,8 @@ def test_copy_verified_background_uses_only_its_initial_source_byte_snapshot(
 
 def test_showcase_plan_rejects_a_private_resolved_v9_preview_path(monkeypatch):
     original_resolve = Path.resolve
+    original_verified_background_pixels = render_module._verified_background_pixels
+    background_reads = []
 
     def resolve_preview_as_private(path: Path, *args, **kwargs) -> Path:
         if path.name == "preview-sequence-v9.json":
@@ -649,8 +913,19 @@ def test_showcase_plan_rejects_a_private_resolved_v9_preview_path(monkeypatch):
 
     monkeypatch.setattr(Path, "resolve", resolve_preview_as_private)
 
+    def record_background_read(path):
+        background_reads.append(path)
+        return original_verified_background_pixels(path)
+
+    monkeypatch.setattr(
+        render_module,
+        "_verified_background_pixels",
+        record_background_read,
+    )
+
     with pytest.raises(ValueError, match="showcase source is not public"):
         build_showcase_plan(ROOT, BACKGROUND)
+    assert background_reads == []
 
 
 def test_showcase_plan_rejects_moon_actions_with_different_frame_durations(

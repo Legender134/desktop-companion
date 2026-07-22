@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from hashlib import sha256
 from io import BytesIO
+from itertools import zip_longest
 import json
 import math
 from pathlib import Path
@@ -13,7 +14,7 @@ import re
 import struct
 import subprocess
 import tempfile
-from typing import Callable, Literal
+from typing import BinaryIO, Callable, Iterator, Literal
 
 from PIL import Image, ImageChops, ImageStat
 
@@ -50,6 +51,7 @@ _EXPECTED_OUTPUT_FRAMES = (15, 62, 15, 273, 15, 288, 15, 920, 15, 270, 15, 270, 
 _EXPECTED_TOTAL_FRAMES = 2473
 _FORBIDDEN_SOURCE_MARKERS = ("anime-reference", "do-not-publish")
 _SSIM_THRESHOLD = 0.995
+_CENTER_MIN_PSNR_DB = 29.0
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ class ShowcaseSegment:
 class ShowcasePlan:
     background_source: Path
     segments: tuple[ShowcaseSegment, ...]
+    sequence_sources: tuple[Path, ...] = ()
 
     @property
     def total_frames(self) -> int:
@@ -97,6 +100,7 @@ class AudioProbe:
     codec: str
     sample_rate: int
     channels: int
+    duration: Fraction
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,7 @@ class MediaProbe:
     audio: AudioProbe | None
     subtitle_streams: int
     data_streams: int
+    other_streams: int = 0
 
 
 def _run_capture(command: list[str], *, tool: str) -> subprocess.CompletedProcess[bytes]:
@@ -176,6 +181,17 @@ def _frame_rate(stream: dict[str, object]) -> Fraction:
     return rate
 
 
+def _positive_fraction(stream: dict[str, object], key: str) -> Fraction:
+    value = _required_string(stream, key)
+    try:
+        parsed = Fraction(value)
+    except (ValueError, ZeroDivisionError) as error:
+        raise ValueError(f"ffprobe stream has no valid {key}") from error
+    if parsed <= 0:
+        raise ValueError(f"ffprobe stream {key} must be positive")
+    return parsed
+
+
 def probe_media(path: Path, *, count_frames: bool = False) -> MediaProbe:
     """Read exact stream metadata from one media file with FFprobe."""
 
@@ -213,12 +229,17 @@ def probe_media(path: Path, *, count_frames: bool = False) -> MediaProbe:
             codec=_required_string(audio_stream, "codec_name"),
             sample_rate=_required_int(audio_stream, "sample_rate"),
             channels=_required_int(audio_stream, "channels"),
+            duration=_positive_fraction(audio_stream, "duration"),
         )
     return MediaProbe(
         video=video,
         audio=audio,
         subtitle_streams=sum(stream.get("codec_type") == "subtitle" for stream in streams),
         data_streams=sum(stream.get("codec_type") == "data" for stream in streams),
+        other_streams=sum(
+            stream.get("codec_type") not in {"video", "audio", "subtitle", "data"}
+            for stream in streams
+        ),
     )
 
 
@@ -445,27 +466,35 @@ def _midpoint_positions(total_duration_ms: int, output_frames: int) -> tuple[Fra
 _MOON_SAMPLE_POSITIONS = _midpoint_positions(_MOON_DURATION_MS, _MOON_OUTPUT_FRAMES)
 
 
-def _resample_at_positions(
+def _source_indices_at_positions(
     timed: TimedFrames, positions: tuple[Fraction, ...]
-) -> SegmentFrames:
+) -> tuple[int, ...]:
     _validate_timed_frames(timed)
+    if not positions:
+        raise ValueError("resampling positions must not be empty")
     cumulative_durations: list[int] = []
     cumulative = 0
     for duration in timed.durations_ms:
         cumulative += duration
         cumulative_durations.append(cumulative)
 
-    source_indices = [
+    source_indices = tuple(
         next(
             source_index
             for source_index, source_end in enumerate(cumulative_durations)
             if source_end > timestamp
         )
         for timestamp in positions
-    ]
-    source_indices[0] = 0
-    if len(source_indices) > 1:
-        source_indices[-1] = len(timed.frames) - 1
+    )
+    if len(source_indices) == 1:
+        return (0,)
+    return (0, *source_indices[1:-1], len(timed.frames) - 1)
+
+
+def _resample_at_positions(
+    timed: TimedFrames, positions: tuple[Fraction, ...]
+) -> SegmentFrames:
+    source_indices = _source_indices_at_positions(timed, positions)
     return SegmentFrames(tuple(timed.frames[index].copy() for index in source_indices))
 
 
@@ -502,6 +531,51 @@ def _concatenate_actions(actions: tuple[ActionSource, ...]) -> TimedFrames:
         tuple(frame for timed in timed_actions for frame in timed.frames),
         tuple(duration for timed in timed_actions for duration in timed.durations_ms),
     )
+
+
+def _segment_source_indices(
+    segment: ShowcaseSegment, timed: TimedFrames
+) -> tuple[int, ...]:
+    if segment.source.kind == "blink":
+        if len(timed.frames) < 4 or segment.output_frames != len(BLINK_SOURCE_INDICES):
+            raise ValueError("blink segment does not match the approved source mapping")
+        return BLINK_SOURCE_INDICES
+    if segment.source.kind not in {"action", "sequence"}:
+        raise ValueError(f"unknown showcase source kind: {segment.source.kind}")
+    if segment.id in _MOON_SEGMENT_IDS:
+        if (timed.duration_ms, segment.output_frames) != (
+            _MOON_DURATION_MS,
+            _MOON_OUTPUT_FRAMES,
+        ):
+            raise ValueError("moon segments must use the approved shared time positions")
+        positions = _MOON_SAMPLE_POSITIONS
+    else:
+        positions = _midpoint_positions(timed.duration_ms, segment.output_frames)
+    return _source_indices_at_positions(timed, positions)
+
+
+def _iter_expected_center_frames(
+    plan: ShowcasePlan, background: Path
+) -> Iterator[Image.Image]:
+    """Yield all 2473 expected native center crops without full-frame buffering."""
+
+    rectangle = (
+        SPRITE_ORIGIN[0],
+        SPRITE_ORIGIN[1],
+        SPRITE_ORIGIN[0] + SPRITE_SIZE[0],
+        SPRITE_ORIGIN[1] + SPRITE_SIZE[1],
+    )
+    with Image.open(background) as source:
+        center_background = source.convert("RGB").crop(rectangle).convert("RGBA")
+    for segment in plan.segments:
+        timed = _concatenate_actions(segment.source.actions)
+        source_indices = _segment_source_indices(segment, timed)
+        if len(source_indices) != segment.output_frames:
+            raise ValueError("expected center sequence does not match segment frames")
+        for source_index in source_indices:
+            center = center_background.copy()
+            center.alpha_composite(timed.frames[source_index], (0, 0))
+            yield center.convert("RGB")
 
 
 def build_segment_frames(segment: ShowcaseSegment, background: Image.Image) -> SegmentFrames:
@@ -801,6 +875,125 @@ def _representative_sprites(segment: ShowcaseSegment) -> tuple[Image.Image, ...]
     return tuple(timed.frames[index] for index in source_indices)
 
 
+def _read_raw_frame(stream: BinaryIO, frame_bytes: int) -> bytes | None:
+    chunks: list[bytes] = []
+    remaining = frame_bytes
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            if not chunks:
+                return None
+            raise ValueError("decoded center stream ended inside a frame")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _iter_decoded_center_frames(master: Path) -> Iterator[Image.Image]:
+    """Stream only the encoded 192x208 center crop from the final master."""
+
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        str(master),
+        "-map",
+        "0:v:0",
+        "-vf",
+        f"crop={SPRITE_SIZE[0]}:{SPRITE_SIZE[1]}:{SPRITE_ORIGIN[0]}:{SPRITE_ORIGIN[1]}",
+        "-pix_fmt",
+        "rgb24",
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    try:
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+    except OSError as error:
+        raise RuntimeError(f"could not start ffmpeg: {error}") from error
+    assert process.stdout is not None
+    completed = False
+    try:
+        frame_bytes = SPRITE_SIZE[0] * SPRITE_SIZE[1] * 3
+        while True:
+            encoded = _read_raw_frame(process.stdout, frame_bytes)
+            if encoded is None:
+                break
+            yield Image.frombytes("RGB", SPRITE_SIZE, encoded)
+        stderr = process.stderr.read() if process.stderr is not None else b""
+        returncode = process.wait()
+        completed = True
+        if returncode:
+            message = stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"ffmpeg failed with exit code {returncode}:\n{message}"
+            )
+    finally:
+        if not completed and process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def _center_frame_psnr(expected: Image.Image, actual: Image.Image) -> float:
+    if (
+        expected.size != SPRITE_SIZE
+        or actual.size != SPRITE_SIZE
+        or expected.mode != "RGB"
+        or actual.mode != "RGB"
+    ):
+        raise ValueError("center comparison frames must be native RGB sprite crops")
+    difference = ImageChops.difference(expected, actual)
+    rms = ImageStat.Stat(difference).rms
+    mean_squared_error = sum(value * value for value in rms) / len(rms)
+    if mean_squared_error == 0:
+        return float("inf")
+    return 10 * math.log10((255 * 255) / mean_squared_error)
+
+
+def _encoded_center_sequence(
+    master: Path, plan: ShowcasePlan, background: Path
+) -> dict[str, object]:
+    """Compare every encoded center frame with its exact planned counterpart."""
+
+    missing = object()
+    minimum_psnr = float("inf")
+    failed_indices: list[int] = []
+    compared = 0
+    for index, (expected, actual) in enumerate(
+        zip_longest(
+            _iter_expected_center_frames(plan, background),
+            _iter_decoded_center_frames(master),
+            fillvalue=missing,
+        )
+    ):
+        compared += 1
+        if expected is missing or actual is missing:
+            failed_indices.append(index)
+            continue
+        assert isinstance(expected, Image.Image)
+        assert isinstance(actual, Image.Image)
+        psnr = _center_frame_psnr(expected, actual)
+        minimum_psnr = min(minimum_psnr, psnr)
+        if psnr < _CENTER_MIN_PSNR_DB:
+            failed_indices.append(index)
+    return {
+        "passed": compared == _EXPECTED_TOTAL_FRAMES and not failed_indices,
+        "method": "per-frame RGB PSNR over decoded 192x208 center crop",
+        "thresholdPsnrDb": _CENTER_MIN_PSNR_DB,
+        "framesCompared": compared,
+        "minimumPsnrDb": (
+            "inf" if math.isinf(minimum_psnr) else minimum_psnr
+        ),
+        "failedFrameCount": len(failed_indices),
+        "firstFailedFrame": failed_indices[0] if failed_indices else None,
+        "failedFrames": failed_indices[:20],
+    }
+
+
 def _centered_composition(plan: ShowcasePlan, background: Path) -> dict[str, object]:
     with Image.open(background) as source:
         backdrop = source.convert("RGB")
@@ -847,7 +1040,7 @@ def _moon_frame_parity(plan: ShowcasePlan) -> dict[str, object]:
 
 
 def _source_privacy(plan: ShowcasePlan) -> dict[str, object]:
-    sources = [plan.background_source]
+    sources = [plan.background_source, *plan.sequence_sources]
     sources.extend(
         path
         for segment in plan.segments
@@ -864,7 +1057,13 @@ def _source_privacy(plan: ShowcasePlan) -> dict[str, object]:
             path = source.resolve(strict=False)
         encoded = str(path)
         resolved.append(encoded)
-        passed = passed and not any(marker in encoded.lower() for marker in _FORBIDDEN_SOURCE_MARKERS)
+        passed = (
+            passed
+            and path.is_file()
+            and not any(
+                marker in encoded.lower() for marker in _FORBIDDEN_SOURCE_MARKERS
+            )
+        )
     return {"passed": passed, "resolvedSources": resolved}
 
 
@@ -897,6 +1096,10 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         "moonFrameParity": False,
     }
     details: dict[str, object] = {}
+    checks["sourcePrivacy"] = _checked_detail(
+        details, "sourcePrivacy", lambda: _source_privacy(plan)
+    )
+    sources_are_private = not checks["sourcePrivacy"]
     try:
         timeline_document = json.loads(timeline.read_text(encoding="utf-8"))
         if not isinstance(timeline_document, dict):
@@ -917,7 +1120,15 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         )
         return {"passed": passed, "sha256": encoded_hash, "encodedFidelity": fidelity}
 
-    checks["backgroundHash"] = _checked_detail(details, "backgroundHash", background_detail)
+    if sources_are_private:
+        details["backgroundHash"] = {
+            "passed": False,
+            "skipped": "source privacy failed before background reads",
+        }
+    else:
+        checks["backgroundHash"] = _checked_detail(
+            details, "backgroundHash", background_detail
+        )
     plan_ids = tuple(segment.id for segment in plan.segments)
     timeline_ids = tuple(entry.get("id") for entry in entries)
     checks["segmentOrder"] = plan_ids == _EXPECTED_SEGMENT_IDS and timeline_ids == _EXPECTED_SEGMENT_IDS
@@ -993,11 +1204,18 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         except Exception as error:
             silence = {"passed": False, "error": f"{type(error).__name__}: {error}"}
         audio = probe.audio
+        expected_audio_duration = Fraction(_EXPECTED_TOTAL_FRAMES, FPS)
+        audio_duration_tolerance = Fraction(1024, 48_000)
+        duration_aligned = (
+            audio is not None
+            and abs(audio.duration - expected_audio_duration) <= audio_duration_tolerance
+        )
         checks["silentAudio"] = (
             audio is not None
             and audio.codec == "aac"
             and audio.sample_rate == 48_000
             and audio.channels == 2
+            and duration_aligned
             and silence.get("passed") is True
         )
         details["audio"] = {
@@ -1005,6 +1223,10 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
             "codec": audio.codec if audio else None,
             "sampleRate": audio.sample_rate if audio else None,
             "channels": audio.channels if audio else None,
+            "duration": str(audio.duration) if audio else None,
+            "expectedDuration": str(expected_audio_duration),
+            "durationTolerance": str(audio_duration_tolerance),
+            "durationAligned": duration_aligned,
             "silence": silence,
         }
         try:
@@ -1016,22 +1238,54 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         except OSError as error:
             sidecars = (master.parent / f"scan-error-{error}",)
         checks["noTextSidecarsOrStreams"] = (
-            probe.subtitle_streams == 0 and probe.data_streams == 0 and not sidecars
+            probe.subtitle_streams == 0
+            and probe.data_streams == 0
+            and probe.other_streams == 0
+            and not sidecars
         )
         details["textStreamsAndSidecars"] = {
             "passed": checks["noTextSidecarsOrStreams"],
             "subtitleStreams": probe.subtitle_streams,
             "dataStreams": probe.data_streams,
+            "otherStreams": probe.other_streams,
             "sidecars": [str(path) for path in sidecars],
         }
-    checks["sourcePrivacy"] = _checked_detail(details, "sourcePrivacy", lambda: _source_privacy(plan))
-    checks["centeredComposition"] = _checked_detail(
-        details, "centeredComposition", lambda: _centered_composition(plan, plan.background_source)
-    )
-    checks["moonFrameParity"] = _checked_detail(details, "moonFrameParity", lambda: _moon_frame_parity(plan))
+    if sources_are_private:
+        details["centeredComposition"] = {
+            "passed": False,
+            "skipped": "source privacy failed before source-derived reads",
+        }
+        details["moonFrameParity"] = {
+            "passed": False,
+            "skipped": "source privacy failed before source-derived reads",
+        }
+    else:
+        def composition_detail() -> dict[str, object]:
+            pre_encode = _centered_composition(plan, plan.background_source)
+            encoded = _encoded_center_sequence(
+                master, plan, plan.background_source
+            )
+            return {
+                "passed": (
+                    pre_encode.get("passed") is True
+                    and encoded.get("passed") is True
+                ),
+                "preEncode": pre_encode,
+                "encodedSequence": encoded,
+            }
+
+        checks["centeredComposition"] = _checked_detail(
+            details, "centeredComposition", composition_detail
+        )
+        checks["moonFrameParity"] = _checked_detail(
+            details, "moonFrameParity", lambda: _moon_frame_parity(plan)
+        )
 
     artifact_hashes: dict[str, str] = {}
-    for name, path in (("master", master), ("timeline", timeline), ("background", plan.background_source)):
+    artifacts = [("master", master), ("timeline", timeline)]
+    if not sources_are_private:
+        artifacts.append(("background", plan.background_source))
+    for name, path in artifacts:
         try:
             artifact_hashes[name] = sha256(path.read_bytes()).hexdigest()
         except OSError:
