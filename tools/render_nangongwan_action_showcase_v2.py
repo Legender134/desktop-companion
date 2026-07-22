@@ -71,7 +71,7 @@ def _source(
     )
 
 
-def _action_metadata(source: ActionSource) -> tuple[int, int]:
+def _action_metadata(source: ActionSource) -> tuple[int, tuple[int, ...]]:
     for path in (source.atlas, source.manifest):
         _validate_public_path(path)
 
@@ -101,16 +101,23 @@ def _action_metadata(source: ActionSource) -> tuple[int, int]:
         or any(not isinstance(duration, int) or duration <= 0 for duration in durations)
     ):
         raise ValueError(f"invalid frame durations for {source.action_id}")
-    return frame_count, sum(durations)
+    return frame_count, tuple(durations)
 
 
-def _validate_source(source: ShowcaseSource) -> tuple[int, int]:
+def _source_metadata(source: ShowcaseSource) -> tuple[int, tuple[int, ...]]:
     if not source.actions:
         raise ValueError("showcase source must contain actions")
     metadata = tuple(_action_metadata(action) for action in source.actions)
-    return sum(frame_count for frame_count, _ in metadata), sum(
-        duration_ms for _, duration_ms in metadata
+    return sum(frame_count for frame_count, _ in metadata), tuple(
+        duration_ms
+        for _, action_durations in metadata
+        for duration_ms in action_durations
     )
+
+
+def _validate_source(source: ShowcaseSource) -> tuple[int, int]:
+    frame_count, durations = _source_metadata(source)
+    return frame_count, sum(durations)
 
 
 def _pet_source(history: Path, variant: str, action_id: str) -> ActionSource:
@@ -184,9 +191,15 @@ def build_showcase_plan(root: Path, background_source: Path) -> ShowcasePlan:
         or (v9_frames, v9_duration) != (166, 30_680)
     ):
         raise ValueError("V9 source must contain 166 frames and 30680 ms")
-    for source_name in ("moon-184", "moon-232", "moon-full"):
-        if _validate_source(action_sources[source_name]) != (44, 8_990):
+    moon_metadata = tuple(
+        _source_metadata(action_sources[source_name])
+        for source_name in ("moon-184", "moon-232", "moon-full")
+    )
+    for frame_count, durations in moon_metadata:
+        if (frame_count, sum(durations)) != (44, 8_990):
             raise ValueError("moon source must contain 44 frames and 8990 ms")
+    if any(durations != moon_metadata[0][1] for _, durations in moon_metadata[1:]):
+        raise ValueError("moon sources must have identical per-frame durations")
     for source_name in ("standing-chestnut", "cinematic-36", "anchored-48"):
         _validate_source(action_sources[source_name])
 
@@ -311,8 +324,36 @@ def _validate_existing(root: Path, background_source: Path) -> Path:
         output / "clips" / f"{index:02d}-{segment.id}.mp4"
         for index, segment in enumerate(plan.segments, start=1)
     )
-    if not all(clip.is_file() for clip in expected_clips):
-        raise ValueError("one or more of the fifteen showcase clips is missing")
+    actual_clips = {
+        path.resolve()
+        for path in (output / "clips").rglob("*")
+        if path.is_file() and path.suffix.lower() == ".mp4"
+    }
+    if actual_clips != {clip.resolve() for clip in expected_clips}:
+        raise ValueError("showcase clip filenames do not match the exact expected set")
+    subtitle_sidecars = tuple(
+        path
+        for path in output.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".ass", ".srt", ".vtt"}
+    )
+    if subtitle_sidecars:
+        raise ValueError("showcase output must not contain subtitle sidecars")
+    for clip, segment in zip(expected_clips, plan.segments, strict=True):
+        clip_probe = probe_media(clip, count_frames=True)
+        if not (
+            clip_probe.video.width == FRAME_SIZE[0]
+            and clip_probe.video.height == FRAME_SIZE[1]
+            and clip_probe.video.codec == "h264"
+            and clip_probe.video.profile == "High"
+            and clip_probe.video.pixel_format == "yuv420p"
+            and clip_probe.video.sample_aspect_ratio == "1:1"
+            and clip_probe.video.frame_rate == FPS
+            and clip_probe.video.nb_read_frames == segment.output_frames
+            and clip_probe.audio is None
+            and clip_probe.subtitle_streams == 0
+            and clip_probe.data_streams == 0
+        ):
+            raise ValueError(f"showcase clip does not satisfy its media contract: {clip}")
     master = output / _MASTER_NAME
     probe = probe_media(master, count_frames=True)
     if not (

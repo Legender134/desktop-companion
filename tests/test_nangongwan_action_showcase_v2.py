@@ -1,4 +1,5 @@
 from io import BytesIO
+from fractions import Fraction
 import json
 from pathlib import Path
 import subprocess
@@ -8,14 +9,18 @@ import pytest
 from PIL import Image, ImageChops
 
 import tools.nangongwan_action_showcase_v2 as showcase_module
+import tools.render_nangongwan_action_showcase_v2 as render_module
 from tools.render_nangongwan_action_showcase_v2 import (
     _timeline_document,
     build_showcase,
     build_showcase_plan,
 )
 from tools.nangongwan_action_showcase_v2 import (
+    AudioProbe,
     BACKGROUND_SHA256,
+    MediaProbe,
     SegmentFrames,
+    VideoProbe,
     add_silent_aac,
     concat_clips,
     copy_verified_background,
@@ -57,6 +62,33 @@ def tiny_segments():
     )
 
 
+def _decoded_frame_md5s(path: Path) -> tuple[str, ...]:
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-f",
+            "framemd5",
+            "-",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return tuple(
+        line.rsplit(",", 1)[-1].strip()
+        for line in completed.stdout.splitlines()
+        if line and not line.startswith("#")
+    )
+
+
 def test_two_segment_encode_has_exact_frames_and_no_subtitle_stream(
     tmp_path, tiny_segments
 ):
@@ -74,9 +106,18 @@ def test_two_segment_encode_has_exact_frames_and_no_subtitle_stream(
     assert probe.video.nb_read_frames == 30
     assert probe.video.width == 1600 and probe.video.height == 900
     assert probe.video.codec == "h264" and probe.video.profile == "High"
+    assert probe.video.pixel_format == "yuv420p"
+    assert probe.video.sample_aspect_ratio == "1:1"
+    assert probe.video.frame_rate == Fraction(30, 1)
     assert probe.audio is not None
     assert probe.audio.codec == "aac" and probe.audio.sample_rate == 48000
+    assert probe.audio.channels == 2
     assert probe.subtitle_streams == 0
+    assert probe.data_streams == 0
+    assert _decoded_frame_md5s(final) == (
+        *_decoded_frame_md5s(first),
+        *_decoded_frame_md5s(second),
+    )
 
 
 def test_timeline_has_exact_contiguous_segments_and_no_text_fields(showcase_plan):
@@ -176,6 +217,99 @@ def test_render_cli_can_run_directly_from_the_repository_root():
     assert completed.returncode == 0, completed.stderr
     assert "--build-all" in completed.stdout
     assert "--validate-only" in completed.stdout
+
+
+def _test_video_probe(frame_count: int, *, pixel_format: str = "yuv420p") -> VideoProbe:
+    return VideoProbe(
+        width=1600,
+        height=900,
+        codec="h264",
+        profile="High",
+        pixel_format=pixel_format,
+        sample_aspect_ratio="1:1",
+        frame_rate=Fraction(30, 1),
+        nb_read_frames=frame_count,
+    )
+
+
+@pytest.fixture
+def existing_validation_output(tmp_path, monkeypatch, showcase_plan):
+    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    clips_directory = output / "clips"
+    clips_directory.mkdir(parents=True)
+    copy_verified_background(BACKGROUND, output / "background.png")
+    (output / "timeline.json").write_text(
+        json.dumps(_timeline_document(showcase_plan, BACKGROUND_SHA256)),
+        encoding="utf-8",
+    )
+    clips = tuple(
+        clips_directory / f"{index:02d}-{segment.id}.mp4"
+        for index, segment in enumerate(showcase_plan.segments, start=1)
+    )
+    clip_probes = {}
+    for clip, segment in zip(clips, showcase_plan.segments, strict=True):
+        clip.write_bytes(b"clip")
+        clip_probes[clip] = MediaProbe(
+            _test_video_probe(segment.output_frames), None, 0, 0
+        )
+    master = output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    master.write_bytes(b"master")
+    master_probe = MediaProbe(
+        _test_video_probe(showcase_plan.total_frames),
+        AudioProbe("aac", 48_000, 2),
+        0,
+        0,
+    )
+
+    monkeypatch.setattr(
+        render_module,
+        "build_showcase_plan",
+        lambda root, background_source: showcase_plan,
+    )
+    monkeypatch.setattr(
+        render_module,
+        "probe_media",
+        lambda path, count_frames=False: (
+            master_probe if path == master else clip_probes[path]
+        ),
+    )
+    return {
+        "root": tmp_path,
+        "output": output,
+        "clips": clips,
+        "clip_probes": clip_probes,
+    }
+
+
+@pytest.mark.parametrize("failure", ("frame-count", "stream"))
+def test_validate_existing_rejects_a_clip_with_wrong_frames_or_stream(
+    existing_validation_output, failure
+):
+    clip = existing_validation_output["clips"][3]
+    if failure == "frame-count":
+        video = _test_video_probe(274)
+    else:
+        video = _test_video_probe(273, pixel_format="yuv444p")
+    existing_validation_output["clip_probes"][clip] = MediaProbe(video, None, 0, 0)
+
+    with pytest.raises(ValueError, match="clip"):
+        render_module._validate_existing(existing_validation_output["root"], BACKGROUND)
+
+
+def test_validate_existing_rejects_an_extra_mp4_clip(existing_validation_output):
+    (existing_validation_output["output"] / "clips" / "stale.mp4").write_bytes(b"stale")
+
+    with pytest.raises(ValueError, match="clip"):
+        render_module._validate_existing(existing_validation_output["root"], BACKGROUND)
+
+
+def test_validate_existing_rejects_any_subtitle_sidecar(existing_validation_output):
+    review = existing_validation_output["output"] / "review"
+    review.mkdir()
+    (review / "stale.srt").write_text("subtitle", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="subtitle"):
+        render_module._validate_existing(existing_validation_output["root"], BACKGROUND)
 
 
 def test_blink_is_exactly_fifteen_frames_and_returns_to_open_pose(idle_frames):
@@ -384,4 +518,25 @@ def test_showcase_plan_rejects_a_private_resolved_v9_preview_path(monkeypatch):
     monkeypatch.setattr(Path, "resolve", resolve_preview_as_private)
 
     with pytest.raises(ValueError, match="showcase source is not public"):
+        build_showcase_plan(ROOT, BACKGROUND)
+
+
+def test_showcase_plan_rejects_moon_actions_with_different_frame_durations(
+    monkeypatch,
+):
+    original_read_text = Path.read_text
+
+    def read_one_changed_moon_manifest(path: Path, *args, **kwargs) -> str:
+        encoded = original_read_text(path, *args, **kwargs)
+        if path.name == "pet.json" and "03-cropped-disc-232" in path.parts:
+            document = json.loads(encoded)
+            durations = document["actions"]["rooftopChestnut"]["frameDurations"]
+            durations[0] += 10
+            durations[1] -= 10
+            return json.dumps(document)
+        return encoded
+
+    monkeypatch.setattr(Path, "read_text", read_one_changed_moon_manifest)
+
+    with pytest.raises(ValueError, match="identical per-frame durations"):
         build_showcase_plan(ROOT, BACKGROUND)
