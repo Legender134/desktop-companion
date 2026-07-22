@@ -2,17 +2,87 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 import tools.nangongwan_action_showcase_v2 as showcase_module
 from tools.render_nangongwan_action_showcase_v2 import build_showcase_plan
 from tools.nangongwan_action_showcase_v2 import copy_verified_background
+from tools.nangongwan_rooftop_making_of import TimedFrames, read_action
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKGROUND = Path(
     r"C:\Users\23644\AppData\Local\Temp\codex-clipboard-fa2f4101-2de0-4c4a-a1c9-01fc1c2a4412.png"
 )
+
+
+@pytest.fixture
+def showcase_plan():
+    return build_showcase_plan(ROOT, BACKGROUND)
+
+
+@pytest.fixture
+def background_image():
+    with Image.open(BACKGROUND) as source:
+        return source.convert("RGB")
+
+
+@pytest.fixture
+def idle_frames(showcase_plan):
+    return read_action(showcase_plan.segments[0].source.actions[0])
+
+
+def test_blink_is_exactly_fifteen_frames_and_returns_to_open_pose(idle_frames):
+    blink = showcase_module.make_blink(idle_frames)
+
+    assert len(blink.frames) == 15
+    assert blink.frames[0].tobytes() == idle_frames.frames[0].tobytes()
+    assert blink.frames[-1].tobytes() == idle_frames.frames[0].tobytes()
+    assert blink.frames[6].tobytes() != blink.frames[0].tobytes()
+
+
+def test_compose_frame_changes_only_the_centered_sprite_rectangle():
+    background = Image.effect_noise((1600, 900), 80).convert("RGB")
+    sprite = Image.new("RGBA", (192, 208), (200, 50, 80, 128))
+
+    composed = showcase_module.compose_frame(background, sprite)
+
+    changed_bounds = ImageChops.difference(background, composed).getbbox()
+    assert changed_bounds is not None
+    left, top, right, bottom = changed_bounds
+    assert 704 <= left < right <= 896
+    assert 346 <= top < bottom <= 554
+    assert background.crop((704, 346, 896, 554)).tobytes() != composed.crop(
+        (704, 346, 896, 554)
+    ).tobytes()
+
+
+def test_resample_action_uses_cumulative_duration_midpoints_and_endpoint_frames():
+    frames = tuple(
+        Image.new("RGBA", (192, 208), (value, 0, 0, 255))
+        for value in (10, 20, 30)
+    )
+    timed = TimedFrames(frames, (10, 20, 70))
+
+    resampled = showcase_module.resample_action(timed, 5)
+
+    assert [frame.getpixel((0, 0))[0] for frame in resampled.frames] == [10, 30, 30, 30, 30]
+
+
+def test_all_segment_frame_counts_and_moon_mapping_are_exact(
+    showcase_plan, background_image
+):
+    built = {
+        segment.id: showcase_module.build_segment_frames(segment, background_image)
+        for segment in showcase_plan.segments
+    }
+
+    assert {key: len(built[key].frames) for key in ("moon-184", "moon-232", "moon-full")} == {
+        "moon-184": 270,
+        "moon-232": 270,
+        "moon-full": 270,
+    }
+    assert all(len(built[segment.id].frames) == segment.output_frames for segment in showcase_plan.segments)
 
 
 def test_showcase_plan_has_exact_fifteen_segments_and_output_frames():
