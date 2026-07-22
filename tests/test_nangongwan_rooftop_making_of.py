@@ -435,7 +435,9 @@ def test_chapter_frame_schedule_keeps_each_editorial_chapter_on_its_exact_30fps_
 def test_rendered_timeline_and_subtitles_use_the_frame_schedule_without_title_action_collisions(tmp_path):
     plan = build_video_plan(ROOT)
     schedule = build_frame_schedule(plan)
-    rendered_events = quantize_subtitle_events(plan.subtitle_events)
+    rendered_events = quantize_subtitle_events(
+        plan.subtitle_events, plan=plan, frame_schedule=schedule
+    )
     output = tmp_path / "master-v1-timeline.json"
 
     making_of.write_timeline_json(
@@ -461,6 +463,85 @@ def test_rendered_timeline_and_subtitles_use_the_frame_schedule_without_title_ac
         for title in titles
         for action in actions
     )
+
+
+def test_shot_scoped_subtitles_follow_every_allocated_shot_boundary_after_parity_adjustment(tmp_path):
+    plan = build_video_plan(ROOT)
+    schedule = build_frame_schedule(plan)
+    rendered_events = quantize_subtitle_events(
+        plan.subtitle_events, plan=plan, frame_schedule=schedule
+    )
+    allocated = {
+        scheduled.shot.id: scheduled
+        for chapter in schedule
+        for scheduled in chapter.shots
+    }
+    output = tmp_path / "master-v1-timeline.json"
+    making_of.write_timeline_json(
+        plan,
+        output,
+        frame_schedule=schedule,
+        subtitle_events=rendered_events,
+    )
+
+    scoped = [event for event in rendered_events if event.style in {"Title", "Caption", "Note"}]
+    assert scoped
+    for event in scoped:
+        shot = allocated[event.shot_id]
+        assert event.start_frame == shot.start_frame
+        assert shot.start_frame < event.end_frame <= shot.end_frame
+        if event.style in {"Caption", "Note"}:
+            assert event.end_frame == shot.end_frame
+
+    declared_shot_starts = {}
+    cursor = 0
+    for chapter in plan.chapters:
+        for shot in chapter.shots:
+            declared_shot_starts[shot.id] = cursor
+            cursor += shot.duration_ms
+    actions = [event for event in rendered_events if event.style == "Action"]
+    assert actions
+    for event in actions:
+        shot = allocated[event.shot_id]
+        declared = next(
+            source
+            for source in plan.subtitle_events
+            if source.style == "Action" and source.shot_id == event.shot_id and source.text == event.text
+        )
+        relative_start = declared.start_ms - declared_shot_starts[event.shot_id]
+        relative_end = declared.end_ms - declared_shot_starts[event.shot_id]
+        assert (event.start_frame, event.end_frame) == (
+            shot.start_frame + (relative_start * 30 + 500) // 1_000,
+            shot.start_frame + (relative_end * 30 + 500) // 1_000,
+        )
+        assert shot.start_frame <= event.start_frame < event.end_frame <= shot.end_frame
+
+    moon_cases = {
+        "moon-232": (7110, 7380),
+        "moon-full": (7380, 7650),
+        "moon-compare": (7650, 8100),
+    }
+    for shot_id, expected in moon_cases.items():
+        events = [event for event in scoped if event.shot_id == shot_id]
+        assert events
+        assert all((event.start_frame, event.end_frame) == expected for event in events if event.style == "Caption")
+        assert all(event.start_frame == expected[0] for event in events if event.style == "Title")
+
+    timeline = json.loads(output.read_text(encoding="utf-8"))
+    timeline_scoped = [event for event in timeline["subtitleEvents"] if event.get("shotId")]
+    assert all("startFrame" in event and "endFrame" in event for event in timeline_scoped)
+    assert {
+        (event["shotId"], event["startFrame"], event["endFrame"])
+        for event in timeline_scoped
+        if event["shotId"] in moon_cases and event["style"] == "Caption"
+    } == {(shot_id, *frames) for shot_id, frames in moon_cases.items()}
+
+    ass = tmp_path / "master-v1.ass"
+    making_of.write_ass(rendered_events, ass)
+    ass_text = ass.read_text(encoding="utf-8-sig")
+    assert "Dialogue: 0,0:03:57.00,0:04:06.00,Caption" in ass_text
+    assert "Dialogue: 0,0:04:06.00,0:04:15.00,Caption" in ass_text
+    assert "Dialogue: 0,0:04:15.00,0:04:30.00,Caption" in ass_text
 
 
 @pytest.mark.integration

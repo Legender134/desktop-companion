@@ -53,6 +53,7 @@ class SubtitleEvent:
     end_ms: int
     text: str
     style: Literal["Title", "Caption", "Action", "Note"]
+    shot_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class RenderedSubtitleEvent:
     end_frame: int
     text: str
     style: Literal["Title", "Caption", "Action", "Note"]
+    shot_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +252,8 @@ def write_timeline_json(
     subtitle_rows: list[dict[str, object]] = []
     for event in rendered_events:
         row: dict[str, object] = {"text": event.text, "style": event.style}
+        if event.shot_id is not None:
+            row["shotId"] = event.shot_id
         if isinstance(event, RenderedSubtitleEvent):
             row.update(
                 {

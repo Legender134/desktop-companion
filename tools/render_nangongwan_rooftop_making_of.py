@@ -145,16 +145,54 @@ def build_frame_schedule(plan: VideoPlan) -> tuple[ScheduledChapter, ...]:
 
 def quantize_subtitle_events(
     events: tuple[SubtitleEvent, ...],
+    *,
+    plan: VideoPlan | None = None,
+    frame_schedule: tuple[ScheduledChapter, ...] | None = None,
 ) -> tuple[RenderedSubtitleEvent, ...]:
-    """Snap public subtitle timing to the same frame grid as the rendered master."""
+    """Snap public subtitle timing to the actual frame grid of its rendered shot."""
 
+    scheduled_by_id = {
+        scheduled.shot.id: scheduled
+        for chapter in frame_schedule or ()
+        for scheduled in chapter.shots
+    }
+    declared_starts: dict[str, int] = {}
+    declared_ends: dict[str, int] = {}
+    if plan is not None:
+        cursor = 0
+        for chapter in plan.chapters:
+            for shot in chapter.shots:
+                declared_starts[shot.id] = cursor
+                cursor += shot.duration_ms
+                declared_ends[shot.id] = cursor
     rendered: list[RenderedSubtitleEvent] = []
     for event in events:
-        start_frame = _round_to_frame(event.start_ms)
-        end_frame = _round_to_frame(event.end_ms)
+        scheduled = scheduled_by_id.get(event.shot_id)
+        declared_start = declared_starts.get(event.shot_id)
+        if scheduled is not None and declared_start is not None:
+            relative_start = event.start_ms - declared_start
+            relative_end = event.end_ms - declared_start
+            start_frame = scheduled.start_frame + _round_to_frame(relative_start)
+            end_frame = scheduled.start_frame + _round_to_frame(relative_end)
+            if (
+                event.style in {"Caption", "Note"}
+                and relative_start == 0
+                and event.end_ms == declared_ends[event.shot_id]
+            ):
+                start_frame = scheduled.start_frame
+                end_frame = scheduled.end_frame
+            if start_frame < scheduled.start_frame or end_frame > scheduled.end_frame:
+                raise ValueError(f"subtitle {event.text!r} falls outside shot {event.shot_id}")
+        else:
+            start_frame = _round_to_frame(event.start_ms)
+            end_frame = _round_to_frame(event.end_ms)
         if end_frame <= start_frame:
             raise ValueError(f"subtitle {event.text!r} has no rendered frames")
-        rendered.append(RenderedSubtitleEvent(start_frame, end_frame, event.text, event.style))
+        rendered.append(
+            RenderedSubtitleEvent(
+                start_frame, end_frame, event.text, event.style, event.shot_id
+            )
+        )
     return tuple(rendered)
 
 
@@ -291,7 +329,7 @@ def build_shots(root: Path) -> tuple[ShotSpec, ...]:
     )
 
 
-def _v9_action_events(root: Path, start_ms: int) -> tuple[SubtitleEvent, ...]:
+def _v9_action_events(root: Path, start_ms: int, shot_id: str) -> tuple[SubtitleEvent, ...]:
     history = root / "work" / "nangongwan-moonlit-rooftop-history" / "03-persistent-rooftop-revisions" / "render-history-v2-v9"
     preview = json.loads((history / "preview-sequence-v9.json").read_text(encoding="utf-8"))
     pet = json.loads((root / "src" / "shiyi_desktop_pet" / "resources" / "pets" / "nangongwan" / "pet.json").read_text(encoding="utf-8"))
@@ -317,6 +355,7 @@ def _v9_action_events(root: Path, start_ms: int) -> tuple[SubtitleEvent, ...]:
                 start_ms + frame_times[end_frame],
                 pet["actions"][action_id]["label"],
                 "Action",
+                shot_id,
             )
         )
     return tuple(events)
@@ -329,11 +368,13 @@ def _subtitle_events(root: Path, chapters: tuple[ChapterSpec, ...]) -> tuple[Sub
         for shot in chapter.shots:
             end = cursor + shot.duration_ms
             if shot.title and shot.id not in {"v9-sequence", "v9-replay"}:
-                events.append(SubtitleEvent(cursor, min(cursor + 2_700, end), shot.title, "Title"))
+                events.append(
+                    SubtitleEvent(cursor, min(cursor + 2_700, end), shot.title, "Title", shot.id)
+                )
             if shot.caption:
-                events.append(SubtitleEvent(cursor, end, shot.caption, "Caption"))
+                events.append(SubtitleEvent(cursor, end, shot.caption, "Caption", shot.id))
             if shot.id in {"v9-sequence", "v9-replay"}:
-                events.extend(_v9_action_events(root, cursor))
+                events.extend(_v9_action_events(root, cursor, shot.id))
             cursor = end
     return tuple(events)
 
@@ -392,7 +433,9 @@ def build_master(root: Path) -> Path:
     build_review_stills(root)
     plan = build_video_plan(root)
     frame_schedule = build_frame_schedule(plan)
-    rendered_events = quantize_subtitle_events(plan.subtitle_events)
+    rendered_events = quantize_subtitle_events(
+        plan.subtitle_events, plan=plan, frame_schedule=frame_schedule
+    )
     ass = output / "master-v1.ass"
     timeline = output / "master-v1-timeline.json"
     write_ass(rendered_events, ass)
