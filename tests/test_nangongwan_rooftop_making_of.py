@@ -1,4 +1,5 @@
 import json
+import struct
 import subprocess
 import sys
 from dataclasses import replace
@@ -31,7 +32,6 @@ from tools.nangongwan_rooftop_making_of import (
     review_proxy_timestamps,
     run_ffmpeg,
     validate_master,
-    write_validation_report,
     write_ass,
     write_action_mp4,
 )
@@ -90,7 +90,7 @@ def _valid_master_probe():
                 "pix_fmt": "yuv420p",
                 "sample_aspect_ratio": "1:1",
                 "avg_frame_rate": "30/1",
-                "nb_frames": "8400",
+                "nb_read_frames": "8400",
             },
             {
                 "codec_type": "audio",
@@ -103,43 +103,15 @@ def _valid_master_probe():
     }
 
 
-def test_validation_report_requires_every_release_gate(tmp_path):
-    valid_probe = {
-        "streams": [
-            {
-                "codec_type": "video",
-                "codec_name": "h264",
-                "width": 1920,
-                "height": 1080,
-                "pix_fmt": "yuv420p",
-                "avg_frame_rate": "30/1",
-            },
-            {
-                "codec_type": "audio",
-                "codec_name": "aac",
-                "sample_rate": "48000",
-                "channels": 2,
-            },
-        ],
-        "format": {"duration": "280.000"},
-    }
+def test_probe_injection_cannot_certify_a_nonexistent_master(tmp_path):
     approved_plan = build_video_plan(ROOT)
 
-    report = validate_master(tmp_path / "master.mp4", approved_plan, probe=valid_probe)
+    report = validate_master(tmp_path / "master.mp4", approved_plan, probe=_valid_master_probe())
 
-    assert report["video"] == {
-        "width": 1920,
-        "height": 1080,
-        "fps": 30.0,
-        "codec": "h264",
-        "pixelFormat": "yuv420p",
-    }
-    assert report["audio"]["codec"] == "aac"
-    assert report["audio"]["sampleRate"] == 48000
-    assert report["durationMs"] == pytest.approx(280000, abs=100)
-    assert report["privateAnimeUsed"] is False
-    assert report["privacyScanPassed"] is True
-    assert report["allPassed"] is True
+    assert report["checks"]["masterExists"] is False
+    assert report["checks"]["audioSamplesEffectivelySilent"] is False
+    assert report["checks"]["faststart"] is False
+    assert report["allPassed"] is False
 
 
 @pytest.mark.parametrize(
@@ -148,7 +120,11 @@ def test_validation_report_requires_every_release_gate(tmp_path):
         (lambda probe: probe["streams"].append(dict(probe["streams"][0])), "streamCount"),
         (lambda probe: probe["streams"][0].update(profile="Main"), "videoProfile"),
         (lambda probe: probe["streams"][0].update(sample_aspect_ratio="4:3"), "sampleAspectRatio"),
-        (lambda probe: probe["streams"][0].update(nb_frames="8399"), "videoFrameCount"),
+        (lambda probe: probe["streams"][0].update(nb_read_frames="8399"), "videoFrameCount"),
+        (lambda probe: probe["streams"][0].pop("profile"), "videoProfile"),
+        (lambda probe: probe["streams"][0].pop("sample_aspect_ratio"), "sampleAspectRatio"),
+        (lambda probe: probe["streams"][0].pop("nb_read_frames"), "videoFrameCount"),
+        (lambda probe: probe["streams"][0].update(avg_frame_rate="30/0"), "videoFrameRate"),
     ),
 )
 def test_validation_rejects_non_delivery_media_properties(tmp_path, mutate, failed_gate):
@@ -159,6 +135,16 @@ def test_validation_rejects_non_delivery_media_properties(tmp_path, mutate, fail
 
     assert report["allPassed"] is False
     assert report["checks"][failed_gate] is False
+
+
+def test_validation_fails_closed_on_malformed_stream_records(tmp_path):
+    probe = _valid_master_probe()
+    probe["streams"][0] = "not-a-stream-object"
+
+    report = validate_master(tmp_path / "master.mp4", build_video_plan(ROOT), probe=probe)
+
+    assert report["checks"]["streamCount"] is False
+    assert report["allPassed"] is False
 
 
 @pytest.mark.parametrize(
@@ -310,6 +296,74 @@ def test_extract_review_frames_uses_required_offsets_and_builds_a_7_by_2_sheet(
         assert contact_sheet.size == (7 * 480, 2 * 300)
 
 
+def test_review_extractors_remove_obsolete_frames_and_pages(tmp_path, monkeypatch):
+    review = tmp_path / "review"
+    dense = tmp_path / "dense"
+    review.mkdir()
+    dense.mkdir()
+    (review / "frame-obsolete.jpg").write_bytes(b"stale")
+    (review / "contact-sheet-old.jpg").write_bytes(b"stale")
+    (dense / "proxy-obsolete.jpg").write_bytes(b"stale")
+    (dense / "contact-sheet-99.jpg").write_bytes(b"stale")
+    timeline = tmp_path / "timeline.json"
+    timeline.write_text(
+        json.dumps({"durationMs": 1_000, "chapters": [], "subtitleEvents": []}),
+        encoding="utf-8",
+    )
+
+    def fake_ffmpeg(command):
+        Image.new("RGB", (1920, 1080), (40, 70, 100)).save(Path(command[-1]))
+
+    monkeypatch.setattr(making_of, "run_ffmpeg", fake_ffmpeg)
+    extract_review_frames(tmp_path / "master.mp4", review, timestamps_ms=(0,))
+    extract_dense_review_proxy(tmp_path / "master.mp4", timeline, dense)
+
+    assert not (review / "frame-obsolete.jpg").exists()
+    assert not (review / "contact-sheet-old.jpg").exists()
+    assert not (dense / "proxy-obsolete.jpg").exists()
+    assert not (dense / "contact-sheet-99.jpg").exists()
+
+
+def _atom(kind, payload=b"", *, extended=False, to_eof=False):
+    if to_eof:
+        return struct.pack(">I4s", 0, kind) + payload
+    if extended:
+        return struct.pack(">I4sQ", 1, kind, 16 + len(payload)) + payload
+    return struct.pack(">I4s", 8 + len(payload), kind) + payload
+
+
+def test_faststart_parser_reads_only_top_level_atoms_and_supports_extended_sizes(tmp_path):
+    misleading = tmp_path / "misleading.mp4"
+    misleading.write_bytes(_atom(b"free", b"contains moov text") + _atom(b"mdat") + _atom(b"moov"))
+    extended = tmp_path / "extended.mp4"
+    extended.write_bytes(_atom(b"ftyp") + _atom(b"moov", extended=True) + _atom(b"mdat", to_eof=True))
+
+    assert making_of._read_mp4_atom_order(misleading) is False
+    assert making_of._read_mp4_atom_order(extended) is True
+
+
+@pytest.mark.parametrize(
+    "leak",
+    (r"\\server\share\secret", r"\\?\C:\Users\alice\secret", r"\\.\pipe\private"),
+)
+def test_public_privacy_rejects_unc_and_windows_device_paths(leak):
+    assert making_of._public_text_is_safe((leak,)) is False
+
+
+def test_validation_scans_ffprobe_metadata_for_private_text(tmp_path):
+    probe = _valid_master_probe()
+    probe["format"]["tags"] = {
+        "comment": r"\\server\share\private",
+        "homepage": "private.example.net/person",
+        "username": "alice",
+    }
+
+    report = validate_master(tmp_path / "master.mp4", build_video_plan(ROOT), probe=probe)
+
+    assert report["checks"]["publicMetadataPrivacy"] is False
+    assert report["privacyScanPassed"] is False
+
+
 def test_dense_review_proxy_includes_every_second_and_every_shot_action_transition(tmp_path):
     plan = build_video_plan(ROOT)
     schedule = build_frame_schedule(plan)
@@ -387,29 +441,119 @@ def test_dense_review_proxy_writes_auditable_contact_sheet_pages(tmp_path, monke
         assert page.size == (7 * 384, 4 * 240)
 
 
-def test_written_validation_report_cannot_pass_before_manual_review(tmp_path):
-    automated = validate_master(
-        tmp_path / "master.mp4", build_video_plan(ROOT), probe=_valid_master_probe()
+def test_manual_review_is_bound_transitively_to_exact_artifacts(tmp_path):
+    master = tmp_path / "master.mp4"
+    timeline = tmp_path / "master-v1-timeline.json"
+    ass = tmp_path / "master-v1.ass"
+    master.write_bytes(b"master")
+    timeline.write_text("{}", encoding="utf-8")
+    ass.write_text("ass", encoding="utf-8")
+    required_dir = tmp_path / "review-frames"
+    dense_dir = tmp_path / "dense-review-proxy"
+    required_dir.mkdir()
+    dense_dir.mkdir()
+    required_artifact = required_dir / "frame-000000.jpg"
+    dense_artifact = dense_dir / "proxy-000000.jpg"
+    required_artifact.write_bytes(b"required")
+    dense_artifact.write_bytes(b"dense")
+    required_manifest = required_dir / "manifest.json"
+    dense_manifest = dense_dir / "manifest.json"
+    making_of.write_review_manifest(
+        required_manifest,
+        kind="required-frames",
+        master=master,
+        timeline=timeline,
+        ass=ass,
+        artifacts=(required_artifact,),
     )
+    making_of.write_review_manifest(
+        dense_manifest,
+        kind="dense-proxy",
+        master=master,
+        timeline=timeline,
+        ass=ass,
+        artifacts=(dense_artifact,),
+    )
+    manual = {
+        "passed": True,
+        "method": "inspected exact required frames and every dense proxy page",
+        "findings": [],
+        "artifactBinding": making_of.build_review_binding(
+            master, timeline, ass, required_manifest, dense_manifest
+        ),
+    }
+
+    assert making_of.verify_manual_review_binding(
+        manual, master, timeline, ass, required_manifest, dense_manifest
+    )
+    dense_artifact.write_bytes(b"changed after approval")
+    assert not making_of.verify_manual_review_binding(
+        manual, master, timeline, ass, required_manifest, dense_manifest
+    )
+    making_of.write_review_manifest(
+        dense_manifest,
+        kind="dense-proxy",
+        master=master,
+        timeline=timeline,
+        ass=ass,
+        artifacts=(dense_artifact,),
+    )
+    assert not making_of.verify_manual_review_binding(
+        manual, master, timeline, ass, required_manifest, dense_manifest
+    )
+
+
+def test_validation_report_is_overwritten_as_in_progress_before_validation(tmp_path):
     output = tmp_path / "validation-report.json"
+    output.write_text('{"allPassed": true}', encoding="utf-8")
 
-    pending = write_validation_report(automated, output, manual_review=None)
+    pending = making_of.write_in_progress_validation_report(output)
 
-    assert pending["checks"]["manualReview"] is False
     assert pending["allPassed"] is False
+    assert pending["status"] == "in-progress"
+    assert json.loads(output.read_text(encoding="utf-8"))["allPassed"] is False
 
-    approved = write_validation_report(
-        automated,
-        output,
-        manual_review={
-            "passed": True,
-            "method": "inspected 14 frames and every dense proxy page",
-            "findings": [],
-        },
+
+def _expected_timeline(tmp_path):
+    plan = build_video_plan(ROOT)
+    schedule = build_frame_schedule(plan)
+    events = quantize_subtitle_events(plan.subtitle_events, plan=plan, frame_schedule=schedule)
+    path = tmp_path / "expected.json"
+    making_of.write_timeline_json(plan, path, frame_schedule=schedule, subtitle_events=events)
+    return plan, events, json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_timeline_and_ass_must_match_independently_regenerated_expectations(tmp_path):
+    _, events, expected = _expected_timeline(tmp_path)
+    master = tmp_path / "master.mp4"
+    actual_timeline = tmp_path / "master-v1-timeline.json"
+    actual_ass = tmp_path / "master-v1.ass"
+    actual_timeline.write_text(json.dumps(expected, ensure_ascii=False), encoding="utf-8")
+    write_ass(events, actual_ass)
+
+    assert making_of._timeline_and_ass_checks(master, expected) == {
+        "timelineMatchesPlan": True,
+        "assMatchesTimeline": True,
+    }
+
+    actual_ass.write_text(
+        actual_ass.read_text(encoding="utf-8-sig").replace("Style: Caption", "Style: Invalid"),
+        encoding="utf-8-sig",
     )
-    assert approved["checks"]["manualReview"] is True
-    assert approved["allPassed"] is True
-    assert json.loads(output.read_text(encoding="utf-8"))["allPassed"] is True
+    assert making_of._timeline_and_ass_checks(master, expected)["assMatchesTimeline"] is False
+    write_ass(events, actual_ass)
+
+    tampered = json.loads(json.dumps(expected))
+    tampered["chapters"][0]["shots"][0]["durationMs"] += 1
+    tampered["subtitleEvents"][0]["text"] = "coordinated stale edit"
+    actual_timeline.write_text(json.dumps(tampered), encoding="utf-8")
+    stale_events = list(events)
+    stale_events[0] = replace(stale_events[0], text="coordinated stale edit")
+    write_ass(tuple(stale_events), actual_ass)
+
+    checks = making_of._timeline_and_ass_checks(master, expected)
+    assert checks["timelineMatchesPlan"] is False
+    assert checks["assMatchesTimeline"] is False
 
 
 @pytest.mark.integration

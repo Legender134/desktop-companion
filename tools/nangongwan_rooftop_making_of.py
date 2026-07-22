@@ -4,10 +4,12 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from fractions import Fraction
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal, Mapping
 
@@ -466,7 +468,11 @@ _FORBIDDEN_SOURCE_MARKERS = (
 )
 _PUBLIC_TEXT_PATTERNS = (
     re.compile(r"\b[a-z]:[\\/]", re.IGNORECASE),
-    re.compile(r"\b(?:https?://)?(?:gitee|github)\.com\b", re.IGNORECASE),
+    re.compile(r"\\\\(?:\?|\.|[^\\/\s]+)[\\/]", re.IGNORECASE),
+    re.compile(
+        r"\b(?:https?://)?(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:[/:?#]|\b)",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(?:token|access[_ -]?token|api[_ -]?key|secret)\s*[:=]\s*\S+", re.IGNORECASE),
     re.compile(r"\b[0-9a-f]{32,}\b", re.IGNORECASE),
     re.compile(r"\b(?:user(?:name)?|login)\s*[:=]\s*[\w.@-]+", re.IGNORECASE),
@@ -532,6 +538,20 @@ def _public_text_is_safe(strings: tuple[str, ...]) -> bool:
     return not any(pattern.search(value) for value in strings for pattern in _PUBLIC_TEXT_PATTERNS)
 
 
+def _probe_metadata_strings(probe: dict[str, object]) -> tuple[str, ...]:
+    strings: list[str] = []
+    raw_streams = probe.get("streams", [])
+    streams = raw_streams if isinstance(raw_streams, list) else []
+    containers = [probe.get("format", {}), *streams]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        tags = container.get("tags", {})
+        if isinstance(tags, dict):
+            strings.extend(f"{key}={value}" for key, value in tags.items())
+    return tuple(strings)
+
+
 def _timeline_source_paths(value: object, *, parent: Path) -> tuple[Path, ...]:
     paths: list[Path] = []
     if isinstance(value, str):
@@ -585,10 +605,41 @@ def _sidecar_security(master: Path) -> tuple[bool, bool, tuple[str, ...]]:
 
 
 def _read_mp4_atom_order(master: Path) -> bool:
-    data = master.read_bytes()
-    moov = data.find(b"moov")
-    mdat = data.find(b"mdat")
-    return moov >= 0 and mdat >= 0 and moov < mdat
+    """Parse top-level ISO BMFF atoms without scanning payload bytes."""
+
+    try:
+        file_size = master.stat().st_size
+        offset = 0
+        moov_offset: int | None = None
+        mdat_offset: int | None = None
+        with master.open("rb") as stream:
+            while offset < file_size:
+                stream.seek(offset)
+                header = stream.read(8)
+                if len(header) != 8:
+                    return False
+                size32, atom_type = struct.unpack(">I4s", header)
+                header_size = 8
+                if size32 == 1:
+                    extended = stream.read(8)
+                    if len(extended) != 8:
+                        return False
+                    atom_size = struct.unpack(">Q", extended)[0]
+                    header_size = 16
+                elif size32 == 0:
+                    atom_size = file_size - offset
+                else:
+                    atom_size = size32
+                if atom_size < header_size or atom_size > file_size - offset:
+                    return False
+                if atom_type == b"moov" and moov_offset is None:
+                    moov_offset = offset
+                elif atom_type == b"mdat" and mdat_offset is None:
+                    mdat_offset = offset
+                offset += atom_size
+        return offset == file_size and moov_offset is not None and mdat_offset is not None and moov_offset < mdat_offset
+    except OSError:
+        return False
 
 
 def _measure_effective_silence(master: Path, *, threshold_dbfs: float = -90.0) -> dict[str, object]:
@@ -642,6 +693,9 @@ def extract_review_frames(
     """Extract exact review offsets and create a labelled seven-column contact sheet."""
 
     output.mkdir(parents=True, exist_ok=True)
+    for pattern in ("frame-*.jpg", "contact-sheet*.jpg", "manifest.json"):
+        for obsolete in output.glob(pattern):
+            obsolete.unlink()
     frames: list[Path] = []
     for milliseconds in timestamps_ms:
         frame = output / f"frame-{milliseconds:06d}.jpg"
@@ -710,6 +764,9 @@ def extract_dense_review_proxy(
     timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
     timestamps = tuple(sorted(review_proxy_timestamps(timeline)))
     output.mkdir(parents=True, exist_ok=True)
+    for pattern in ("proxy-*.jpg", "contact-sheet-*.jpg", "manifest.json"):
+        for obsolete in output.glob(pattern):
+            obsolete.unlink()
     frames: list[Path] = []
     for milliseconds in timestamps:
         frame = output / f"proxy-{milliseconds:06d}.jpg"
@@ -773,19 +830,221 @@ def write_validation_report(
     """Persist a report that cannot pass until the documented manual gate passes."""
 
     report = json.loads(json.dumps(automated))
-    manual_passed = bool(manual_review and manual_review.get("passed") is True)
     report["manualReview"] = manual_review or {
         "passed": False,
         "method": "pending inspection of required frames and dense proxy pages",
         "findings": [],
     }
-    report["checks"]["manualReview"] = manual_passed
+    manual_passed = bool(report.get("checks", {}).get("manualReview"))
     report["allPassed"] = bool(report["allPassed"] and manual_passed)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return report
+
+
+def write_in_progress_validation_report(output: Path) -> dict[str, object]:
+    """Invalidate any prior result before work which might raise begins."""
+
+    report = {
+        "status": "in-progress",
+        "allPassed": False,
+        "checks": {"validationComplete": False},
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _core_artifact_hashes(master: Path, timeline: Path, ass: Path) -> dict[str, str]:
+    return {
+        "masterSha256": _sha256_file(master),
+        "timelineSha256": _sha256_file(timeline),
+        "assSha256": _sha256_file(ass),
+    }
+
+
+def write_review_manifest(
+    output: Path,
+    *,
+    kind: str,
+    master: Path,
+    timeline: Path,
+    ass: Path,
+    artifacts: tuple[Path, ...],
+) -> dict[str, object]:
+    """Hash every reviewed file and the exact master/sidecars it represents."""
+
+    payload = {
+        "schemaVersion": 1,
+        "kind": kind,
+        "binding": _core_artifact_hashes(master, timeline, ass),
+        "artifacts": [
+            {"path": path.name, "sha256": _sha256_file(path)} for path in artifacts
+        ],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return payload
+
+
+def _verify_review_manifest(
+    manifest: Path,
+    master: Path,
+    timeline: Path,
+    ass: Path,
+    *,
+    expected_names: set[str] | None = None,
+    expected_kind: str | None = None,
+) -> bool:
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        artifacts = payload["artifacts"]
+        if payload.get("schemaVersion") != 1:
+            return False
+        if expected_kind is not None and payload.get("kind") != expected_kind:
+            return False
+        if payload.get("binding") != _core_artifact_hashes(master, timeline, ass):
+            return False
+        if not isinstance(artifacts, list) or not artifacts:
+            return False
+        recorded_names: list[str] = []
+        for record in artifacts:
+            name = record["path"]
+            if not isinstance(name, str) or Path(name).name != name:
+                return False
+            artifact = manifest.parent / name
+            if not artifact.is_file() or record.get("sha256") != _sha256_file(artifact):
+                return False
+            recorded_names.append(name)
+        unique = len(recorded_names) == len(set(recorded_names))
+        return unique and (
+            expected_names is None or set(recorded_names) == expected_names
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def build_review_binding(
+    master: Path,
+    timeline: Path,
+    ass: Path,
+    required_manifest: Path,
+    dense_manifest: Path,
+) -> dict[str, str]:
+    binding = _core_artifact_hashes(master, timeline, ass)
+    binding.update(
+        {
+            "requiredManifestSha256": _sha256_file(required_manifest),
+            "denseManifestSha256": _sha256_file(dense_manifest),
+        }
+    )
+    return binding
+
+
+def verify_manual_review_binding(
+    manual_review: dict[str, object] | None,
+    master: Path,
+    timeline: Path,
+    ass: Path,
+    required_manifest: Path,
+    dense_manifest: Path,
+) -> bool:
+    try:
+        if not isinstance(manual_review, dict):
+            return False
+        manifests_valid = _verify_review_manifest(
+            required_manifest,
+            master,
+            timeline,
+            ass,
+            expected_kind="required-frames",
+        ) and _verify_review_manifest(
+            dense_manifest,
+            master,
+            timeline,
+            ass,
+            expected_kind="dense-proxy",
+        )
+        return bool(
+            manifests_valid
+            and manual_review
+            and manual_review.get("passed") is True
+            and manual_review.get("artifactBinding")
+            == build_review_binding(
+                master, timeline, ass, required_manifest, dense_manifest
+            )
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _review_artifact_checks(
+    master: Path,
+    timeline: Path,
+    ass: Path,
+    expected_timeline: dict[str, object] | None,
+    manual_review: dict[str, object] | None,
+) -> tuple[bool, bool]:
+    required_manifest = master.parent / "review-frames" / "manifest.json"
+    dense_manifest = master.parent / "dense-review-proxy" / "manifest.json"
+    required_names = {
+        *(f"frame-{milliseconds:06d}.jpg" for milliseconds in REVIEW_FRAME_MILLISECONDS),
+        "contact-sheet.jpg",
+    }
+    if expected_timeline is None:
+        return False, False
+    dense_timestamps = tuple(sorted(review_proxy_timestamps(expected_timeline)))
+    page_count = (len(dense_timestamps) + 27) // 28
+    dense_names = {
+        *(f"proxy-{milliseconds:06d}.jpg" for milliseconds in dense_timestamps),
+        *(f"contact-sheet-{index:02d}.jpg" for index in range(1, page_count + 1)),
+    }
+    manifests_valid = _verify_review_manifest(
+        required_manifest,
+        master,
+        timeline,
+        ass,
+        expected_names=required_names,
+        expected_kind="required-frames",
+    ) and _verify_review_manifest(
+        dense_manifest,
+        master,
+        timeline,
+        ass,
+        expected_names=dense_names,
+        expected_kind="dense-proxy",
+    )
+    actual_required = {path.name for path in required_manifest.parent.glob("*.jpg")}
+    actual_dense = {path.name for path in dense_manifest.parent.glob("*.jpg")}
+    manifests_valid = bool(
+        manifests_valid
+        and actual_required == required_names
+        and actual_dense == dense_names
+    )
+    manual_valid = bool(
+        manifests_valid
+        and verify_manual_review_binding(
+            manual_review,
+            master,
+            timeline,
+            ass,
+            required_manifest,
+            dense_manifest,
+        )
+    )
+    return manifests_valid, manual_valid
 
 
 def _expected_schedule_checks(plan: VideoPlan) -> dict[str, bool]:
@@ -816,73 +1075,60 @@ def _expected_schedule_checks(plan: VideoPlan) -> dict[str, bool]:
     }
 
 
-def _timeline_and_ass_checks(master: Path, plan: VideoPlan) -> dict[str, bool]:
+def _timeline_and_ass_checks(
+    master: Path, expected_timeline: dict[str, object] | None
+) -> dict[str, bool]:
     output = master.parent
     timeline_path = output / "master-v1-timeline.json"
     ass_path = output / "master-v1.ass"
-    if not timeline_path.exists() or not ass_path.exists():
+    if not timeline_path.exists() or not ass_path.exists() or expected_timeline is None:
         return {"timelineMatchesPlan": False, "assMatchesTimeline": False}
     try:
         timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
-        chapters = timeline["chapters"]
-        timeline_ok = (
-            timeline["durationMs"] == plan.duration_ms
-            and len(chapters) == len(plan.chapters)
-            and chapters[4]["endFrame"] == chapters[5]["startFrame"] == 6750
-            and chapters[-1]["endFrame"] == 8400
-            and all(
-                sum(shot["endFrame"] - shot["startFrame"] for shot in chapter["shots"])
-                == chapter["endFrame"] - chapter["startFrame"]
-                for chapter in chapters
-            )
+        timeline_ok = timeline == expected_timeline
+        expected_ass = ASS_HEADER + "".join(
+            "Dialogue: 0,"
+            f"{ass_frame_time(event['startFrame'])},"
+            f"{ass_frame_time(event['endFrame'])},"
+            f"{event['style']},,0,0,0,,{_ass_escape(event['text'])}\n"
+            for event in expected_timeline["subtitleEvents"]
         )
-        moon_actions = {
-            shot["id"]: shot["endFrame"] - shot["startFrame"]
-            for shot in chapters[5]["shots"]
-            if shot["id"] in {"moon-184", "moon-232", "moon-full"}
-        }
-        timeline_ok = timeline_ok and moon_actions == {
-            "moon-184": 270,
-            "moon-232": 270,
-            "moon-full": 270,
-        }
-        actual_dialogues = []
-        for line in ass_path.read_text(encoding="utf-8-sig").splitlines():
-            if line.startswith("Dialogue: "):
-                fields = line.split(",", 9)
-                actual_dialogues.append((fields[1], fields[2], fields[3], fields[9]))
-        expected_dialogues = [
-            (
-                ass_frame_time(event["startFrame"]),
-                ass_frame_time(event["endFrame"]),
-                event["style"],
-                _ass_escape(event["text"]),
-            )
-            for event in timeline["subtitleEvents"]
-        ]
         return {
             "timelineMatchesPlan": bool(timeline_ok),
-            "assMatchesTimeline": actual_dialogues == expected_dialogues,
+            "assMatchesTimeline": ass_path.read_text(encoding="utf-8-sig") == expected_ass,
         }
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
         return {"timelineMatchesPlan": False, "assMatchesTimeline": False}
 
 
 def validate_master(
-    master: Path, plan: VideoPlan, *, probe: dict | None = None
+    master: Path,
+    plan: VideoPlan,
+    *,
+    probe: dict | None = None,
+    expected_timeline: dict[str, object] | None = None,
+    manual_review: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Validate the release master, public text, source provenance, and timing sidecars."""
 
-    injected_probe = probe is not None
-    probe = probe if probe is not None else _probe_master(master)
-    streams = probe.get("streams", [])
-    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
-    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    master_exists = master.is_file()
+    probe = probe if probe is not None else (_probe_master(master) if master_exists else {})
+    raw_streams = probe.get("streams", []) if isinstance(probe, dict) else []
+    streams = raw_streams if isinstance(raw_streams, list) else []
+    stream_records_valid = all(isinstance(stream, dict) for stream in streams)
+    stream_objects = [stream for stream in streams if isinstance(stream, dict)]
+    videos = [stream for stream in stream_objects if stream.get("codec_type") == "video"]
+    audios = [stream for stream in stream_objects if stream.get("codec_type") == "audio"]
     video = videos[0] if videos else {}
     audio = audios[0] if audios else {}
     fps = _float_frame_rate(video.get("avg_frame_rate", "0/1"))
     try:
-        duration_ms = float(probe.get("format", {}).get("duration", 0)) * 1_000
+        format_info = probe.get("format", {})
+        duration_ms = (
+            float(format_info.get("duration", 0)) * 1_000
+            if isinstance(format_info, dict)
+            else 0.0
+        )
     except (TypeError, ValueError):
         duration_ms = 0.0
     sources = _all_source_paths(plan)
@@ -893,32 +1139,56 @@ def validate_master(
         all(path.exists() and _source_is_approved(path) for path in sources)
         and sidecar_provenance
     )
+    metadata_safe = _public_text_is_safe(_probe_metadata_strings(probe))
     public_text_safe = (
         _public_text_is_safe(_public_plan_strings(plan)) and sidecar_public_text
+        and metadata_safe
     )
     schedule_checks = _expected_schedule_checks(plan)
-    if injected_probe:
-        sidecar_checks = {"timelineMatchesPlan": True, "assMatchesTimeline": True}
+    timeline_path = master.parent / "master-v1-timeline.json"
+    ass_path = master.parent / "master-v1.ass"
+    if manual_review is None:
+        manual_path = master.parent / "manual-review.json"
+        if manual_path.exists():
+            try:
+                manual_review = json.loads(manual_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                manual_review = None
+    artifacts_bound, manual_bound = _review_artifact_checks(
+        master, timeline_path, ass_path, expected_timeline, manual_review
+    )
+    if master_exists:
+        sidecar_checks = _timeline_and_ass_checks(master, expected_timeline)
+        silence = _measure_effective_silence(master)
+        faststart = _read_mp4_atom_order(master)
+    else:
+        sidecar_checks = {"timelineMatchesPlan": False, "assMatchesTimeline": False}
         silence = {
-            "passed": True,
-            "method": "preverified by injected probe fixture",
+            "passed": False,
+            "method": "ffmpeg volumedetect over the full decoded audio stream",
             "thresholdDbfs": -90.0,
             "maxVolumeDbfs": None,
         }
-        faststart = True
-    else:
-        sidecar_checks = _timeline_and_ass_checks(master, plan)
-        silence = _measure_effective_silence(master)
-        faststart = _read_mp4_atom_order(master)
+        faststart = False
+    try:
+        frame_count_valid = int(video.get("nb_read_frames")) == 8400
+    except (TypeError, ValueError):
+        frame_count_valid = False
     checks = {
-        "streamCount": len(streams) == 2 and len(videos) == 1 and len(audios) == 1,
+        "masterExists": master_exists,
+        "streamCount": (
+            stream_records_valid
+            and len(streams) == 2
+            and len(videos) == 1
+            and len(audios) == 1
+        ),
         "videoDimensions": video.get("width") == 1920 and video.get("height") == 1080,
         "videoCodec": video.get("codec_name") == "h264",
-        "videoProfile": video.get("profile") in {None, "High"},
+        "videoProfile": video.get("profile") == "High",
         "videoPixelFormat": video.get("pix_fmt") == "yuv420p",
-        "sampleAspectRatio": video.get("sample_aspect_ratio") in {None, "1:1"},
+        "sampleAspectRatio": video.get("sample_aspect_ratio") == "1:1",
         "videoFrameRate": abs(fps - 30.0) < 1e-9,
-        "videoFrameCount": video.get("nb_frames") is None or int(video.get("nb_frames", 0)) == 8400,
+        "videoFrameCount": frame_count_valid,
         "audioCodec": audio.get("codec_name") == "aac",
         "audioSampleRate": str(audio.get("sample_rate")) == "48000",
         "audioChannels": audio.get("channels") == 2,
@@ -927,6 +1197,9 @@ def validate_master(
         "faststart": faststart,
         "sourceProvenance": source_provenance,
         "publicTextPrivacy": public_text_safe,
+        "publicMetadataPrivacy": metadata_safe,
+        "reviewArtifactsBound": artifacts_bound,
+        "manualReview": manual_bound,
         **schedule_checks,
         **sidecar_checks,
     }
@@ -942,7 +1215,9 @@ def validate_master(
         },
         "audio": {
             "codec": audio.get("codec_name"),
-            "sampleRate": int(audio.get("sample_rate", 0) or 0),
+            "sampleRate": int(audio.get("sample_rate", 0) or 0)
+            if str(audio.get("sample_rate", 0) or 0).isdigit()
+            else 0,
             "channels": audio.get("channels"),
             "silence": silence,
         },
@@ -950,6 +1225,11 @@ def validate_master(
         "resolvedSources": resolved_sources,
         "privateAnimeUsed": private_anime_used,
         "privacyScanPassed": public_text_safe,
+        "manualReview": manual_review or {
+            "passed": False,
+            "method": "pending inspection of exact bound review artifacts",
+            "findings": [],
+        },
         "checks": checks,
         "allPassed": all(checks.values()) and not private_anime_used,
     }

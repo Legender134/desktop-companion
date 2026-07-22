@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,8 @@ from tools.nangongwan_rooftop_making_of import (
     validate_master,
     write_action_mp4,
     write_ass,
+    write_in_progress_validation_report,
+    write_review_manifest,
     write_timeline_json,
     write_validation_report,
 )
@@ -467,6 +470,22 @@ def build_master(root: Path) -> Path:
     return master
 
 
+def build_expected_timeline(root: Path) -> dict[str, object]:
+    """Regenerate the release schedule independently of persisted sidecars."""
+
+    plan = build_video_plan(root)
+    schedule = build_frame_schedule(plan)
+    events = quantize_subtitle_events(
+        plan.subtitle_events, plan=plan, frame_schedule=schedule
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "expected-timeline.json"
+        write_timeline_json(
+            plan, path, frame_schedule=schedule, subtitle_events=events
+        )
+        return json.loads(path.read_text(encoding="utf-8"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render the Nangong Wan making-of review master.")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -474,34 +493,65 @@ def main() -> None:
     mode.add_argument(
         "--validate-only",
         action="store_true",
-        help="validate the existing master and generate visual-review artifacts",
+        help="validate the existing master and exact bound visual-review artifacts",
+    )
+    mode.add_argument(
+        "--prepare-review",
+        action="store_true",
+        help="regenerate review artifacts and invalidate any prior manual approval",
     )
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    output = root / "work" / "nangongwan-rooftop-making-of-video"
+    report_path = output / "validation-report.json"
+    manual_path = output / "manual-review.json"
+    write_in_progress_validation_report(report_path)
     if arguments.build_all:
+        manual_path.unlink(missing_ok=True)
         print(build_master(root))
         return
-    output = root / "work" / "nangongwan-rooftop-making-of-video"
     master = output / "master-v1-no-voice-1920x1080.mp4"
     timeline = output / "master-v1-timeline.json"
-    review_frames, contact_sheet = extract_review_frames(master, output / "review-frames")
-    proxy_frames, proxy_pages = extract_dense_review_proxy(
-        master, timeline, output / "dense-review-proxy"
-    )
-    automated = validate_master(master, build_video_plan(root))
-    automated["reviewArtifacts"] = {
-        "requiredFrameCount": len(review_frames),
-        "contactSheet": str(contact_sheet),
-        "denseProxyFrameCount": len(proxy_frames),
-        "denseProxyPages": [str(path) for path in proxy_pages],
-    }
-    manual_path = output / "manual-review.json"
+    ass = output / "master-v1.ass"
+    if arguments.prepare_review:
+        manual_path.unlink(missing_ok=True)
+        review_frames, contact_sheet = extract_review_frames(
+            master, output / "review-frames"
+        )
+        proxy_frames, proxy_pages = extract_dense_review_proxy(
+            master, timeline, output / "dense-review-proxy"
+        )
+        write_review_manifest(
+            output / "review-frames" / "manifest.json",
+            kind="required-frames",
+            master=master,
+            timeline=timeline,
+            ass=ass,
+            artifacts=(*review_frames, contact_sheet),
+        )
+        write_review_manifest(
+            output / "dense-review-proxy" / "manifest.json",
+            kind="dense-proxy",
+            master=master,
+            timeline=timeline,
+            ass=ass,
+            artifacts=(*proxy_frames, *proxy_pages),
+        )
+        print(output / "review-frames" / "manifest.json")
+        print(output / "dense-review-proxy" / "manifest.json")
+        return
+    expected_timeline = build_expected_timeline(root)
     manual_review = (
         json.loads(manual_path.read_text(encoding="utf-8"))
         if manual_path.exists()
         else None
     )
-    report_path = output / "validation-report.json"
+    automated = validate_master(
+        master,
+        build_video_plan(root),
+        expected_timeline=expected_timeline,
+        manual_review=manual_review,
+    )
     report = write_validation_report(
         automated, report_path, manual_review=manual_review
     )
