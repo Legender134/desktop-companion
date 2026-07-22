@@ -24,7 +24,9 @@ from tools.nangongwan_action_showcase_v2 import (
     add_silent_aac,
     concat_clips,
     copy_verified_background,
+    extract_review_frames,
     probe_media,
+    validate_showcase,
     write_silent_video,
 )
 from tools.nangongwan_rooftop_making_of import TimedFrames, read_action
@@ -60,6 +62,24 @@ def tiny_segments():
         )
         for color in ((20, 40, 80), (80, 40, 20))
     )
+
+
+def test_validation_requires_every_v2_gate(valid_showcase_fixture):
+    report = validate_showcase(**valid_showcase_fixture)
+    assert report["allPassed"] is True
+    assert report["checks"] == {
+        "backgroundHash": True,
+        "segmentOrder": True,
+        "segmentFrameCounts": True,
+        "totalFrames": True,
+        "videoGeometry": True,
+        "videoEncoding": True,
+        "silentAudio": True,
+        "noTextSidecarsOrStreams": True,
+        "sourcePrivacy": True,
+        "centeredComposition": True,
+        "moonFrameParity": True,
+    }
 
 
 def _decoded_frame_md5s(path: Path) -> tuple[str, ...]:
@@ -230,6 +250,118 @@ def _test_video_probe(frame_count: int, *, pixel_format: str = "yuv420p") -> Vid
         frame_rate=Fraction(30, 1),
         nb_read_frames=frame_count,
     )
+
+
+@pytest.fixture
+def valid_showcase_fixture(tmp_path, monkeypatch, showcase_plan):
+    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    output.mkdir(parents=True)
+    master = output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    master.write_bytes(b"synthetic master")
+    timeline = output / "timeline.json"
+    timeline.write_text(
+        json.dumps(_timeline_document(showcase_plan, BACKGROUND_SHA256)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        showcase_module,
+        "probe_media",
+        lambda path, count_frames=False: MediaProbe(
+            _test_video_probe(2473), AudioProbe("aac", 48_000, 2), 0, 0
+        ),
+    )
+    monkeypatch.setattr(
+        showcase_module, "_read_mp4_atom_order", lambda path: True, raising=False
+    )
+    monkeypatch.setattr(
+        showcase_module,
+        "_measure_audio_silence",
+        lambda path: {"passed": True, "maxVolumeDbfs": -91.0},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        showcase_module,
+        "_encoded_background_fidelity",
+        lambda master, background, timeline_document: {
+            "passed": True,
+            "minimumSsim": 0.999,
+            "threshold": 0.995,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        showcase_module,
+        "_centered_composition",
+        lambda plan, background: {"passed": True, "sampledFrames": 45},
+        raising=False,
+    )
+    return {"master": master, "plan": showcase_plan, "timeline": timeline}
+
+
+def test_validation_fails_closed_when_encoded_background_check_errors(
+    valid_showcase_fixture, monkeypatch
+):
+    def decode_failure(master, background, timeline_document):
+        raise RuntimeError("decode failed")
+
+    monkeypatch.setattr(
+        showcase_module, "_encoded_background_fidelity", decode_failure
+    )
+
+    report = validate_showcase(**valid_showcase_fixture)
+
+    assert report["allPassed"] is False
+    assert report["checks"]["backgroundHash"] is False
+
+
+def test_outside_sprite_ssim_is_one_for_identical_background(background_image):
+    assert showcase_module._outside_sprite_ssim(background_image, background_image) == pytest.approx(
+        1.0, abs=1e-12
+    )
+
+
+def test_extract_review_frames_uses_every_segment_boundary_and_builds_15_by_3_sheet(
+    tmp_path, monkeypatch, showcase_plan
+):
+    timeline = tmp_path / "timeline.json"
+    timeline_document = _timeline_document(showcase_plan, BACKGROUND_SHA256)
+    timeline.write_text(json.dumps(timeline_document), encoding="utf-8")
+    extracted_indices = []
+
+    def fake_extract(master, frame_indices, destinations):
+        extracted_indices.extend(frame_indices)
+        for index, destination in zip(frame_indices, destinations, strict=True):
+            Image.new("RGB", (1600, 900), (index % 256, 40, 80)).save(destination)
+
+    monkeypatch.setattr(
+        showcase_module, "_extract_selected_frames", fake_extract, raising=False
+    )
+
+    frames = extract_review_frames(
+        tmp_path / "master.mp4", timeline, tmp_path / "review"
+    )
+
+    entries = timeline_document["segments"]
+    expected_indices = tuple(
+        index
+        for position in ("first", "middle", "last")
+        for entry in entries
+        for index in (
+            {
+                "first": entry["startFrame"],
+                "middle": (entry["startFrame"] + entry["endFrame"] - 1) // 2,
+                "last": entry["endFrame"] - 1,
+            }[position],
+        )
+    )
+    assert tuple(extracted_indices) == tuple(sorted(expected_indices))
+    assert len(frames) == 45
+    assert frames[0].name == "01-blink-00-first.png"
+    assert frames[15].name == "01-blink-00-middle.png"
+    assert frames[-1].name == "15-blink-07-last.png"
+    assert all(Image.open(frame).size == (1600, 900) for frame in frames)
+    with Image.open(tmp_path / "review" / "contact-sheet.jpg") as sheet:
+        assert sheet.size == (15 * 320, 3 * 180)
 
 
 @pytest.fixture

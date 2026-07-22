@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
 import json
 from pathlib import Path
 import sys
@@ -28,7 +29,9 @@ from tools.nangongwan_action_showcase_v2 import (
     build_segment_frames,
     concat_clips,
     copy_verified_background,
+    extract_review_frames,
     probe_media,
+    validate_showcase,
     write_silent_video,
 )
 from tools.nangongwan_rooftop_making_of import ActionSource
@@ -376,6 +379,33 @@ def _validate_existing(root: Path, background_source: Path) -> Path:
     return master
 
 
+def _validate_final_showcase(root: Path, background_source: Path) -> tuple[Path, Path]:
+    """Run every Task 4 gate and write local review artifacts on success."""
+
+    master = _validate_existing(root, background_source)
+    output = root / _OUTPUT_DIRECTORY
+    timeline = output / "timeline.json"
+    plan = build_showcase_plan(root, output / "background.png")
+    report = validate_showcase(master, plan, timeline)
+    report_path = output / "validation-report.json"
+    if report["allPassed"] is True:
+        review = output / "review"
+        frames = extract_review_frames(master, timeline, review)
+        contact_sheet = review / "contact-sheet.jpg"
+        report["review"] = {
+            "frames": [str(path.resolve()) for path in frames],
+            "contactSheet": str(contact_sheet.resolve()),
+            "frameCount": len(frames),
+            "contactSheetSha256": sha256(contact_sheet.read_bytes()).hexdigest(),
+        }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    if report["allPassed"] is not True:
+        raise ValueError(f"final V2 validation failed; see {report_path}")
+    return master, report_path
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--background", type=Path, default=_DEFAULT_BACKGROUND)
@@ -392,8 +422,8 @@ def main() -> None:
         master = build_showcase(root, args.background)
         print(f"Built {master}")
     else:
-        master = _validate_existing(root, args.background)
-        print(f"Validated {master}")
+        master, report = _validate_final_showcase(root, args.background)
+        print(f"Validated {master}; allPassed=true; report={report}")
 
 
 if __name__ == "__main__":
