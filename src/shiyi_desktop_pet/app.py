@@ -648,8 +648,9 @@ class DesktopPetApplication:
         candidate = self._choose_state_action(state)
         started = self._state_active_started_ms
         elapsed = max(0, now_ms - started) if started is not None else 0
-        candidate_duration = _configured_action_duration_ms(
-            self.catalog.spec(candidate)
+        candidate_duration = math.ceil(
+            _configured_action_duration_ms(self.catalog.spec(candidate))
+            * self._animation_speed_multiplier()
         )
         if elapsed + candidate_duration > state.max_duration_ms:
             self._state_phase = "exit"
@@ -1194,10 +1195,14 @@ class DesktopPetApplication:
             self.behavior.manual_finished()
             self._resume_base_mode()
 
+    def _animation_speed_multiplier(self) -> float:
+        return _ANIMATION_SPEED.get(self._settings.animation_speed, 1.0)
+
     def _adjusted_animation_time(self, now_ms: int) -> int:
-        multiplier = _ANIMATION_SPEED.get(self._settings.animation_speed, 1.0)
         elapsed = max(0, now_ms - self.timeline.started_ms)
-        return self.timeline.started_ms + round(elapsed / multiplier)
+        return self.timeline.started_ms + round(
+            elapsed / self._animation_speed_multiplier()
+        )
 
     def _manual_move(self, direction: int) -> None:
         area = self._current_screen_area()

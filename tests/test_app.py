@@ -1211,6 +1211,117 @@ def test_persistent_state_exits_before_starting_resident_action_that_would_cross
     controller.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("animation_speed", "enter_duration_ms", "resident_duration_ms", "expected_phase"),
+    (
+        ("slow", 375, 375, "exit"),
+        ("normal", 300, 300, "resident"),
+        ("fast", 225, 225, "resident"),
+    ),
+)
+def test_persistent_state_hard_max_uses_wall_clock_animation_speed(
+    qapp,
+    animation_speed,
+    enter_duration_ms,
+    resident_duration_ms,
+    expected_phase,
+):
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=replace(
+            AppSettings(),
+            animation_speed=animation_speed,
+            gaze_enabled=False,
+        ),
+        catalog_factory=_state_catalog,
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [0]
+    controller._now_ms = lambda: now[0]
+
+    controller.trigger_action("rooftopEnter")
+    now[0] = enter_duration_ms
+    controller._advance_manual(now[0])
+    controller._active_state = replace(
+        controller.active_state,
+        max_duration_ms=60_000,
+        exit_chance_after_min=0,
+        exit_chance_after_ramp=0,
+    )
+
+    now[0] = enter_duration_ms + 59_700
+    controller.timeline.started_ms = now[0] - resident_duration_ms
+    controller._advance_manual(now[0])
+
+    assert controller._state_phase == expected_phase
+    if expected_phase == "exit":
+        assert controller.current_action == "rooftopExit"
+    else:
+        assert controller.current_action in {"rooftopIdle", "rooftopMoon"}
+    controller.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("state_elapsed_ms", "expected_phase"),
+    (
+        (59_772, "resident"),
+        (59_773, "exit"),
+    ),
+)
+def test_persistent_state_fast_fractional_duration_rounds_up_at_hard_max(
+    qapp, monkeypatch, state_elapsed_ms, expected_phase
+):
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=replace(
+            AppSettings(),
+            animation_speed="fast",
+            gaze_enabled=False,
+        ),
+        catalog_factory=_state_catalog,
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [0]
+    controller._now_ms = lambda: now[0]
+
+    controller.trigger_action("rooftopEnter")
+    now[0] = 225
+    controller._advance_manual(now[0])
+    controller._active_state = replace(
+        controller.active_state,
+        max_duration_ms=60_000,
+        exit_chance_after_min=0,
+        exit_chance_after_ramp=0,
+    )
+    current_resident = controller.current_action
+    next_resident = (
+        "rooftopMoon" if current_resident == "rooftopIdle" else "rooftopIdle"
+    )
+    original_spec = controller.catalog.spec
+    fractional_spec = replace(
+        original_spec(next_resident),
+        frame_count=1,
+        frame_ms=303,
+        frame_durations=None,
+    )
+    monkeypatch.setattr(
+        controller.catalog,
+        "spec",
+        lambda action: fractional_spec if action == next_resident else original_spec(action),
+    )
+
+    now[0] = 225 + state_elapsed_ms
+    controller.timeline.started_ms = now[0] - 225
+    controller._advance_manual(now[0])
+
+    assert controller._state_phase == expected_phase
+    controller.shutdown()
+
+
 def test_persistent_state_menu_requests_natural_exit_after_current_clip(qapp):
     controller, _, _, _, _ = _controller(
         qapp,
