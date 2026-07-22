@@ -44,10 +44,10 @@ MANIFEST_PATH = PET_ROOT / "pet.json"
 WORK_DIR = ROOT / "work" / "moonlit-rooftop-state"
 
 TRANSITION_PATH = ASSET_DIR / "phase-transition-v4.png"
-RESIDENT_PATH = ASSET_DIR / "phase-resident-v2.png"
-GLANCE_PATH = ASSET_DIR / "phase-glance-v2.png"
-CHESTNUT_PATH = ASSET_DIR / "phase-rooftop-chestnut-v2.png"
-CHESTNUT_RETURN_PATH = ASSET_DIR / "phase-rooftop-chestnut-return-v2.png"
+RESIDENT_PATH = ASSET_DIR / "phase-resident-v3.png"
+GLANCE_PATH = ASSET_DIR / "phase-glance-v3.png"
+CHESTNUT_PATH = ASSET_DIR / "phase-rooftop-chestnut-v3.png"
+CHESTNUT_RETURN_PATH = ASSET_DIR / "phase-rooftop-chestnut-return-v3.png"
 MOON_PATH = ASSET_DIR / "moon-partial.png"
 ROOF_PATH = ASSET_DIR / "roof-eave.png"
 
@@ -65,6 +65,9 @@ CLIP_ORDER = (
 
 RESIDENT_MOON_OPACITY = 0.78
 SEATED_TARGET_ANCHOR = (94, 133)
+SEATED_FOOTLINE_Y = 203
+CHESTNUT_HAND_TARGET = (51, 94)
+MAX_VISIBLE_PIXELS = 25000
 
 # The source sheets were generated separately and do not share a canvas origin.
 # These points mark the centre of the same waist clasp in every seated panel.
@@ -72,36 +75,36 @@ SEATED_TARGET_ANCHOR = (94, 133)
 # hidden butt/eave contact point.  Do not replace this with a silhouette centre:
 # moving hair, sleeves, and props are intentionally allowed to change bounds.
 RESIDENT_SEAT_ANCHORS = (
-    (232, 249),
-    (201, 249),
-    (191, 249),
-    (170, 249),
-    (230, 201),
-    (195, 203),
-    (190, 201),
-    (170, 201),
+    (238, 260),
+    (212, 260),
+    (188, 260),
+    (163, 262),
+    (237, 211),
+    (194, 215),
+    (193, 212),
+    (150, 212),
 )
 GLANCE_SEAT_ANCHORS = (
-    (275, 423),
-    (244, 423),
-    (231, 423),
-    (202, 423),
+    (282, 416),
+    (250, 418),
+    (247, 418),
+    (244, 418),
 )
 CHESTNUT_SEAT_ANCHORS = (
-    (231, 248),
-    (200, 248),
-    (194, 248),
-    (180, 248),
-    (231, 204),
-    (208, 204),
-    (190, 204),
-    (180, 204),
+    (236, 260),
+    (222, 260),
+    (213, 258),
+    (192, 260),
+    (238, 209),
+    (214, 213),
+    (204, 211),
+    (194, 211),
 )
 CHESTNUT_RETURN_SEAT_ANCHORS = (
-    (274, 426),
-    (247, 426),
-    (224, 426),
-    (202, 426),
+    (271, 453),
+    (238, 451),
+    (216, 451),
+    (182, 452),
 )
 
 
@@ -196,6 +199,43 @@ def _placed_sequence(
     return tuple(placed)
 
 
+def _normalize_seated_geometry(
+    character: Image.Image,
+    *,
+    pivot_y: int = SEATED_TARGET_ANCHOR[1],
+    footline_y: int = SEATED_FOOTLINE_Y,
+) -> Image.Image:
+    """Mesh-warp one complete pose so the seated root and footline stay put.
+
+    This deliberately does not paste pixels from a neutral pose.  Every hand,
+    sleeve, skirt fold, leg, and shoe remains from the action's own artwork.
+    Only the vertical spacing below the pelvis proxy is resampled, correcting
+    small generative proportion differences while preserving the full pose.
+    """
+
+    source = character.convert("RGBA")
+    painted = source.getbbox()
+    if painted is None:
+        raise ValueError("cannot normalize an empty seated pose")
+    if not 0 < pivot_y < footline_y <= CELL_SIZE[1]:
+        raise ValueError("invalid seated geometry target")
+    if painted[3] <= pivot_y:
+        raise ValueError("seated pose has no lower body below the pelvis proxy")
+
+    result = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    result.alpha_composite(source.crop((0, 0, CELL_SIZE[0], pivot_y)), (0, 0))
+    lower = source.crop((0, pivot_y, CELL_SIZE[0], painted[3]))
+    lower = lower.resize(
+        (CELL_SIZE[0], footline_y - pivot_y),
+        Image.Resampling.LANCZOS,
+    )
+    result.alpha_composite(lower, (0, pivot_y))
+    normalized = result.getbbox()
+    if normalized is None or abs(normalized[3] - footline_y) > 1:
+        raise AssertionError("seated geometry did not reach the fixed footline")
+    return result
+
+
 def _prepared_local_moon(source: Image.Image) -> Image.Image:
     """Create the large, unmistakable partial moon behind the seated pet."""
 
@@ -279,6 +319,121 @@ def _resident_scene_clip(
     )
 
 
+def _violet_spell_hand(character: Image.Image) -> Image.Image:
+    """Shift the summoning spark toward the violet aura seen in the scene."""
+
+    result = character.convert("RGBA").copy()
+    pixels = result.load()
+    assert pixels is not None
+    for y in range(72, 111):
+        for x in range(32, 72):
+            red, green, blue, alpha = pixels[x, y]
+            if alpha and blue >= 105 and green >= red * 1.12:
+                luminance = max(red, green, blue)
+                pixels[x, y] = (
+                    min(255, round(luminance * 0.86)),
+                    min(255, round(luminance * 0.42)),
+                    min(255, round(luminance * 1.04)),
+                    alpha,
+                )
+    return result
+
+
+def _chestnut_flight_frame(
+    open_hand: Image.Image,
+    progress: float,
+    *,
+    pulse: float = 1.0,
+) -> Image.Image:
+    """Fly one violet-wrapped golden chestnut in from the distant left."""
+
+    t = max(0.0, min(1.0, progress))
+    eased = 1.0 - (1.0 - t) ** 3
+    start_x, start_y = (2.0, 116.0)
+    target_x, target_y = CHESTNUT_HAND_TARGET
+    x = start_x + (target_x - start_x) * eased
+    y = start_y + (target_y - start_y) * eased - 9.0 * (1.0 - t) * t
+    centre = (round(x), round(y))
+
+    effect = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    aura = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    aura_draw = ImageDraw.Draw(aura)
+    radius = max(5, round((8.0 - 2.0 * t) * pulse))
+    aura_draw.ellipse(
+        (
+            centre[0] - radius,
+            centre[1] - radius,
+            centre[0] + radius,
+            centre[1] + radius,
+        ),
+        fill=(151, 76, 255, 170),
+    )
+    trail_length = round((18.0 - 9.0 * t) * pulse)
+    if trail_length > 0:
+        trail_end = (
+            max(0, centre[0] - trail_length),
+            min(CELL_SIZE[1] - 1, centre[1] + round(5 * (1.0 - t))),
+        )
+        aura_draw.line(
+            (trail_end, centre),
+            fill=(111, 49, 237, 150),
+            width=max(3, round(5 * pulse)),
+        )
+        aura_draw.ellipse(
+            (
+                trail_end[0] - 3,
+                trail_end[1] - 3,
+                trail_end[0] + 3,
+                trail_end[1] + 3,
+            ),
+            fill=(183, 104, 255, 90),
+        )
+    effect.alpha_composite(aura.filter(ImageFilter.GaussianBlur(3.2)))
+
+    glow = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.ellipse(
+        (centre[0] - 5, centre[1] - 6, centre[0] + 5, centre[1] + 6),
+        fill=(200, 121, 255, 155),
+        outline=(232, 187, 255, 210),
+        width=1,
+    )
+    effect.alpha_composite(glow)
+
+    nut = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    nut_draw = ImageDraw.Draw(nut)
+    nut_radius_x = round(2 + 2 * t)
+    nut_radius_y = round(3 + 2 * t)
+    nut_draw.ellipse(
+        (
+            centre[0] - nut_radius_x,
+            centre[1] - nut_radius_y,
+            centre[0] + nut_radius_x,
+            centre[1] + nut_radius_y,
+        ),
+        fill=(210, 133, 50, 255),
+        outline=(126, 62, 29, 255),
+        width=1,
+    )
+    nut_draw.polygon(
+        (
+            (centre[0] - 2, centre[1] - nut_radius_y + 1),
+            (centre[0] + 1, centre[1] - nut_radius_y - 2),
+            (centre[0] + 2, centre[1] - 2),
+        ),
+        fill=(238, 180, 74, 255),
+    )
+    nut_draw.ellipse(
+        (centre[0] - 1, centre[1] - 2, centre[0] + 1, centre[1]),
+        fill=(255, 225, 146, 235),
+    )
+    effect.alpha_composite(nut)
+
+    result = open_hand.convert("RGBA").copy()
+    result.alpha_composite(effect)
+    return result
+
+
 def _validate_desktop_transparency(
     clips: dict[str, tuple[Image.Image, ...]],
 ) -> None:
@@ -298,7 +453,7 @@ def _validate_desktop_transparency(
                     f"{action_id} frame {index} paints a canvas corner"
                 )
             visible_pixels = sum(alpha.histogram()[8:])
-            if visible_pixels > 24000:
+            if visible_pixels > MAX_VISIBLE_PIXELS:
                 raise ValueError(
                     f"{action_id} frame {index} covers too much of the desktop canvas: "
                     f"{visible_pixels} pixels"
@@ -370,6 +525,35 @@ def build_clips(
         target_height=184,
         source_anchors=anchors["chestnut-return"],
     )
+    resident = tuple(_normalize_seated_geometry(frame) for frame in resident)
+    glance = tuple(_normalize_seated_geometry(frame) for frame in glance)
+    chestnut = tuple(_normalize_seated_geometry(frame) for frame in chestnut)
+    chestnut_return = tuple(
+        _normalize_seated_geometry(frame) for frame in chestnut_return
+    )
+    for sequence_name, sequence in (
+        ("resident", resident),
+        ("glance", glance),
+        ("chestnut", chestnut),
+        ("chestnut-return", chestnut_return),
+    ):
+        for index, character in enumerate(sequence, start=1):
+            painted = character.getbbox()
+            if painted is None or abs(painted[3] - SEATED_FOOTLINE_Y) > 1:
+                raise AssertionError(
+                    f"{sequence_name} frame {index} moved the seated footline"
+                )
+    base_lower = resident[0].crop(
+        (0, SEATED_TARGET_ANCHOR[1], CELL_SIZE[0], CELL_SIZE[1])
+    ).tobytes()
+    if all(
+        frame.crop(
+            (0, SEATED_TARGET_ANCHOR[1], CELL_SIZE[0], CELL_SIZE[1])
+        ).tobytes()
+        == base_lower
+        for frame in (*chestnut[1:7], *chestnut_return[:-1])
+    ):
+        raise AssertionError("seated actions must retain their own lower-body artwork")
     boundary = _boundary(resident, moon, roof)
 
     enter: list[Image.Image] = [idle[0], idle[1]]
@@ -449,9 +633,27 @@ def build_clips(
         *tuple(reversed(glance[:-1])),
         resident[0],
     )
+    open_hand = _violet_spell_hand(chestnut[1])
+    flight = tuple(
+        _chestnut_flight_frame(open_hand, index / 9) for index in range(10)
+    )
+    hover = tuple(
+        _chestnut_flight_frame(open_hand, 1.0, pulse=pulse)
+        for pulse in (1.10, 0.92, 0.78)
+    )
     chestnut_path = (
         resident[0],
-        *chestnut,
+        chestnut[0],
+        open_hand,
+        *flight,
+        *hover,
+        chestnut[2],
+        chestnut[3],
+        chestnut[3],
+        chestnut[4],
+        chestnut[5],
+        chestnut[6],
+        chestnut[6],
         *chestnut_return,
         resident[0],
     )
@@ -471,7 +673,7 @@ def build_clips(
         "moonlitChestnut": 18,
         "rooftopIdle": 9,
         "rooftopMoonGaze": 7,
-        "rooftopChestnut": 14,
+        "rooftopChestnut": 28,
         "rooftopRest": 5,
         "rooftopBreeze": 7,
         "rooftopGlance": 9,
@@ -598,14 +800,14 @@ def main() -> None:
         raise AssertionError("builder changed atlas rows 0 through 22")
 
     atlas.save(ATLAS_PATH, "WEBP", lossless=True, quality=100, method=6, exact=True)
-    frame_dir = WORK_DIR / "frames-transparent-v6"
+    frame_dir = WORK_DIR / "frames-transparent-v8"
     frame_dir.mkdir(parents=True, exist_ok=True)
     for key in CLIP_ORDER:
         for index, frame in enumerate(clips[key], 1):
             frame.save(frame_dir / f"{key}-{index:02d}.png")
-    _write_audit(clips, WORK_DIR / "audit-87-transparent-v6.png")
+    _write_audit(clips, WORK_DIR / "audit-101-transparent-v8.png")
     print(f"wrote {sum(map(len, clips.values()))} state frames to {ATLAS_PATH}")
-    print(f"audit: {WORK_DIR / 'audit-87-transparent-v6.png'}")
+    print(f"audit: {WORK_DIR / 'audit-101-transparent-v8.png'}")
 
 
 if __name__ == "__main__":

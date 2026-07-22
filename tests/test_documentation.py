@@ -12,7 +12,7 @@ _MARKDOWN_LINK = re.compile(r"\[[^]]+\]\(([^)]+)\)")
 def test_beginner_readme_names_the_installer_and_routes_each_audience(repo_root: Path):
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
 
-    assert "DesktopCompanion-2.4.4-setup.exe" in readme
+    assert "DesktopCompanion-2.4.5-setup.exe" in readme
     assert "普通用户只需要下载" in readme
     assert "docs/新手使用指南.md" in readme
     assert "docs/添加新宠物指南.md" in readme

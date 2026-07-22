@@ -12,7 +12,10 @@ from tools.build_nangongwan_moonlit_chestnut import (
 )
 from tools.build_nangongwan_moonlit_rooftop_state import (
     CLIP_ORDER,
+    MAX_VISIBLE_PIXELS,
+    SEATED_FOOTLINE_Y,
     SEATED_TARGET_ANCHOR,
+    _normalize_seated_geometry,
     _placed_sequence,
     _prepared_local_moon,
     build_clips as build_state_clips,
@@ -153,7 +156,7 @@ def test_persistent_state_builder_uses_one_exact_boundary_for_every_resident_cli
         "moonlitChestnut": 18,
         "rooftopIdle": 9,
         "rooftopMoonGaze": 7,
-        "rooftopChestnut": 14,
+        "rooftopChestnut": 28,
         "rooftopRest": 5,
         "rooftopBreeze": 7,
         "rooftopGlance": 9,
@@ -190,7 +193,7 @@ def test_persistent_state_builder_preserves_rows_zero_through_twenty_two():
 
     atlas = extend_state_atlas(source, clips)
 
-    assert atlas.size == (ATLAS_WIDTH, 6032)
+    assert atlas.size == (ATLAS_WIDTH, 6240)
     assert sha256(atlas.crop((0, 0, ATLAS_WIDTH, 4784)).tobytes()).digest() == sha256(
         prefix.tobytes()
     ).digest()
@@ -221,7 +224,7 @@ def test_persistent_state_builder_keeps_every_canvas_corner_transparent():
         for frame in frames:
             alpha = frame.getchannel("A")
             assert all(alpha.getpixel(point) == 0 for point in corners)
-            assert sum(alpha.histogram()[8:]) <= 24000
+            assert sum(alpha.histogram()[8:]) <= MAX_VISIBLE_PIXELS
 
 
 def test_seated_panels_lock_the_pelvis_in_both_axes_while_heads_can_move():
@@ -262,6 +265,40 @@ def test_seated_panels_lock_the_pelvis_in_both_axes_while_heads_can_move():
             and crop.getpixel((x, y))[0] < 80
         ]
         assert cyan_pixels
+
+
+def test_geometry_normalization_locks_the_footline_without_pasting_a_base_pose():
+    pivot = SEATED_TARGET_ANCHOR[1]
+    first = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    first_draw = ImageDraw.Draw(first)
+    first_draw.ellipse((68, 24, 124, 112), fill=(220, 228, 244, 255))
+    first_draw.polygon(
+        ((66, 102), (126, 102), (142, 198), (50, 198)),
+        fill=(30, 65, 145, 255),
+    )
+    second = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    second_draw = ImageDraw.Draw(second)
+    second_draw.ellipse((68, 24, 124, 112), fill=(220, 228, 244, 255))
+    second_draw.polygon(
+        ((62, 102), (130, 102), (150, 205), (44, 205)),
+        fill=(135, 45, 105, 255),
+    )
+    second_draw.ellipse((38, 144, 58, 162), fill=(250, 190, 170, 255))
+
+    normalized_first = _normalize_seated_geometry(first)
+    normalized_second = _normalize_seated_geometry(second)
+
+    assert abs(normalized_first.getbbox()[3] - SEATED_FOOTLINE_Y) <= 1
+    assert abs(normalized_second.getbbox()[3] - SEATED_FOOTLINE_Y) <= 1
+    assert normalized_first.crop((0, 0, 192, pivot)).tobytes() == first.crop(
+        (0, 0, 192, pivot)
+    ).tobytes()
+    assert normalized_second.crop((0, 0, 192, pivot)).tobytes() == second.crop(
+        (0, 0, 192, pivot)
+    ).tobytes()
+    assert normalized_first.crop((0, pivot, 192, 208)).tobytes() != (
+        normalized_second.crop((0, pivot, 192, 208)).tobytes()
+    )
 
 
 def test_prepared_moon_is_large_bright_and_keeps_canvas_corners_clear():
