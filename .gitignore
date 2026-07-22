@@ -10,6 +10,7 @@ outputs/
 work/
 .worktrees/
 .coverage
+.superpowers/
 
 # Copyrighted visual references kept for local study only.
 private-reference/
