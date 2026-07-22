@@ -1,7 +1,13 @@
+import argparse
 import json
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw
+
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.nangongwan_rooftop_making_of import (
     ActionSource,
@@ -9,7 +15,13 @@ from tools.nangongwan_rooftop_making_of import (
     ShotSpec,
     SubtitleEvent,
     VideoPlan,
+    burn_ass_and_add_silence,
+    concat_shots,
     read_action,
+    render_shot,
+    write_action_mp4,
+    write_ass,
+    write_timeline_json,
 )
 
 
@@ -221,3 +233,63 @@ def build_video_plan(root: Path) -> VideoPlan:
         for chapter_id, duration in zip(titles, CHAPTER_DURATIONS, strict=True)
     )
     return VideoPlan(chapters, action_sources, _subtitle_events(root, chapters))
+
+
+def build_action_clips(root: Path) -> tuple[Path, ...]:
+    """Regenerate only the five public action clips used by the master."""
+
+    action_sources, videos, _ = _sources(root)
+    clip_sources = {
+        "standing": "standing",
+        "cinematic": "cinematic",
+        "moon_184": "moon_184",
+        "moon_232": "moon_232",
+        "moon_full": "moon_full",
+    }
+    rendered: list[Path] = []
+    for action_name, video_name in clip_sources.items():
+        target = videos[video_name]
+        write_action_mp4(read_action(action_sources[action_name]), target)
+        rendered.append(target)
+    return tuple(rendered)
+
+
+def build_master(root: Path) -> Path:
+    """Build the silent horizontal review master and its editable sidecars."""
+
+    output = root / "work" / "nangongwan-rooftop-making-of-video"
+    shots_dir = output / "intermediates" / "shots"
+    build_action_clips(root)
+    build_review_stills(root)
+    plan = build_video_plan(root)
+    ass = output / "master-v1.ass"
+    timeline = output / "master-v1-timeline.json"
+    write_ass(plan.subtitle_events, ass)
+    write_timeline_json(plan, timeline)
+
+    rendered_shots: list[Path] = []
+    for index, shot in enumerate(
+        (shot for chapter in plan.chapters for shot in chapter.shots), start=1
+    ):
+        target = shots_dir / f"{index:02d}-{shot.id}.mp4"
+        render_shot(shot, target)
+        rendered_shots.append(target)
+    master_base = output / "master-base.mp4"
+    concat_shots(tuple(rendered_shots), master_base)
+    master = output / "master-v1-no-voice-1920x1080.mp4"
+    burn_ass_and_add_silence(master_base, ass, master)
+    return master
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Render the Nangong Wan making-of review master.")
+    parser.add_argument("--build-all", action="store_true", help="render all actions, shots, and the master")
+    arguments = parser.parse_args()
+    if not arguments.build_all:
+        parser.error("--build-all is required")
+    root = Path(__file__).resolve().parents[1]
+    print(build_master(root))
+
+
+if __name__ == "__main__":
+    main()

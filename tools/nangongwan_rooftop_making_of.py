@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping
@@ -348,3 +351,330 @@ def write_action_mp4(timed: TimedFrames, out: Path) -> None:
         raise
     if returncode:
         raise subprocess.CalledProcessError(returncode, command, stderr=stderr)
+
+
+MASTER_SIZE = (1920, 1080)
+
+
+def run_ffmpeg(args: list[str]) -> None:
+    """Run FFmpeg without a shell and retain useful failures for callers."""
+
+    completed = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode:
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(f"FFmpeg command failed: {args!r}\nstderr:\n{stderr}")
+
+
+def _duration_frames(duration_ms: int) -> int:
+    frames = round(duration_ms * 30 / 1_000)
+    if duration_ms <= 0 or frames <= 0:
+        raise ValueError("shot duration must produce at least one frame")
+    return frames
+
+
+def _desktop_background() -> Image.Image:
+    """Return the established desktop context at the delivery resolution."""
+
+    transparent_pet = Image.new("RGBA", CELL_SIZE, (0, 0, 0, 0))
+    return compose_desktop(transparent_pet).resize(MASTER_SIZE, Image.Resampling.LANCZOS)
+
+
+def _font(size: int):
+    windows_font = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "msyh.ttc"
+    if windows_font.exists():
+        from PIL import ImageFont
+
+        return ImageFont.truetype(windows_font, size)
+    from PIL import ImageFont
+
+    return ImageFont.load_default()
+
+
+def _caption_lines(text: str, font, max_width: int) -> list[str]:
+    """Wrap a short card caption while keeping it within the three-line contract."""
+
+    lines: list[str] = []
+    for paragraph in text.splitlines() or [""]:
+        current = ""
+        for character in paragraph:
+            candidate = current + character
+            if current and font.getlength(candidate) > max_width:
+                lines.append(current)
+                current = character
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+    if len(lines) > 3:
+        lines = lines[:3]
+        while font.getlength(lines[-1] + "…") > max_width and lines[-1]:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] += "…"
+    return lines or [""]
+
+
+def _write_card(shot: ShotSpec, out: Path) -> Path:
+    """Create a text-only chapter card over the restrained desktop background."""
+
+    card = _desktop_background().convert("RGB")
+    draw = ImageDraw.Draw(card, "RGBA")
+    draw.rounded_rectangle((250, 260, 1670, 830), radius=42, fill=(12, 23, 42, 198))
+    title_font = _font(64)
+    caption_font = _font(40)
+    title = shot.title or shot.id
+    draw.text((360, 360), title, font=title_font, fill=(255, 255, 255, 255))
+    y = 490
+    for line in _caption_lines(shot.caption, caption_font, 1180):
+        draw.text((360, y), line, font=caption_font, fill=(223, 234, 248, 255))
+        y += 66
+    out.parent.mkdir(parents=True, exist_ok=True)
+    card.save(out)
+    return out
+
+
+def _write_still_canvas(source: Path, out: Path) -> Path:
+    """Place a still inside its 1660x900 display area on the desktop background."""
+
+    with Image.open(source) as image_source:
+        content = image_source.convert("RGBA")
+    content.thumbnail((1660, 900), Image.Resampling.LANCZOS)
+    canvas = _desktop_background().convert("RGBA")
+    canvas.alpha_composite(
+        content,
+        ((canvas.width - content.width) // 2, (canvas.height - content.height) // 2),
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas.convert("RGB").save(out)
+    return out
+
+
+def _encode_still_image(source: Path, out: Path, frame_count: int, *, zoom: bool) -> None:
+    filters = ["setsar=1"]
+    if zoom:
+        filters.insert(
+            0,
+            "zoompan=z='min(1.04,1+0.004*on/30)':d=1:s=1920x1080:fps=30",
+        )
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-framerate",
+            "30",
+            "-i",
+            str(source),
+            "-vf",
+            ",".join(filters),
+            "-frames:v",
+            str(frame_count),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.1",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "30",
+            "-color_range",
+            "tv",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ]
+    )
+
+
+def render_shot(shot: ShotSpec, out: Path) -> None:
+    """Render one plan shot as a 1920x1080 silent, square-pixel H.264 clip."""
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    frame_count = _duration_frames(shot.duration_ms)
+    prepared = out.with_suffix(".png")
+    if shot.kind == "card":
+        _encode_still_image(_write_card(shot, prepared), out, frame_count, zoom=False)
+        return
+    if shot.kind == "still":
+        if not isinstance(shot.source, Path):
+            raise ValueError("still shots require an image path")
+        _encode_still_image(_write_still_canvas(shot.source, prepared), out, frame_count, zoom=True)
+        return
+
+    source: Path
+    generated_action: Path | None = None
+    if isinstance(shot.source, ActionSource):
+        generated_action = out.with_suffix(".action-source.mp4")
+        write_action_mp4(read_action(shot.source), generated_action)
+        source = generated_action
+    elif isinstance(shot.source, Path):
+        source = shot.source
+    else:
+        raise ValueError(f"{shot.kind} shots require a media source")
+    background = out.with_suffix(".background.png")
+    _desktop_background().save(background)
+    command = ["ffmpeg", "-y"]
+    if shot.loop:
+        command.extend(("-stream_loop", "-1"))
+    command.extend(
+        (
+            "-i",
+            str(source),
+            "-loop",
+            "1",
+            "-framerate",
+            "30",
+            "-i",
+            str(background),
+            "-filter_complex",
+            "[0:v]scale=1600:900:force_original_aspect_ratio=decrease,setsar=1[media];"
+            "[1:v][media]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p",
+            "-frames:v",
+            str(frame_count),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.1",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "30",
+            "-color_range",
+            "tv",
+            "-movflags",
+            "+faststart",
+            str(out),
+        )
+    )
+    run_ffmpeg(command)
+    background.unlink(missing_ok=True)
+    if generated_action is not None:
+        generated_action.unlink(missing_ok=True)
+
+
+def _concat_path(path: Path) -> str:
+    return path.resolve().as_posix().replace("'", r"'\''")
+
+
+def concat_shots(shots: tuple[Path, ...], out: Path) -> None:
+    """Join already-normalized silent shots with an absolute-path concat manifest."""
+
+    if not shots:
+        raise ValueError("at least one shot is required")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    manifest = out.with_suffix(".concat.txt")
+    manifest.write_text(
+        "".join(f"file '{_concat_path(shot)}'\n" for shot in shots), encoding="utf-8"
+    )
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-safe",
+            "0",
+            "-f",
+            "concat",
+            "-i",
+            str(manifest),
+            "-an",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ]
+    )
+    manifest.unlink(missing_ok=True)
+
+
+def _ascii_ass_copy(ass: Path) -> tuple[Path, Path]:
+    system_drive = os.environ.get("SystemDrive", "C:").rstrip("\\/")
+    candidates = (
+        Path(f"{system_drive}\\Temp"),
+        Path(os.environ.get("WINDIR", r"C:\Windows")) / "Temp",
+        Path(tempfile.gettempdir()),
+    )
+    for parent in candidates:
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            directory = Path(tempfile.mkdtemp(prefix="nangongwan-ass-", dir=parent))
+        except OSError:
+            continue
+        if str(directory).isascii():
+            copied = directory / "master-v1.ass"
+            shutil.copy2(ass, copied)
+            return directory, copied
+        shutil.rmtree(directory, ignore_errors=True)
+    raise RuntimeError("could not create an ASCII-only temporary directory for ASS filtering")
+
+
+def _ffmpeg_filter_path(path: Path) -> str:
+    return path.resolve().as_posix().replace("'", r"\'").replace(":", r"\:")
+
+
+def burn_ass_and_add_silence(master_base: Path, ass: Path, out: Path) -> None:
+    """Burn editable ASS subtitles and add a silent 48kHz stereo AAC track."""
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    directory, temporary_ass = _ascii_ass_copy(ass)
+    completed = False
+    try:
+        run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(master_base),
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+                "-vf",
+                f"ass=filename='{_ffmpeg_filter_path(temporary_ass)}'",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-profile:v",
+                "high",
+                "-level",
+                "4.1",
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                "30",
+                "-color_range",
+                "tv",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                str(out),
+            ]
+        )
+        completed = True
+    finally:
+        if completed:
+            shutil.rmtree(directory, ignore_errors=True)

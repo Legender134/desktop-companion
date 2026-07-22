@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from functools import lru_cache
 from hashlib import sha256
 from importlib.util import module_from_spec, spec_from_file_location
@@ -8,13 +9,24 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageChops, ImageDraw
 
+
+_marker_config = getattr(pytest.mark, "_config", None)
+if _marker_config is not None:
+    _marker_config.addinivalue_line("markers", "integration: exercises the FFmpeg render pipeline")
+
 from tools import nangongwan_rooftop_making_of as making_of
 from tools import render_nangongwan_rooftop_making_of as renderer
 from tools.nangongwan_rooftop_making_of import (
     ActionSource,
+    ShotSpec,
     TimedFrames,
+    burn_ass_and_add_silence,
+    concat_shots,
     compose_desktop,
     read_action,
+    render_shot,
+    run_ffmpeg,
+    write_ass,
     write_action_mp4,
 )
 from tools.render_nangongwan_rooftop_making_of import build_video_plan
@@ -32,6 +44,68 @@ def synthetic_timed_frames():
         ),
         durations_ms=(200, 300),
     )
+
+
+def test_run_ffmpeg_raises_with_command_and_stderr(monkeypatch):
+    def fail(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 1, b"", b"bad filter")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+
+    with pytest.raises(RuntimeError, match="bad filter") as error:
+        run_ffmpeg(["ffmpeg", "-version"])
+
+    assert "ffmpeg" in str(error.value)
+
+
+def test_renderer_cli_is_directly_runnable_from_the_checkout():
+    command = [sys.executable, "tools/render_nangongwan_rooftop_making_of.py", "--help"]
+
+    completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--build-all" in completed.stdout
+
+
+@pytest.mark.integration
+def test_synthetic_shots_concatenate_with_chinese_ass_and_silent_aac(tmp_path):
+    first_source = tmp_path / "first-action.mp4"
+    second_source = tmp_path / "second-action.mp4"
+    first_shot = tmp_path / "01-first.mp4"
+    second_shot = tmp_path / "02-second.mp4"
+    master_base = tmp_path / "master-base.mp4"
+    ass = tmp_path / "master-v1.ass"
+    master = tmp_path / "master.mp4"
+
+    write_action_mp4(
+        TimedFrames((Image.new("RGBA", (192, 208), (70, 110, 170, 255)),), (500,)),
+        first_source,
+    )
+    write_action_mp4(
+        TimedFrames((Image.new("RGBA", (192, 208), (110, 150, 210, 255)),), (500,)),
+        second_source,
+    )
+    render_shot(ShotSpec("first", "video", 500, first_source), first_shot)
+    render_shot(ShotSpec("second", "video", 500, second_source), second_shot)
+    concat_shots((first_shot, second_shot), master_base)
+    write_ass((making_of.SubtitleEvent(0, 1_000, "中文字幕", "Caption"),), ass)
+    burn_ass_and_add_silence(master_base, ass, master)
+
+    probe = json.loads(
+        subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(master)]
+        )
+    )
+    video = next(stream for stream in probe["streams"] if stream["codec_type"] == "video")
+    audio = next(stream for stream in probe["streams"] if stream["codec_type"] == "audio")
+    assert (video["width"], video["height"], video["codec_name"], video["pix_fmt"]) == (
+        1920,
+        1080,
+        "h264",
+        "yuv420p",
+    )
+    assert (audio["codec_name"], audio["sample_rate"], audio["channels"]) == ("aac", "48000", 2)
+    assert float(probe["format"]["duration"]) == pytest.approx(1.0, abs=0.05)
 
 
 def test_read_action_supports_cross_row_frames_and_exact_durations(tmp_path):
