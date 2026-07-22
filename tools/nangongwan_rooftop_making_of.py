@@ -45,6 +45,14 @@ class ShotSpec:
 
 
 @dataclass(frozen=True)
+class SubtitleEvent:
+    start_ms: int
+    end_ms: int
+    text: str
+    style: Literal["Title", "Caption", "Action", "Note"]
+
+
+@dataclass(frozen=True)
 class ChapterSpec:
     id: str
     title: str
@@ -56,6 +64,7 @@ class ChapterSpec:
 class VideoPlan:
     chapters: tuple[ChapterSpec, ...]
     action_sources: Mapping[str, ActionSource]
+    subtitle_events: tuple[SubtitleEvent, ...] = ()
 
     @property
     def duration_ms(self) -> int:
@@ -71,6 +80,130 @@ class VideoPlan:
                 elif isinstance(shot.source, ActionSource):
                     paths.extend((shot.source.atlas, shot.source.manifest))
         return tuple(paths)
+
+
+def ass_time(milliseconds: int) -> str:
+    """Format a non-negative millisecond offset for an ASS dialogue row."""
+
+    if milliseconds < 0:
+        raise ValueError("ASS timestamps cannot be negative")
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1_000)
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{milliseconds // 10:02d}"
+
+
+ASS_HEADER = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+WrapStyle: 2
+
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: Title,Microsoft YaHei UI,54,&H00FFFFFF,&H000000FF,&H4D000000,&H4D000000,-1,0,0,0,100,100,0,0,1,3,2,8,76,76,76,1
+Style: Caption,Microsoft YaHei UI,42,&H00FFFFFF,&H000000FF,&H4D000000,&H4D000000,0,0,0,0,100,100,0,0,1,3,2,2,76,76,76,1
+Style: Action,Microsoft YaHei UI,38,&H00FFFFFF,&H000000FF,&H4D000000,&H4D000000,-1,0,0,0,100,100,0,0,1,3,2,8,58,58,58,1
+Style: Note,Microsoft YaHei UI,34,&H00FFFFFF,&H000000FF,&H4D000000,&H4D000000,0,0,0,0,100,100,0,0,1,3,2,2,76,76,126,1
+
+[Events]
+Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+"""
+
+
+def _ass_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\N")
+
+
+def write_ass(events: tuple[SubtitleEvent, ...], out: Path) -> None:
+    """Write the review subtitles as a human-editable UTF-8 ASS script."""
+
+    rows = [ASS_HEADER]
+    for event in events:
+        if event.end_ms <= event.start_ms:
+            raise ValueError("subtitle events must have a positive duration")
+        rows.append(
+            "Dialogue: 0,"
+            f"{ass_time(event.start_ms)},{ass_time(event.end_ms)},{event.style},"
+            f",0,0,0,,{_ass_escape(event.text)}\n"
+        )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(rows), encoding="utf-8-sig")
+
+
+def _source_json(source: Path | ActionSource | None) -> object:
+    if source is None:
+        return None
+    if isinstance(source, Path):
+        return str(source)
+    return {
+        "atlas": str(source.atlas),
+        "manifest": str(source.manifest),
+        "actionId": source.action_id,
+        "manifestKind": source.manifest_kind,
+        "atlasStartFrame": source.atlas_start_frame,
+    }
+
+
+def write_timeline_json(plan: VideoPlan, out: Path) -> None:
+    """Persist exact shot and subtitle timing for review and later rendering."""
+
+    chapters: list[dict[str, object]] = []
+    cursor = 0
+    for chapter in plan.chapters:
+        shot_cursor = cursor
+        shots: list[dict[str, object]] = []
+        for shot in chapter.shots:
+            end = shot_cursor + shot.duration_ms
+            shots.append(
+                {
+                    "id": shot.id,
+                    "kind": shot.kind,
+                    "startMs": shot_cursor,
+                    "endMs": end,
+                    "durationMs": shot.duration_ms,
+                    "source": _source_json(shot.source),
+                    "title": shot.title,
+                    "caption": shot.caption,
+                    "loop": shot.loop,
+                }
+            )
+            shot_cursor = end
+        if shot_cursor != cursor + chapter.duration_ms:
+            raise ValueError(f"chapter {chapter.id} shots do not match its duration")
+        chapters.append(
+            {
+                "id": chapter.id,
+                "title": chapter.title,
+                "startMs": cursor,
+                "endMs": shot_cursor,
+                "durationMs": chapter.duration_ms,
+                "shots": shots,
+            }
+        )
+        cursor = shot_cursor
+    if cursor != plan.duration_ms:
+        raise ValueError("timeline duration does not match plan duration")
+    payload = {
+        "schemaVersion": 1,
+        "durationMs": plan.duration_ms,
+        "chapters": chapters,
+        "subtitleEvents": [
+            {
+                "startMs": event.start_ms,
+                "endMs": event.end_ms,
+                "text": event.text,
+                "style": event.style,
+            }
+            for event in plan.subtitle_events
+        ],
+        "voiceStatus": "pending-openai-api-key",
+        "aiVoiceDisclosureRequired": True,
+        "privateAnimeUsed": False,
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def read_action(source: ActionSource) -> TimedFrames:

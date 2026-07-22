@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageChops, ImageDraw
 
+from tools import nangongwan_rooftop_making_of as making_of
+from tools import render_nangongwan_rooftop_making_of as renderer
 from tools.nangongwan_rooftop_making_of import (
     ActionSource,
     TimedFrames,
@@ -320,3 +322,93 @@ def test_video_plan_never_reads_private_anime_or_rejected_failure_media():
     assert "anime-reference" not in source_text
     assert "rejected-transition" not in source_text
     assert "seat-anchor-diagnostic" not in source_text
+
+
+def test_every_chapter_shot_sum_matches_approved_duration():
+    plan = build_video_plan(ROOT)
+
+    assert renderer.build_shots(ROOT) == tuple(
+        shot for chapter in plan.chapters for shot in chapter.shots
+    )
+    for chapter in plan.chapters:
+        assert sum(shot.duration_ms for shot in chapter.shots) == chapter.duration_ms
+
+
+def test_v9_caption_explains_sequential_demo_vs_random_runtime():
+    plan = build_video_plan(ROOT)
+    chapter = next(item for item in plan.chapters if item.id == "v9_small_moon")
+    captions = "\n".join(shot.caption for shot in chapter.shots)
+
+    assert "九种动作会按权重随机出现" in captions
+    assert "演示视频为方便观看而依次播放" in captions
+
+
+def test_public_text_is_privacy_safe():
+    plan = build_video_plan(ROOT)
+    text = "\n".join(
+        shot.title + "\n" + shot.caption
+        for chapter in plan.chapters
+        for shot in chapter.shots
+    )
+    forbidden = ("c:\\users", "d:\\workspace", "gitee", "github token", "私人令牌")
+
+    assert not any(value in text.lower() for value in forbidden)
+
+
+def test_ass_writer_uses_editable_styles_and_escapes_dialogue_text(tmp_path):
+    output = tmp_path / "master-v1.ass"
+
+    making_of.write_ass(
+        (
+            making_of.SubtitleEvent(0, 1_250, "标题", "Title"),
+            making_of.SubtitleEvent(1_250, 2_500, "换行\n{保留为文字}", "Action"),
+        ),
+        output,
+    )
+
+    content = output.read_text(encoding="utf-8-sig")
+    assert "PlayResX: 1920" in content
+    assert "PlayResY: 1080" in content
+    assert "Microsoft YaHei UI" in content
+    assert "Style: Caption,Microsoft YaHei UI" in content
+    assert ",76,76,76," in content
+    assert "Style: Action,Microsoft YaHei UI" in content
+    assert ",58,58,58," in content
+    assert "Dialogue: 0,0:00:00.00,0:00:01.25,Title" in content
+    assert "换行\\N\\{保留为文字\\}" in content
+    assert making_of.ass_time(3_661_239) == "1:01:01.23"
+
+
+def test_timeline_json_records_shots_subtitles_and_public_disclosures(tmp_path):
+    plan = build_video_plan(ROOT)
+    output = tmp_path / "master-v1-timeline.json"
+
+    making_of.write_timeline_json(plan, output)
+
+    timeline = json.loads(output.read_text(encoding="utf-8"))
+    assert timeline["schemaVersion"] == 1
+    assert timeline["durationMs"] == 280_000
+    assert len(timeline["chapters"]) == 6
+    assert timeline["voiceStatus"] == "pending-openai-api-key"
+    assert timeline["aiVoiceDisclosureRequired"] is True
+    assert timeline["privateAnimeUsed"] is False
+    assert all("startMs" in shot and "endMs" in shot and "source" in shot
+               for chapter in timeline["chapters"] for shot in chapter["shots"])
+    assert any(event["style"] == "Action" for event in timeline["subtitleEvents"])
+
+
+def test_v9_action_labels_follow_manifest_frame_durations_not_even_slices(tmp_path):
+    plan = build_video_plan(ROOT)
+    output = tmp_path / "master-v1-timeline.json"
+    making_of.write_timeline_json(plan, output)
+    timeline = json.loads(output.read_text(encoding="utf-8"))
+    labels = [
+        event
+        for event in timeline["subtitleEvents"]
+        if event["style"] == "Action" and event["text"] == "月下含栗"
+    ]
+
+    assert [(item["startMs"], item["endMs"]) for item in labels] == [
+        (146_080, 155_070),
+        (176_760, 185_750),
+    ]
