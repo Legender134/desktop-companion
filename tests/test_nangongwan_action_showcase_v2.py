@@ -1251,6 +1251,40 @@ def test_center_validation_rejects_real_adjacent_frame_repetition(
     assert result["contentMismatchFrameCount"] >= 1
 
 
+def test_center_validation_accepts_lossy_subpixel_motion_when_current_frame_wins(
+    monkeypatch,
+):
+    monkeypatch.setattr(showcase_module, "RENDERED_SPRITE_SIZE", (40, 40))
+    expected_previous = Image.new("RGB", (40, 40), (100, 100, 100))
+    expected_current = expected_previous.copy()
+    ImageDraw.Draw(expected_current).rectangle(
+        (0, 0, 19, 19), fill=(101, 101, 101)
+    )
+    actual_previous = expected_previous.copy()
+    ImageDraw.Draw(actual_previous).rectangle(
+        (0, 0, 11, 19), fill=(101, 101, 101)
+    )
+    ImageDraw.Draw(actual_previous).rectangle(
+        (12, 0, 12, 9), fill=(101, 101, 101)
+    )
+    actual_current = actual_previous.copy()
+    actual_current.putpixel((12, 10), (101, 101, 101))
+    actual_current.putpixel((12, 11), (101, 101, 101))
+
+    result = showcase_module._compare_center_sequences(
+        iter((expected_previous, expected_current)),
+        iter((actual_previous, actual_current)),
+        expected_frames=2,
+    )
+
+    assert showcase_module._frame_rms_difference(
+        expected_current, expected_previous
+    ) < 1.0
+    assert result["observedMinimumTemporalRatio"] < 0.1
+    assert result["passed"] is True
+    assert result["toleratedSubthresholdTemporalFrames"] == [1]
+
+
 def test_center_validation_rejects_h264_encoded_adjacent_frame_repetition(
     tmp_path, showcase_plan
 ):

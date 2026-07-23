@@ -57,6 +57,7 @@ _SSIM_THRESHOLD = 0.995
 _OUTSIDE_MIN_PSNR_DB = 40.0
 _CENTER_MIN_PSNR_DB = 29.0
 _CENTER_MIN_TEMPORAL_RATIO = 0.10
+_CENTER_MAX_SUBPIXEL_CHANGE_RMS = 1.0
 _EXPECTED_VIDEO_TIME_BASE = Fraction(1, 15_360)
 
 
@@ -1284,6 +1285,7 @@ def _compare_center_sequences(
     failed_indices: list[int] = []
     content_mismatches: list[int] = []
     nearest_neighbor_mismatches: list[int] = []
+    tolerated_subthreshold_frames: list[int] = []
     minimum_temporal_ratio = float("inf")
     compared = 0
     previous_expected: Image.Image | None = None
@@ -1319,9 +1321,17 @@ def _compare_center_sequences(
                     minimum_temporal_ratio, temporal_ratio
                 )
                 if temporal_ratio < _CENTER_MIN_TEMPORAL_RATIO:
-                    content_mismatches.append(index)
-                    if index not in failed_indices:
-                        failed_indices.append(index)
+                    compression_damped_subpixel_motion = (
+                        expected_change < _CENTER_MAX_SUBPIXEL_CHANGE_RMS
+                        and actual_change > 0
+                        and current_error < prior_error
+                    )
+                    if compression_damped_subpixel_motion:
+                        tolerated_subthreshold_frames.append(index)
+                    else:
+                        content_mismatches.append(index)
+                        if index not in failed_indices:
+                            failed_indices.append(index)
         previous_expected = expected
         previous_actual = actual
     failed_indices.sort()
@@ -1333,6 +1343,7 @@ def _compare_center_sequences(
         ),
         "thresholdPsnrDb": _CENTER_MIN_PSNR_DB,
         "minimumTemporalChangeRatio": _CENTER_MIN_TEMPORAL_RATIO,
+        "maximumSubpixelChangeRms": _CENTER_MAX_SUBPIXEL_CHANGE_RMS,
         "framesCompared": compared,
         "minimumPsnrDb": (
             "inf" if math.isinf(minimum_psnr) else minimum_psnr
@@ -1349,6 +1360,10 @@ def _compare_center_sequences(
         ),
         "nearestNeighborMismatchFrameCount": len(nearest_neighbor_mismatches),
         "nearestNeighborMismatchFrames": nearest_neighbor_mismatches[:20],
+        "toleratedSubthresholdTemporalFrameCount": len(
+            tolerated_subthreshold_frames
+        ),
+        "toleratedSubthresholdTemporalFrames": tolerated_subthreshold_frames[:20],
     }
 
 
