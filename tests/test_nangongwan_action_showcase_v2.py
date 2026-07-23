@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 import pytest
-from PIL import Image, ImageChops, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 import tools.nangongwan_action_showcase_v2 as showcase_module
 import tools.render_nangongwan_action_showcase_v2 as render_module
@@ -81,6 +81,7 @@ def test_validation_requires_every_v2_gate(valid_showcase_fixture):
         "noTextSidecarsOrStreams": True,
         "sourcePrivacy": True,
         "sourceIntegrity": True,
+        "renderGeometry": True,
         "centeredComposition": True,
         "moonFrameParity": True,
     }
@@ -144,18 +145,21 @@ def test_two_segment_encode_has_exact_frames_and_no_subtitle_stream(
     )
 
 
-def test_timeline_has_exact_contiguous_segments_and_no_text_fields(showcase_plan):
+def test_450px_timeline_records_source_and_render_geometry(showcase_plan):
     timeline = _timeline_document(showcase_plan, BACKGROUND_SHA256)
 
-    assert timeline["schemaVersion"] == 1
+    assert timeline["schemaVersion"] == 2
     assert timeline["backgroundSha256"] == BACKGROUND_SHA256
     assert timeline["frameSize"] == [1600, 900]
-    assert timeline["spriteRectangle"] == {
-        "x": 704,
-        "y": 346,
-        "width": 192,
-        "height": 208,
+    assert timeline["sourceSpriteSize"] == [192, 208]
+    assert timeline["renderedSpriteRectangle"] == {
+        "x": 575,
+        "y": 206,
+        "width": 450,
+        "height": 488,
     }
+    assert timeline["renderScale"] == {"numerator": 75, "denominator": 32}
+    assert "spriteRectangle" not in timeline
     assert timeline["totalFrames"] == 2473
     assert len(timeline["sourceSha256"]) == 16
     assert all(
@@ -185,7 +189,79 @@ def test_timeline_has_exact_contiguous_segments_and_no_text_fields(showcase_plan
     assert all(field not in serialized for field in ("title", "caption", "text"))
 
 
-def test_build_showcase_writes_only_v2_background_clips_timeline_and_master(
+def test_timeline_render_geometry_rejects_legacy_native_rectangle():
+    document = {
+        "schemaVersion": 2,
+        "sourceSpriteSize": [192, 208],
+        "renderedSpriteRectangle": {
+            "x": 704,
+            "y": 346,
+            "width": 192,
+            "height": 208,
+        },
+        "renderScale": {"numerator": 75, "denominator": 32},
+    }
+
+    detail = showcase_module._timeline_render_geometry(document)
+
+    assert detail["passed"] is False
+
+
+def test_450px_output_names_are_isolated_from_existing_v2():
+    assert render_module._OUTPUT_DIRECTORY == (
+        Path("work") / "nangongwan-action-showcase-450px"
+    )
+    assert render_module._MASTER_NAME == (
+        "nangongwan-action-showcase-450px-1600x900.mp4"
+    )
+    assert "nangongwan-action-showcase-v2" not in str(
+        render_module._OUTPUT_DIRECTORY
+    )
+
+
+def test_build_showcase_publishes_450px_without_touching_existing_v2(
+    tmp_path, monkeypatch
+):
+    old_output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    old_output.mkdir(parents=True)
+    sentinel = old_output / "sentinel.bin"
+    sentinel.write_bytes(b"keep-the-small-version")
+    old_inventory = tuple(
+        path.relative_to(old_output) for path in old_output.rglob("*")
+    )
+
+    def fake_build(root, background, staging):
+        master = staging / render_module._MASTER_NAME
+        master.write_bytes(b"staged")
+        return master
+
+    def fake_validate(root, background_source=None, **kwargs):
+        output = kwargs["output_directory"]
+        return output / render_module._MASTER_NAME, output / "validation-report.json"
+
+    def fake_publish(staging, output):
+        output.mkdir(parents=True)
+        (output / render_module._MASTER_NAME).write_bytes(b"published")
+
+    monkeypatch.setattr(render_module, "_build_showcase_directory", fake_build)
+    monkeypatch.setattr(render_module, "_validate_final_showcase", fake_validate)
+    monkeypatch.setattr(render_module, "_publish_staged_directory", fake_publish)
+
+    result = render_module.build_showcase(tmp_path, tmp_path / "background.png")
+
+    assert result == (
+        tmp_path
+        / "work"
+        / "nangongwan-action-showcase-450px"
+        / "nangongwan-action-showcase-450px-1600x900.mp4"
+    )
+    assert sentinel.read_bytes() == b"keep-the-small-version"
+    assert tuple(
+        path.relative_to(old_output) for path in old_output.rglob("*")
+    ) == old_inventory
+
+
+def test_build_showcase_directory_writes_only_background_clips_timeline_and_master(
     tmp_path, monkeypatch, showcase_plan
 ):
     encoded_clips = []
@@ -216,9 +292,9 @@ def test_build_showcase_writes_only_v2_background_clips_timeline_and_master(
         lambda video, output, expected_frames: output.write_bytes(b"final"),
     )
 
-    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    output = tmp_path / "isolated-build"
     master = render_module._build_showcase_directory(tmp_path, BACKGROUND, output)
-    assert master == output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    assert master == output / render_module._MASTER_NAME
     assert len(encoded_clips) == 15
     assert [frame_count for _, frame_count in encoded_clips] == [
         segment.output_frames for segment in showcase_plan.segments
@@ -278,9 +354,9 @@ def _valid_master_media_probe(
 
 @pytest.fixture
 def valid_showcase_fixture(tmp_path, monkeypatch, showcase_plan):
-    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    output = tmp_path / render_module._OUTPUT_DIRECTORY
     output.mkdir(parents=True)
-    master = output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    master = output / render_module._MASTER_NAME
     master.write_bytes(b"synthetic master")
     timeline = output / "timeline.json"
     timeline.write_text(
@@ -378,10 +454,12 @@ def test_outside_sprite_ssim_is_one_for_identical_background(background_image):
 def test_validation_rejects_altered_or_repeated_encoded_center_frame(
     valid_showcase_fixture, monkeypatch, alteration
 ):
+    monkeypatch.setattr(showcase_module, "RENDERED_SPRITE_SIZE", (32, 24))
+
     def synthetic_frame(index):
         return Image.new(
             "RGB",
-            showcase_module.SPRITE_SIZE,
+            showcase_module.RENDERED_SPRITE_SIZE,
             ((index * 37) % 256, (index * 73) % 256, (index * 109) % 256),
         )
 
@@ -395,7 +473,7 @@ def test_validation_rejects_altered_or_repeated_encoded_center_frame(
             if index == 523:
                 if alteration == "overwrite":
                     changed = frame.copy()
-                    changed.paste((255, 255, 255), (24, 80, 168, 112))
+                    changed.paste((255, 255, 255), (4, 6, 28, 18))
                     yield changed
                 else:
                     yield synthetic_frame(45)
@@ -647,7 +725,7 @@ def test_extract_review_frames_uses_every_segment_boundary_and_builds_15_by_3_sh
 
 @pytest.fixture
 def existing_validation_output(tmp_path, monkeypatch, showcase_plan):
-    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    output = tmp_path / render_module._OUTPUT_DIRECTORY
     clips_directory = output / "clips"
     clips_directory.mkdir(parents=True)
     copy_verified_background(BACKGROUND, output / "background.png")
@@ -665,7 +743,7 @@ def existing_validation_output(tmp_path, monkeypatch, showcase_plan):
         clip_probes[clip] = MediaProbe(
             _test_video_probe(segment.output_frames), None, 0, 0
         )
-    master = output / "nangongwan-action-showcase-v2-1600x900.mp4"
+    master = output / render_module._MASTER_NAME
     master.write_bytes(b"master")
     master_probe = MediaProbe(
         _test_video_probe(showcase_plan.total_frames),
@@ -735,7 +813,37 @@ def test_blink_is_exactly_fifteen_frames_and_returns_to_open_pose(idle_frames):
     ]
 
 
-def test_compose_frame_changes_only_the_centered_sprite_rectangle():
+def test_450px_render_geometry_is_exactly_centered():
+    assert showcase_module.SOURCE_SPRITE_SIZE == (192, 208)
+    assert showcase_module.RENDERED_SPRITE_SIZE == (450, 488)
+    assert showcase_module.RENDERED_SPRITE_ORIGIN == (575, 206)
+    assert showcase_module.RENDERED_SPRITE_BOX == (575, 206, 1025, 694)
+    assert showcase_module.RENDER_SCALE == Fraction(75, 32)
+    x, y = showcase_module.RENDERED_SPRITE_ORIGIN
+    width, height = showcase_module.RENDERED_SPRITE_SIZE
+    assert (x + width / 2, y + height / 2) == (800, 450)
+
+
+def test_scale_sprite_uses_fixed_premultiplied_lanczos_without_hidden_color_fringe():
+    sprite = Image.new(
+        "RGBA", showcase_module.SOURCE_SPRITE_SIZE, (255, 0, 0, 0)
+    )
+    ImageDraw.Draw(sprite).rectangle((48, 52, 143, 155), fill=(0, 255, 0, 255))
+    original = sprite.tobytes()
+
+    scaled = showcase_module.scale_sprite(sprite)
+
+    assert scaled.mode == "RGBA"
+    assert scaled.size == (450, 488)
+    assert sprite.tobytes() == original
+    antialiased = [
+        pixel for pixel in scaled.get_flattened_data() if 0 < pixel[3] < 255
+    ]
+    assert antialiased
+    assert all(red == 0 and blue == 0 for red, _, blue, _ in antialiased)
+
+
+def test_compose_frame_changes_only_the_450px_center_rectangle():
     background = Image.effect_noise((1600, 900), 80).convert("RGB")
     sprite = Image.new("RGBA", (192, 208), (200, 50, 80, 128))
 
@@ -743,12 +851,16 @@ def test_compose_frame_changes_only_the_centered_sprite_rectangle():
 
     changed_bounds = ImageChops.difference(background, composed).getbbox()
     assert changed_bounds is not None
-    left, top, right, bottom = changed_bounds
-    assert 704 <= left < right <= 896
-    assert 346 <= top < bottom <= 554
-    assert background.crop((704, 346, 896, 554)).tobytes() != composed.crop(
-        (704, 346, 896, 554)
+    assert changed_bounds == (575, 206, 1025, 694)
+    assert background.crop((575, 206, 1025, 694)).tobytes() != composed.crop(
+        (575, 206, 1025, 694)
     ).tobytes()
+
+
+def test_decoded_center_crop_uses_450px_geometry():
+    assert showcase_module._rendered_sprite_crop_filter() == (
+        "crop=450:488:575:206:exact=1"
+    )
 
 
 def test_resample_action_uses_cumulative_duration_midpoints_and_endpoint_frames():
@@ -1162,7 +1274,7 @@ def test_center_validation_rejects_h264_encoded_adjacent_frame_repetition(
 
     def full_frame(center):
         frame = background.copy()
-        frame.paste(center, (704, 346))
+        frame.paste(center, showcase_module.RENDERED_SPRITE_ORIGIN)
         return frame
 
     clean = tmp_path / "clean-center.mp4"
@@ -1263,10 +1375,10 @@ def test_write_silent_video_enforces_count_and_cleans_failed_stream(
 def test_failed_rebuild_invalidates_acceptance_but_preserves_previous_publication(
     tmp_path, monkeypatch
 ):
-    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    output = tmp_path / render_module._OUTPUT_DIRECTORY
     review = output / "review"
     review.mkdir(parents=True)
-    (output / "nangongwan-action-showcase-v2-1600x900.mp4").write_bytes(b"old master")
+    (output / render_module._MASTER_NAME).write_bytes(b"old master")
     (output / "timeline.json").write_text("old timeline", encoding="utf-8")
     (output / "validation-report.json").write_text(
         json.dumps({"allPassed": True}), encoding="utf-8"
@@ -1283,28 +1395,30 @@ def test_failed_rebuild_invalidates_acceptance_but_preserves_previous_publicatio
     with pytest.raises(RuntimeError, match="interrupted"):
         build_showcase(tmp_path, BACKGROUND)
 
-    assert (output / "nangongwan-action-showcase-v2-1600x900.mp4").read_bytes() == b"old master"
+    assert (output / render_module._MASTER_NAME).read_bytes() == b"old master"
     assert (output / "timeline.json").read_text(encoding="utf-8") == "old timeline"
     assert not (output / "validation-report.json").exists()
     assert not review.exists()
-    assert not tuple((tmp_path / "work").glob(".nangongwan-action-showcase-v2-staging-*"))
+    assert not tuple(
+        (tmp_path / "work").glob(
+            f".{render_module._OUTPUT_DIRECTORY.name}-staging-*"
+        )
+    )
 
 
 def test_failed_staging_validation_never_publishes_mixed_outputs(
     tmp_path, monkeypatch
 ):
-    output = tmp_path / "work" / "nangongwan-action-showcase-v2"
+    output = tmp_path / render_module._OUTPUT_DIRECTORY
     output.mkdir(parents=True)
-    (output / "nangongwan-action-showcase-v2-1600x900.mp4").write_bytes(b"old master")
+    (output / render_module._MASTER_NAME).write_bytes(b"old master")
     (output / "validation-report.json").write_text(
         json.dumps({"allPassed": True}), encoding="utf-8"
     )
 
     def staged_build(root, background, staging):
-        (staging / "nangongwan-action-showcase-v2-1600x900.mp4").write_bytes(
-            b"new unapproved master"
-        )
-        return staging / "nangongwan-action-showcase-v2-1600x900.mp4"
+        (staging / render_module._MASTER_NAME).write_bytes(b"new unapproved master")
+        return staging / render_module._MASTER_NAME
 
     def failed_validation(*args, **kwargs):
         staging = kwargs["output_directory"]
@@ -1319,7 +1433,7 @@ def test_failed_staging_validation_never_publishes_mixed_outputs(
     with pytest.raises(ValueError, match="staging validation failed"):
         build_showcase(tmp_path, BACKGROUND)
 
-    assert (output / "nangongwan-action-showcase-v2-1600x900.mp4").read_bytes() == b"old master"
+    assert (output / render_module._MASTER_NAME).read_bytes() == b"old master"
     assert not (output / "validation-report.json").exists()
     assert b"new unapproved" not in b"".join(
         path.read_bytes() for path in output.rglob("*") if path.is_file()
@@ -1327,7 +1441,7 @@ def test_failed_staging_validation_never_publishes_mixed_outputs(
 
 
 def _write_synthetic_publishable_staging(staging: Path) -> None:
-    master = staging / "nangongwan-action-showcase-v2-1600x900.mp4"
+    master = staging / render_module._MASTER_NAME
     background = staging / "background.png"
     timeline = staging / "timeline.json"
     clips = staging / "clips"
@@ -1398,9 +1512,7 @@ def test_atomic_directory_publication_replaces_the_complete_output_set(tmp_path)
     render_module._publish_staged_directory(staging, output)
 
     assert not (output / "old-only").exists()
-    assert (
-        output / "nangongwan-action-showcase-v2-1600x900.mp4"
-    ).read_bytes() == b"new"
+    assert (output / render_module._MASTER_NAME).read_bytes() == b"new"
     assert json.loads((output / "validation-report.json").read_text(encoding="utf-8"))[
         "allPassed"
     ] is True
@@ -1428,9 +1540,7 @@ def test_successful_publication_is_not_reversed_by_backup_cleanup_failure(
     render_module._publish_staged_directory(staging, output)
 
     assert not (output / "old-only").exists()
-    assert (
-        output / "nangongwan-action-showcase-v2-1600x900.mp4"
-    ).read_bytes() == b"new"
+    assert (output / render_module._MASTER_NAME).read_bytes() == b"new"
 
 
 def test_validate_only_uses_built_background_without_external_temp_source(
@@ -1440,10 +1550,7 @@ def test_validate_only_uses_built_background_without_external_temp_source(
         existing_validation_output["root"], background_source=None
     )
 
-    assert master == (
-        existing_validation_output["output"]
-        / "nangongwan-action-showcase-v2-1600x900.mp4"
-    )
+    assert master == existing_validation_output["output"] / render_module._MASTER_NAME
     assert render_module._parser().parse_args(["--validate-only"]).background is None
 
 

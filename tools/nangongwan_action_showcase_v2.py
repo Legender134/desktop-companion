@@ -23,8 +23,11 @@ from tools.nangongwan_rooftop_making_of import ActionSource, TimedFrames, read_a
 
 FPS = 30
 FRAME_SIZE = (1600, 900)
-SPRITE_SIZE = (192, 208)
-SPRITE_ORIGIN = (704, 346)
+SOURCE_SPRITE_SIZE = (192, 208)
+RENDERED_SPRITE_SIZE = (450, 488)
+RENDERED_SPRITE_ORIGIN = (575, 206)
+RENDERED_SPRITE_BOX = (575, 206, 1025, 694)
+RENDER_SCALE = Fraction(75, 32)
 BACKGROUND_SHA256 = "1bca26d93bf3126b3c8be30e2b5f944b4912a4032ac55990b72cfb3d99ba745a"
 BLINK_SOURCE_INDICES = (0, 0, 0, 1, 2, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0)
 _MOON_SEGMENT_IDS = frozenset(("moon-184", "moon-232", "moon-full"))
@@ -589,8 +592,8 @@ def _validate_timed_frames(timed: TimedFrames) -> None:
         raise ValueError("action needs at least one frame")
     if len(timed.frames) != len(timed.durations_ms):
         raise ValueError("action frames and durations must have matching counts")
-    if any(frame.size != SPRITE_SIZE for frame in timed.frames):
-        raise ValueError(f"action frames must be {SPRITE_SIZE}")
+    if any(frame.size != SOURCE_SPRITE_SIZE for frame in timed.frames):
+        raise ValueError(f"action frames must be {SOURCE_SPRITE_SIZE}")
     if any(not isinstance(duration, int) or duration <= 0 for duration in timed.durations_ms):
         raise ValueError("action durations must be positive integers")
 
@@ -648,15 +651,27 @@ def resample_action(timed: TimedFrames, output_frames: int) -> SegmentFrames:
     )
 
 
+def scale_sprite(sprite: Image.Image) -> Image.Image:
+    """Resize one fixed source canvas without transparent-RGB color bleed."""
+
+    if sprite.mode != "RGBA" or sprite.size != SOURCE_SPRITE_SIZE:
+        raise ValueError(
+            f"sprite must be an RGBA image sized {SOURCE_SPRITE_SIZE}"
+        )
+    premultiplied = sprite.convert("RGBa")
+    resized = premultiplied.resize(
+        RENDERED_SPRITE_SIZE, Image.Resampling.LANCZOS
+    )
+    return resized.convert("RGBA")
+
+
 def compose_frame(background: Image.Image, sprite: Image.Image) -> Image.Image:
-    """Alpha-composite one unscaled native sprite at the approved center."""
+    """Scale and alpha-composite one source sprite at the fixed video center."""
 
     if background.size != FRAME_SIZE or background.mode != "RGB":
         raise ValueError(f"background must be an RGB image sized {FRAME_SIZE}")
-    if sprite.size != SPRITE_SIZE or sprite.mode != "RGBA":
-        raise ValueError(f"sprite must be an RGBA image sized {SPRITE_SIZE}")
     canvas = background.copy().convert("RGBA")
-    canvas.alpha_composite(sprite, SPRITE_ORIGIN)
+    canvas.alpha_composite(scale_sprite(sprite), RENDERED_SPRITE_ORIGIN)
     return canvas.convert("RGB")
 
 
@@ -698,16 +713,12 @@ def _segment_source_indices(
 def _iter_expected_center_frames(
     plan: ShowcasePlan, background: Path
 ) -> Iterator[Image.Image]:
-    """Yield all 2473 expected native center crops without full-frame buffering."""
+    """Yield all 2473 expected rendered center crops without full-frame buffering."""
 
-    rectangle = (
-        SPRITE_ORIGIN[0],
-        SPRITE_ORIGIN[1],
-        SPRITE_ORIGIN[0] + SPRITE_SIZE[0],
-        SPRITE_ORIGIN[1] + SPRITE_SIZE[1],
-    )
     with Image.open(background) as source:
-        center_background = source.convert("RGB").crop(rectangle).convert("RGBA")
+        center_background = (
+            source.convert("RGB").crop(RENDERED_SPRITE_BOX).convert("RGBA")
+        )
     for segment in plan.segments:
         timed = _concatenate_actions(segment.source)
         source_indices = _segment_source_indices(segment, timed)
@@ -715,7 +726,9 @@ def _iter_expected_center_frames(
             raise ValueError("expected center sequence does not match segment frames")
         for source_index in source_indices:
             center = center_background.copy()
-            center.alpha_composite(timed.frames[source_index], (0, 0))
+            center.alpha_composite(
+                scale_sprite(timed.frames[source_index]), (0, 0)
+            )
             yield center.convert("RGB")
 
 
@@ -902,12 +915,7 @@ def _outside_sprite_ssim(reference: Image.Image, candidate: Image.Image) -> floa
     mask = Image.new("L", FRAME_SIZE, 255)
     mask.paste(
         0,
-        (
-            SPRITE_ORIGIN[0],
-            SPRITE_ORIGIN[1],
-            SPRITE_ORIGIN[0] + SPRITE_SIZE[0],
-            SPRITE_ORIGIN[1] + SPRITE_SIZE[1],
-        ),
+        RENDERED_SPRITE_BOX,
     )
     first = reference.convert("L")
     second = candidate.convert("L")
@@ -918,14 +926,19 @@ def _outside_sprite_ssim(reference: Image.Image, candidate: Image.Image) -> floa
     variance_first = first_stat.var[0]
     variance_second = second_stat.var[0]
     outside_regions = (
-        (0, 0, FRAME_SIZE[0], SPRITE_ORIGIN[1]),
-        (0, SPRITE_ORIGIN[1] + SPRITE_SIZE[1], FRAME_SIZE[0], FRAME_SIZE[1]),
-        (0, SPRITE_ORIGIN[1], SPRITE_ORIGIN[0], SPRITE_ORIGIN[1] + SPRITE_SIZE[1]),
+        (0, 0, FRAME_SIZE[0], RENDERED_SPRITE_ORIGIN[1]),
+        (0, RENDERED_SPRITE_BOX[3], FRAME_SIZE[0], FRAME_SIZE[1]),
         (
-            SPRITE_ORIGIN[0] + SPRITE_SIZE[0],
-            SPRITE_ORIGIN[1],
+            0,
+            RENDERED_SPRITE_ORIGIN[1],
+            RENDERED_SPRITE_ORIGIN[0],
+            RENDERED_SPRITE_BOX[3],
+        ),
+        (
+            RENDERED_SPRITE_BOX[2],
+            RENDERED_SPRITE_ORIGIN[1],
             FRAME_SIZE[0],
-            SPRITE_ORIGIN[1] + SPRITE_SIZE[1],
+            RENDERED_SPRITE_BOX[3],
         ),
     )
     product_sum = 0
@@ -956,6 +969,34 @@ def _timeline_segments(document: dict[str, object]) -> tuple[dict[str, object], 
     return tuple(entries)
 
 
+def _timeline_render_geometry(document: dict[str, object]) -> dict[str, object]:
+    expected_rectangle = {
+        "x": RENDERED_SPRITE_ORIGIN[0],
+        "y": RENDERED_SPRITE_ORIGIN[1],
+        "width": RENDERED_SPRITE_SIZE[0],
+        "height": RENDERED_SPRITE_SIZE[1],
+    }
+    actual_source = document.get("sourceSpriteSize")
+    actual_rectangle = document.get("renderedSpriteRectangle")
+    actual_scale = document.get("renderScale")
+    passed = (
+        document.get("schemaVersion") == 2
+        and actual_source == list(SOURCE_SPRITE_SIZE)
+        and actual_rectangle == expected_rectangle
+        and actual_scale
+        == {
+            "numerator": RENDER_SCALE.numerator,
+            "denominator": RENDER_SCALE.denominator,
+        }
+    )
+    return {
+        "passed": passed,
+        "sourceSpriteSize": actual_source,
+        "renderedSpriteRectangle": actual_rectangle,
+        "renderScale": actual_scale,
+    }
+
+
 def _encoded_background_fidelity(
     master: Path, background: Path, timeline_document: dict[str, object]
 ) -> dict[str, object]:
@@ -963,19 +1004,24 @@ def _encoded_background_fidelity(
     if not isinstance(expected_frames, int) or expected_frames <= 0:
         raise ValueError("timeline totalFrames must be a positive integer")
     regions = {
-        "top": (FRAME_SIZE[0], SPRITE_ORIGIN[1], 0, 0),
+        "top": (FRAME_SIZE[0], RENDERED_SPRITE_ORIGIN[1], 0, 0),
         "bottom": (
             FRAME_SIZE[0],
-            FRAME_SIZE[1] - SPRITE_ORIGIN[1] - SPRITE_SIZE[1],
+            FRAME_SIZE[1] - RENDERED_SPRITE_BOX[3],
             0,
-            SPRITE_ORIGIN[1] + SPRITE_SIZE[1],
+            RENDERED_SPRITE_BOX[3],
         ),
-        "left": (SPRITE_ORIGIN[0], SPRITE_SIZE[1], 0, SPRITE_ORIGIN[1]),
+        "left": (
+            RENDERED_SPRITE_ORIGIN[0],
+            RENDERED_SPRITE_SIZE[1],
+            0,
+            RENDERED_SPRITE_ORIGIN[1],
+        ),
         "right": (
-            FRAME_SIZE[0] - SPRITE_ORIGIN[0] - SPRITE_SIZE[0],
-            SPRITE_SIZE[1],
-            SPRITE_ORIGIN[0] + SPRITE_SIZE[0],
-            SPRITE_ORIGIN[1],
+            FRAME_SIZE[0] - RENDERED_SPRITE_BOX[2],
+            RENDERED_SPRITE_SIZE[1],
+            RENDERED_SPRITE_BOX[2],
+            RENDERED_SPRITE_ORIGIN[1],
         ),
     }
     region_scores: dict[str, tuple[float, ...]] = {}
@@ -996,9 +1042,11 @@ def _encoded_background_fidelity(
                 str(background),
                 "-filter_complex",
                 (
-                    f"[0:v]trim=end_frame={expected_frames},crop={width}:{height}:{x}:{y},"
+                    f"[0:v]trim=end_frame={expected_frames},"
+                    f"crop={width}:{height}:{x}:{y}:exact=1,"
                     "setpts=PTS-STARTPTS[encoded];"
-                    f"[1:v]trim=end_frame={expected_frames},crop={width}:{height}:{x}:{y},"
+                    f"[1:v]trim=end_frame={expected_frames},"
+                    f"crop={width}:{height}:{x}:{y}:exact=1,"
                     "setpts=PTS-STARTPTS[reference];"
                     "[encoded][reference]psnr=stats_file=-[checked]"
                 ),
@@ -1130,8 +1178,15 @@ def _read_raw_frame(stream: BinaryIO, frame_bytes: int) -> bytes | None:
     return b"".join(chunks)
 
 
+def _rendered_sprite_crop_filter() -> str:
+    return (
+        f"crop={RENDERED_SPRITE_SIZE[0]}:{RENDERED_SPRITE_SIZE[1]}:"
+        f"{RENDERED_SPRITE_ORIGIN[0]}:{RENDERED_SPRITE_ORIGIN[1]}:exact=1"
+    )
+
+
 def _iter_decoded_center_frames(master: Path) -> Iterator[Image.Image]:
-    """Stream only the encoded 192x208 center crop from the final master."""
+    """Stream only the encoded 450x488 center crop from the final master."""
 
     command = [
         "ffmpeg",
@@ -1143,7 +1198,7 @@ def _iter_decoded_center_frames(master: Path) -> Iterator[Image.Image]:
         "-map",
         "0:v:0",
         "-vf",
-        f"crop={SPRITE_SIZE[0]}:{SPRITE_SIZE[1]}:{SPRITE_ORIGIN[0]}:{SPRITE_ORIGIN[1]}",
+        _rendered_sprite_crop_filter(),
         "-pix_fmt",
         "rgb24",
         "-f",
@@ -1159,12 +1214,12 @@ def _iter_decoded_center_frames(master: Path) -> Iterator[Image.Image]:
     assert process.stdout is not None
     completed = False
     try:
-        frame_bytes = SPRITE_SIZE[0] * SPRITE_SIZE[1] * 3
+        frame_bytes = RENDERED_SPRITE_SIZE[0] * RENDERED_SPRITE_SIZE[1] * 3
         while True:
             encoded = _read_raw_frame(process.stdout, frame_bytes)
             if encoded is None:
                 break
-            yield Image.frombytes("RGB", SPRITE_SIZE, encoded)
+            yield Image.frombytes("RGB", RENDERED_SPRITE_SIZE, encoded)
         stderr = process.stderr.read() if process.stderr is not None else b""
         returncode = process.wait()
         completed = True
@@ -1181,12 +1236,12 @@ def _iter_decoded_center_frames(master: Path) -> Iterator[Image.Image]:
 
 def _center_frame_psnr(expected: Image.Image, actual: Image.Image) -> float:
     if (
-        expected.size != SPRITE_SIZE
-        or actual.size != SPRITE_SIZE
+        expected.size != RENDERED_SPRITE_SIZE
+        or actual.size != RENDERED_SPRITE_SIZE
         or expected.mode != "RGB"
         or actual.mode != "RGB"
     ):
-        raise ValueError("center comparison frames must be native RGB sprite crops")
+        raise ValueError("center comparison frames must be 450x488 RGB crops")
     difference = ImageChops.difference(expected, actual)
     rms = ImageStat.Stat(difference).rms
     mean_squared_error = sum(value * value for value in rms) / len(rms)
@@ -1274,7 +1329,7 @@ def _compare_center_sequences(
         "passed": compared == expected_frames and not failed_indices,
         "method": (
             "per-frame RGB PSNR plus expected-to-decoded temporal-change ratio "
-            "over every 192x208 center crop"
+            "over every 450x488 center crop"
         ),
         "thresholdPsnrDb": _CENTER_MIN_PSNR_DB,
         "minimumTemporalChangeRatio": _CENTER_MIN_TEMPORAL_RATIO,
@@ -1321,8 +1376,14 @@ def _centered_composition(plan: ShowcasePlan, background: Path) -> dict[str, obj
             composed = compose_frame(backdrop, sprite)
             changed = ImageChops.difference(backdrop, composed).getbbox()
             inside = changed is not None and (
-                SPRITE_ORIGIN[0] <= changed[0] < changed[2] <= SPRITE_ORIGIN[0] + SPRITE_SIZE[0]
-                and SPRITE_ORIGIN[1] <= changed[1] < changed[3] <= SPRITE_ORIGIN[1] + SPRITE_SIZE[1]
+                RENDERED_SPRITE_BOX[0]
+                <= changed[0]
+                < changed[2]
+                <= RENDERED_SPRITE_BOX[2]
+                and RENDERED_SPRITE_BOX[1]
+                <= changed[1]
+                < changed[3]
+                <= RENDERED_SPRITE_BOX[3]
             )
             passed = passed and inside
             bounds.append(
@@ -1474,6 +1535,7 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         "noTextSidecarsOrStreams": False,
         "sourcePrivacy": False,
         "sourceIntegrity": False,
+        "renderGeometry": False,
         "centeredComposition": False,
         "moonFrameParity": False,
     }
@@ -1502,6 +1564,12 @@ def validate_showcase(master: Path, plan: ShowcasePlan, timeline: Path) -> dict[
         timeline_document = {}
         entries = ()
         details["timeline"] = {"passed": False, "error": f"{type(error).__name__}: {error}"}
+
+    checks["renderGeometry"] = _checked_detail(
+        details,
+        "renderGeometry",
+        lambda: _timeline_render_geometry(timeline_document),
+    )
 
     expected_timeline_inventory = [
         {

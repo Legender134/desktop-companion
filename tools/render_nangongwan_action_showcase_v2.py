@@ -23,8 +23,10 @@ from tools.nangongwan_action_showcase_v2 import (
     BACKGROUND_SHA256,
     FPS,
     FRAME_SIZE,
-    SPRITE_ORIGIN,
-    SPRITE_SIZE,
+    RENDER_SCALE,
+    RENDERED_SPRITE_ORIGIN,
+    RENDERED_SPRITE_SIZE,
+    SOURCE_SPRITE_SIZE,
     SourceAsset,
     ShowcasePlan,
     ShowcaseSegment,
@@ -45,8 +47,9 @@ from tools.nangongwan_rooftop_making_of import ActionSource
 
 
 _FORBIDDEN_SOURCE_MARKERS = ("anime-reference", "do-not-publish")
-_OUTPUT_DIRECTORY = Path("work") / "nangongwan-action-showcase-v2"
-_MASTER_NAME = "nangongwan-action-showcase-v2-1600x900.mp4"
+_OUTPUT_DIRECTORY = Path("work") / "nangongwan-action-showcase-450px"
+_MASTER_NAME = "nangongwan-action-showcase-450px-1600x900.mp4"
+_VIDEO_ONLY_NAME = "nangongwan-action-showcase-450px-video-only.mp4"
 _SOURCE_HASHES = (
     ("01-cinematic-36f-v2.4.1/pet.json", "a4397d9d4d0caeb338ecbfbae88d4c9ada457c5c50c507d2d77eb7d5fb922964", "manifest"),
     ("01-cinematic-36f-v2.4.1/spritesheet.webp", "990d1ee9db3632102e9f07984301519606a9cc3591585e8ef892d0ba975a9d3e", "atlas"),
@@ -315,14 +318,19 @@ def _timeline_document(plan: ShowcasePlan, background_hash: str) -> dict[str, An
     if start_frame != plan.total_frames:
         raise ValueError("timeline boundaries do not match the showcase plan")
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "backgroundSha256": background_hash,
         "frameSize": list(FRAME_SIZE),
-        "spriteRectangle": {
-            "x": SPRITE_ORIGIN[0],
-            "y": SPRITE_ORIGIN[1],
-            "width": SPRITE_SIZE[0],
-            "height": SPRITE_SIZE[1],
+        "sourceSpriteSize": list(SOURCE_SPRITE_SIZE),
+        "renderedSpriteRectangle": {
+            "x": RENDERED_SPRITE_ORIGIN[0],
+            "y": RENDERED_SPRITE_ORIGIN[1],
+            "width": RENDERED_SPRITE_SIZE[0],
+            "height": RENDERED_SPRITE_SIZE[1],
+        },
+        "renderScale": {
+            "numerator": RENDER_SCALE.numerator,
+            "denominator": RENDER_SCALE.denominator,
         },
         "sourceSha256": [
             {
@@ -383,7 +391,7 @@ def _build_showcase_directory(
         clip_paths.append(clip)
 
     _write_timeline(plan, background_hash, output / "timeline.json")
-    video_only = output / "nangongwan-action-showcase-v2-video-only.mp4"
+    video_only = output / _VIDEO_ONLY_NAME
     master = output / _MASTER_NAME
     concat_clips(tuple(clip_paths), video_only)
     completed = False
@@ -476,7 +484,7 @@ def _publish_staged_directory(staging: Path, output: Path) -> None:
 
 
 def build_showcase(root: Path, background_source: Path) -> Path:
-    """Build, validate, then transactionally publish the complete V2 output set."""
+    """Build, validate, then publish the complete 450px output set."""
 
     output = root / _OUTPUT_DIRECTORY
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -652,7 +660,7 @@ def _validate_final_showcase(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     if report["allPassed"] is not True:
-        raise ValueError(f"final V2 validation failed; see {report_path}")
+        raise ValueError(f"final 450px validation failed; see {report_path}")
     return master, report_path
 
 
