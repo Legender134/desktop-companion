@@ -82,16 +82,29 @@ def test_pet_pack_v3_schema_and_template_describe_dynamic_actions(repo_root: Pat
             encoding="utf-8"
         )
     )
+    format_guide = (repo_root / "docs" / "pet-pack-format-v3.md").read_text(
+        encoding="utf-8"
+    )
 
     action_schema = schema["properties"]["actions"]
+    common = schema["$defs"]["common"]["properties"]
+    direct = schema["$defs"]["direct"]["allOf"][1]["properties"]
     assert action_schema["minProperties"] == 3
     assert action_schema["maxProperties"] == 64
     assert schema["properties"]["spriteVersionNumber"]["const"] == 3
     assert schema["properties"]["spritesheetPath"]["const"] == "spritesheet.webp"
     assert "autoplayGroup" in schema["$defs"]["common"]["properties"]
+    assert common["includeInShowcase"] == {"type": "boolean"}
+    assert direct["frameCount"]["maximum"] == 512
+    assert direct["frameDurations"]["maxItems"] == 512
+    assert direct["travelStartFrame"]["maximum"] == 511
+    assert direct["travelEndFrame"]["maximum"] == 511
     assert schema["$defs"]["direct"]["allOf"][2]["then"]["properties"][
         "frameCount"
     ]["enum"] == [16, 32, 64]
+    assert "includeInShowcase" in format_guide
+    assert "1–512" in format_guide
+    assert "16、32 或 64" in format_guide
     assert template["spriteVersionNumber"] == 3
     assert {entry["role"] for entry in template["actions"].values()} >= {
         "idle",

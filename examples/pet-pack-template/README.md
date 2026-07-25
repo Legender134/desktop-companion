@@ -14,4 +14,6 @@
 
 如果增加多套施法或强特效，可给这些 `interaction` 统一添加 `"autoplayGroup": "spell"`，防止它们连续自动播放。
 
+如果增加只供右键手动观看的长动作，请按[添加新宠物指南中的完整示例](../../docs/添加新宠物指南.md#只供手动观看的动作)同时设置 `autoplayWeight: 0`、`showInMenu: true` 和 `includeInShowcase: false`。
+
 精确规则见 [v3 动态宠物包规范](../../docs/pet-pack-format-v3.md)，编辑器可加载 [v3 JSON Schema](../../schemas/pet-pack-v3.schema.json)。旧图集兼容规则仍保留在 [v2 规范](../../docs/pet-pack-format-v2.md)。
