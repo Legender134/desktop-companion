@@ -334,6 +334,7 @@ class PetRegistry:
                 label,
                 weight,
                 show,
+                include_in_showcase,
                 cooldown,
                 autoplay_group,
                 min_distance,
@@ -346,6 +347,7 @@ class PetRegistry:
                 "direction",
                 "mirrorOf",
                 "showInMenu",
+                "includeInShowcase",
                 "autoplayWeight",
                 "cooldownMs",
                 "autoplayGroup",
@@ -366,6 +368,7 @@ class PetRegistry:
                 role=role,
                 direction=direction,
                 show_in_menu=show,
+                include_in_showcase=include_in_showcase,
                 cooldown_ms=cooldown,
                 autoplay_group=autoplay_group,
                 min_distance=min_distance or source.min_distance,
@@ -579,6 +582,7 @@ class PetRegistry:
         str,
         int,
         bool,
+        bool,
         int,
         str,
         int,
@@ -614,6 +618,9 @@ class PetRegistry:
         show = entry.get("showInMenu", role is not ActionRole.GAZE)
         if not isinstance(show, bool):
             raise ValueError(f"actions.{key}.showInMenu must be boolean")
+        include_in_showcase = entry.get("includeInShowcase", True)
+        if not isinstance(include_in_showcase, bool):
+            raise ValueError(f"actions.{key}.includeInShowcase must be boolean")
         cooldown = entry.get("cooldownMs", 0)
         if not PetRegistry._is_int_between(cooldown, 0, 600_000):
             raise ValueError(f"actions.{key}.cooldownMs must be 0 through 600000")
@@ -659,6 +666,7 @@ class PetRegistry:
             label,
             weight,
             show,
+            include_in_showcase,
             cooldown,
             autoplay_group,
             min_distance,
@@ -676,6 +684,7 @@ class PetRegistry:
             str,
             int,
             bool,
+            bool,
             int,
             str,
             int,
@@ -689,6 +698,7 @@ class PetRegistry:
             label,
             weight,
             show,
+            include_in_showcase,
             cooldown,
             autoplay_group,
             min_distance,
@@ -708,6 +718,7 @@ class PetRegistry:
             "repeatCount",
             "holdMs",
             "showInMenu",
+            "includeInShowcase",
             "autoplayWeight",
             "cooldownMs",
             "autoplayGroup",
@@ -727,8 +738,8 @@ class PetRegistry:
             raise ValueError(f"actions.{key}.row must be 0 through 127")
         if not PetRegistry._is_int_between(column, 0, 63):
             raise ValueError(f"actions.{key}.startColumn must be 0 through 63")
-        if not PetRegistry._is_int_between(frame_count, 1, 64):
-            raise ValueError(f"actions.{key}.frameCount must be 1 through 64")
+        if not PetRegistry._is_int_between(frame_count, 1, 512):
+            raise ValueError(f"actions.{key}.frameCount must be 1 through 512")
 
         frame_ms = entry.get("frameMs")
         durations_value = entry.get("frameDurations")
@@ -817,6 +828,7 @@ class PetRegistry:
             role=role,
             direction=direction,
             show_in_menu=show,
+            include_in_showcase=include_in_showcase,
             cooldown_ms=cooldown,
             autoplay_group=autoplay_group,
             min_distance=min_distance,

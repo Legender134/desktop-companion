@@ -67,6 +67,17 @@ def _dynamic_actions():
                 "frameMs": 140,
                 "autoplayWeight": 3,
             },
+            "manualShowcase": {
+                "label": "完整动作展示",
+                "role": "interaction",
+                "row": 2,
+                "startColumn": 4,
+                "frameCount": 2,
+                "frameMs": 140,
+                "autoplayWeight": 0,
+                "showInMenu": True,
+                "includeInShowcase": False,
+            },
             "dashRight": {
                 "label": "遁光向右",
                 "role": "burstMove",
@@ -92,7 +103,7 @@ def _dynamic_actions():
 def _valid_dynamic_atlas() -> QImage:
     atlas = QImage(8 * 192, 4 * 208, QImage.Format.Format_RGBA8888)
     atlas.fill(QColor(0, 0, 0, 0))
-    for row, used in enumerate((3, 5, 4, 8)):
+    for row, used in enumerate((3, 5, 6, 8)):
         for column in range(used):
             atlas.setPixelColor(
                 column * 192 + 5, row * 208 + 5, QColor(255, 255, 255, 255)
@@ -368,7 +379,11 @@ def test_v3_catalog_supports_dynamic_frame_counts_roles_and_mirrored_actions():
         "moveRight",
         "dashRight",
     ]
-    assert catalog.interaction_actions() == ("hello",)
+    assert catalog.interaction_actions() == ("hello", "manualShowcase")
+    assert dict(catalog.action_menu_items())["完整动作展示"] == "manualShowcase"
+    assert "manualShowcase" not in dict(catalog.autoplay_actions())
+    assert "manualShowcase" not in catalog.showcase_actions()
+    assert "不参加通用“动作展示”" in catalog.action_menu_details()["manualShowcase"]
     assert not catalog.supports_gaze
     assert catalog.look_degrees == ()
     assert catalog.frames("moveRight")[0].image.pixelColor(5, 5).alpha() == 255

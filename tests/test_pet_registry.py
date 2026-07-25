@@ -352,6 +352,43 @@ def test_registry_loads_dynamic_v3_actions_timing_mirroring_and_burst_metadata(
     assert actions["hello"].autoplay_group == "quiet"
 
 
+def test_v3_allows_long_actions_and_parses_showcase_opt_out():
+    actions = _valid_v3_actions()
+    actions["longShowcase"] = {
+        "label": "完整动作展示",
+        "role": "interaction",
+        "row": 4,
+        "frameCount": 448,
+        "frameDurations": [33] * 447 + [34],
+        "repeatCount": 1,
+        "autoplayWeight": 0,
+        "showInMenu": True,
+        "includeInShowcase": False,
+    }
+
+    parsed = {
+        item.action_id: item for item in PetRegistry._parse_v3_actions(actions)
+    }
+
+    assert parsed["longShowcase"].spec.frame_count == 448
+    assert parsed["longShowcase"].include_in_showcase is False
+    assert parsed["hello"].include_in_showcase is True
+
+
+def test_v3_rejects_more_than_512_frames_and_non_boolean_showcase_flag():
+    too_long = _valid_v3_actions()
+    too_long["hello"]["frameCount"] = 513
+    too_long["hello"]["frameDurations"] = [33] * 513
+    too_long["hello"].pop("frameMs")
+    with pytest.raises(ValueError, match="frameCount must be 1 through 512"):
+        PetRegistry._parse_v3_actions(too_long)
+
+    invalid_flag = _valid_v3_actions()
+    invalid_flag["hello"]["includeInShowcase"] = 0
+    with pytest.raises(ValueError, match="includeInShowcase must be boolean"):
+        PetRegistry._parse_v3_actions(invalid_flag)
+
+
 def test_registry_loads_valid_persistent_state_with_weighted_resident_actions(
     tmp_path: Path,
 ):
@@ -472,6 +509,21 @@ def test_registry_accepts_supported_gaze_density_and_rejects_other_counts(
     )
     assert len(snapshot.issues) == 1
     assert "16, 32, or 64 frames" in snapshot.issues[0].message
+
+
+def test_registry_keeps_gaze_limited_when_other_actions_allow_more_frames():
+    actions = _valid_v3_actions()
+    actions["gaze"] = {
+        "label": "方向数量错误",
+        "role": "gaze",
+        "row": 5,
+        "frameCount": 448,
+        "frameDurations": [100] * 448,
+        "showInMenu": False,
+    }
+
+    with pytest.raises(ValueError, match="16, 32, or 64 frames"):
+        PetRegistry._parse_v3_actions(actions)
 
 
 def test_registry_rejects_v3_without_required_capabilities_or_valid_timing(

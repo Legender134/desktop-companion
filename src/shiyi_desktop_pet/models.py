@@ -42,6 +42,7 @@ class PetActionDefinition:
     role: ActionRole = ActionRole.INTERACTION
     direction: int = 0
     show_in_menu: bool = True
+    include_in_showcase: bool = True
     cooldown_ms: int = 0
     autoplay_group: str = ""
     min_distance: int = 0

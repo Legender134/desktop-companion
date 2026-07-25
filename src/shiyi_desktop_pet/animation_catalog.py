@@ -410,6 +410,11 @@ class AnimationCatalog:
                     behavior += (
                         f"；属于“{definition.autoplay_group}”特效组，程序会避免同组动作连续出现"
                     )
+                if not definition.include_in_showcase:
+                    behavior += (
+                        "；该动作仅供手动播放，不参加通用“动作展示”，"
+                        "也不参加随机动作或自主小动作"
+                    )
                 behavior += "。"
             details[definition.action_id] = f"{timing}。{behavior}{speed_note}"
         return details
@@ -450,6 +455,7 @@ class AnimationCatalog:
             for definition in self._action_definitions
             if definition.role is ActionRole.INTERACTION
             and (definition.show_in_menu or definition.autoplay_weight > 0)
+            and definition.include_in_showcase
             and definition.action_id not in self._state_by_enter_action
         )
 
