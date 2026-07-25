@@ -188,6 +188,11 @@ def test_nangongwan_exposes_persistent_rooftop_state_and_standing_cake_action():
     assert "moonlitChestnut" not in catalog.showcase_actions()
     assert "tasteCake" in catalog.showcase_actions()
     assert len(catalog.frames("tasteCake")) == 10
+    assert menu["完整动作展示"] == "completeShowcase"
+    assert "completeShowcase" not in autoplay
+    assert "completeShowcase" not in catalog.showcase_actions()
+    assert len(catalog.frames("completeShowcase")) == 448
+    assert catalog.spec("completeShowcase").cycle_ms == 82_433
     assert autoplay["moonlitChestnut"] / sum(autoplay.values()) == pytest.approx(
         5 / 103
     )

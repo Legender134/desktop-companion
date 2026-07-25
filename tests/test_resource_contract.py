@@ -1,5 +1,6 @@
 import json
 from hashlib import sha256
+from pathlib import Path
 
 from PySide6.QtGui import QImage
 
@@ -83,8 +84,8 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert manifest["displayName"] == "南宫婉"
     assert manifest["spriteVersionNumber"] == 3
     assert manifest["spritesheetPath"] == "spritesheet.webp"
-    assert len(manifest["actions"]) == 31
-    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 404
+    assert len(manifest["actions"]) == 32
+    assert sum(spec["frameCount"] for spec in manifest["actions"].values()) == 852
     assert manifest["actions"]["idle"]["role"] == "idle"
     assert manifest["actions"]["moveRight"]["role"] == "move"
     assert manifest["actions"]["moveLeft"]["role"] == "move"
@@ -149,10 +150,30 @@ def test_packaged_nangongwan_resource_obeys_dynamic_v3_contract():
     assert standing_cake["cooldownMs"] == 35000
     assert standing_cake["showInMenu"] is True
 
-    atlas = QImage(str(resource_path(f"{root}/spritesheet.webp")))
+    complete = manifest["actions"]["completeShowcase"]
+    assert complete["label"] == "完整动作展示"
+    assert complete["row"] == 34
+    assert complete["startColumn"] == 0
+    assert complete["frameCount"] == 448
+    assert len(complete["frameDurations"]) == 448
+    assert sum(complete["frameDurations"]) == 82_433
+    assert (min(complete["frameDurations"]), max(complete["frameDurations"])) == (
+        33,
+        666,
+    )
+    assert complete["repeatCount"] == 1
+    assert complete["autoplayWeight"] == 0
+    assert complete["showInMenu"] is True
+    assert complete["includeInShowcase"] is False
+
+    atlas_path = resource_path(f"{root}/spritesheet.webp")
+    atlas = QImage(str(atlas_path))
     assert not atlas.isNull()
-    assert (atlas.width(), atlas.height()) == (3072, 7072)
+    assert (atlas.width(), atlas.height()) == (3072, 12896)
     assert atlas.hasAlphaChannel()
+    assert sha256(atlas_path.read_bytes()).hexdigest() == (
+        "6c1df790c2807c6b0293cada191fbf47be644b56a77894a3feb9407f8581c728"
+    )
 
     columns = atlas.width() // 192
     for spec in manifest["actions"].values():
@@ -197,3 +218,26 @@ def test_nangongwan_legacy_moonlit_atlas_is_preserved_byte_for_byte():
     assert sha256(payload).hexdigest().upper() == (
         "990D1EE9DB3632102E9F07984301519606A9CC3591585E8EF892D0BA975A9D3E"
     )
+
+
+def test_nangongwan_v246_active_atlas_is_archived_outside_packaged_resources():
+    root = Path(__file__).resolve().parents[1]
+    archive = (
+        root
+        / "tools"
+        / "archives"
+        / "nangongwan-complete-showcase-v2.4.6"
+    )
+    atlas = archive / "spritesheet.webp"
+    manifest = archive / "pet.json"
+
+    assert atlas.is_file()
+    assert manifest.is_file()
+    payload = atlas.read_bytes()
+    assert len(payload) == 9_838_046
+    assert sha256(payload).hexdigest() == (
+        "564793e6c2e090d8e882cc4a829ceccb9bde2ab98b54b9f6126c65cf41fac77e"
+    )
+    assert json.loads(manifest.read_text(encoding="utf-8"))["actions"].get(
+        "completeShowcase"
+    ) is None
