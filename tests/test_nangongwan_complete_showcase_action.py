@@ -218,7 +218,14 @@ def built_complete_showcase_pack(tmp_path_factory):
     output_root = tmp_path_factory.mktemp("complete-showcase-pack")
     pet_directory = output_root / "nangongwan"
     pet_directory.mkdir()
-    source_pet = repo_root / "src/shiyi_desktop_pet/resources/pets/nangongwan"
+    source_pet = (
+        repo_root
+        / "tools"
+        / "archives"
+        / "nangongwan-complete-showcase-v2.4.6"
+    )
+    if not source_pet.is_dir():
+        source_pet = repo_root / "src/shiyi_desktop_pet/resources/pets/nangongwan"
     shutil.copy2(source_pet / "spritesheet.webp", pet_directory / "spritesheet.webp")
     shutil.copy2(source_pet / "pet.json", pet_directory / "pet.json")
     archive_directory = output_root / "archive"
