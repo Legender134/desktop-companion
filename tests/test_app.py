@@ -1113,6 +1113,50 @@ def test_action_showcase_plays_every_in_place_action_once(qapp):
     controller.shutdown()
 
 
+def test_complete_showcase_ends_cleanly_and_can_be_interrupted(qapp):
+    settings = replace(
+        AppSettings(),
+        pet_id="nangongwan",
+        gaze_enabled=False,
+        wander_enabled=True,
+    )
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=settings,
+        catalog_factory=lambda: AnimationCatalog.load_pet("nangongwan"),
+    )
+    controller.animation_timer.stop()
+    controller.gaze_timer.stop()
+    controller.wander_timer.stop()
+    controller.autonomous_timer.stop()
+    now = [1_000]
+    controller._now_ms = lambda: now[0]
+
+    controller.dispatch_menu(MenuCommand("action", "completeShowcase"))
+    assert controller.current_action == "completeShowcase"
+    assert controller.behavior.mode is BehaviorMode.MANUAL_ACTION
+
+    now[0] = 83_432
+    controller._advance_manual(now[0])
+    assert controller.current_action == "completeShowcase"
+
+    now[0] = 83_433
+    controller._advance_manual(now[0])
+    assert controller.current_action == controller.catalog.idle_action
+    assert controller.behavior.mode is BehaviorMode.WANDER
+
+    now[0] = 100_000
+    controller.dispatch_menu(MenuCommand("action", "completeShowcase"))
+    now[0] += 500
+    controller.dispatch_menu(MenuCommand("action", "offerVeil"))
+    assert controller.current_action == "offerVeil"
+
+    controller.trigger_action(controller.catalog.idle_action)
+    assert controller.current_action == controller.catalog.idle_action
+    assert controller.behavior.mode is BehaviorMode.WANDER
+    controller.shutdown()
+
+
 def test_persistent_state_enters_cycles_without_repeating_and_forces_exit(qapp):
     settings = replace(AppSettings(), gaze_enabled=False)
     controller, _, _, _, _ = _controller(

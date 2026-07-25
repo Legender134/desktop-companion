@@ -1,3 +1,4 @@
+from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.animation_player import AnimationTimeline
 from shiyi_desktop_pet.models import ActionId, AnimationSpec
 
@@ -65,3 +66,13 @@ def test_dynamic_per_frame_durations_and_repeat_count_are_honored():
     assert timeline.advance(350, spec).frame_index == 0
     assert timeline.advance(699, spec).frame_index == 2
     assert timeline.advance(700, spec).finished
+
+
+def test_complete_showcase_finishes_at_its_exact_82433_ms_boundary():
+    catalog = AnimationCatalog.load_pet("nangongwan")
+    spec = catalog.spec("completeShowcase")
+    timeline = AnimationTimeline()
+    timeline.start("completeShowcase", now_ms=1_000)
+
+    assert not timeline.advance(83_432, spec).finished
+    assert timeline.advance(83_433, spec).finished
