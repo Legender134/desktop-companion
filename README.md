@@ -50,11 +50,6 @@
 | 版本 | 主要内容 | Gitee 下载页 | GitHub 下载页 |
 |---|---|---|---|
 | v2.4.7 | 南宫婉新增 448 帧、82.433 秒的右键“完整动作展示”，串联站立含栗、影视分镜、原地展开和四种月下屋檐版本 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.7) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.7) |
-| v2.4.6 | 屋檐常驻动作增至九种；含栗扩展到约 9 秒，并加入欲眠、拢发、朱雀环与白鹤掠月 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.6) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.6) |
-| v2.4.5 | 重绘南宫婉屋檐完整姿势，稳定骨盆与脚底但保留独立衣裙和手臂；栗子由紫色灵光召来并减速入手 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.5) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.5) |
-| v2.4.4 | 锁定南宫婉屋檐坐姿的骨盆接触点，消除坐着时的左右与上下漂移 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.4) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.4) |
-| v2.4.3 | 修复南宫婉屋檐坐姿横向跳动，恢复醒目的大型标志性月轮 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.3) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.3) |
-| v2.4.2 | 南宫婉透明“月下屋檐”状态、自然落座与 20–60 秒随机驻留动作 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.2) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.2) |
 | v2.4.1 | 南宫婉 36 帧“月下含栗”招牌动作、约 1/20 自主权重和旧短动作彩蛋化 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.1) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.1) |
 | v2.4.0 | 南宫婉 64 方向平滑注视、两种注视模式、菜单圆形问号与参数级详情 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.4.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.4.0) |
 | v2.3.0 | 内置南宫婉、v3 动态动作、可变帧数、遁光移动、动作分组和闲逛强度 | [Gitee Release](https://gitee.com/legender134/desktop-companion/releases/tag/v2.3.0) | [GitHub Release](https://github.com/Legender134/desktop-companion/releases/tag/v2.3.0) |
