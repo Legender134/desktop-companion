@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import shutil
 
 import pytest
@@ -79,6 +80,49 @@ def test_v4_schema_declares_fixed_limits_and_required_sections():
         "actions",
         "forms",
     }
+
+
+def test_v4_schema_closes_id_maps_and_documents_frame_map_runtime_validation():
+    schema = json.loads(
+        (Path(__file__).parents[1] / "schemas" / "pet-pack-v4.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    definitions = schema["$defs"]
+    id_pattern = definitions["id"]["pattern"]
+    expected_values = {
+        "atlases": "atlas",
+        "cooldownGroups": "cooldownGroup",
+        "actions": "action",
+        "forms": "form",
+        "transformations": "transformation",
+        "sequences": "sequence",
+    }
+
+    for name, value_definition in expected_values.items():
+        mapping = definitions[name]
+        assert mapping["additionalProperties"] is False
+        assert mapping["patternProperties"] == {
+            id_pattern: {"$ref": f"#/$defs/{value_definition}"}
+        }
+        assert re.fullmatch(id_pattern, "validId")
+        assert not re.fullmatch(id_pattern, "invalid-id")
+        assert not re.fullmatch(id_pattern, "9invalid")
+
+    frame_map = definitions["layer"]["properties"]["frameMap"]
+    assert frame_map["minItems"] == 1
+    assert frame_map["maxItems"] == 512
+    assert frame_map["items"]["minimum"] == 0
+    assert frame_map["items"]["maximum"] == 511
+    assert "length == containing action.frameCount" in frame_map["$comment"]
+    assert "available local layer frame" in frame_map["$comment"]
+    assert "null skips drawing" in frame_map["$comment"]
+
+    label_pattern = definitions["label"]["pattern"]
+    assert re.fullmatch(label_pattern, "狐狸形态")
+    assert not re.fullmatch(label_pattern, "bad\x00label")
+    assert not re.fullmatch(label_pattern, "bad\x7flabel")
+    assert not re.fullmatch(label_pattern, "bad\x80label")
 
 
 def test_v4_domain_models_are_immutable_and_use_tuple_collections():

@@ -21,7 +21,7 @@
   },
   "$defs": {
     "id": {"type": "string", "pattern": "^[a-z][A-Za-z0-9]{0,63}$"},
-    "label": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[^\\u0000-\\u001F\\u007F]+$"},
+    "label": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"},
     "path": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.webp$"},
     "iconFrame": {
       "type": "object", "required": ["atlas", "row", "column"], "additionalProperties": false,
@@ -33,7 +33,7 @@
     },
     "atlases": {
       "type": "object", "minProperties": 1, "maxProperties": 8,
-      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/atlas"}
+      "patternProperties": {"^[a-z][A-Za-z0-9]{0,63}$": {"$ref": "#/$defs/atlas"}}, "additionalProperties": false
     },
     "cooldownGroup": {
       "type": "object", "required": ["cooldownMs"], "additionalProperties": false,
@@ -41,7 +41,7 @@
     },
     "cooldownGroups": {
       "type": "object", "maxProperties": 32,
-      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/cooldownGroup"}
+      "patternProperties": {"^[a-z][A-Za-z0-9]{0,63}$": {"$ref": "#/$defs/cooldownGroup"}}, "additionalProperties": false
     },
     "layer": {
       "type": "object", "required": ["atlas", "row", "startColumn", "anchorX", "anchorY"], "additionalProperties": false,
@@ -51,7 +51,7 @@
         "offsetX": {"type": "integer", "minimum": -100000, "maximum": 100000}, "offsetY": {"type": "integer", "minimum": -100000, "maximum": 100000},
         "scalePercent": {"type": "integer", "minimum": 1, "maximum": 1000}, "opacityPercent": {"type": "integer", "minimum": 0, "maximum": 100},
         "hitTest": {"type": "boolean"}, "optionalInSimplified": {"type": "boolean"},
-        "frameMap": {"type": ["array", "null"], "minItems": 1, "maxItems": 512, "items": {"type": ["integer", "null"], "minimum": 0}}
+        "frameMap": {"type": ["array", "null"], "minItems": 1, "maxItems": 512, "items": {"type": ["integer", "null"], "minimum": 0, "maximum": 511}, "$comment": "Parser validation requires length == containing action.frameCount and every integer reference to an available local layer frame; null skips drawing."}
       }
     },
     "action": {
@@ -71,7 +71,7 @@
     },
     "actions": {
       "type": "object", "minProperties": 1, "maxProperties": 128,
-      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/action"}
+      "patternProperties": {"^[a-z][A-Za-z0-9]{0,63}$": {"$ref": "#/$defs/action"}}, "additionalProperties": false
     },
     "form": {
       "type": "object", "required": ["label", "idleAction", "moveRightAction", "moveLeftAction", "representativeAction", "interactionActions"], "additionalProperties": false,
@@ -82,7 +82,7 @@
     },
     "forms": {
       "type": "object", "minProperties": 1, "maxProperties": 16,
-      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/form"}
+      "patternProperties": {"^[a-z][A-Za-z0-9]{0,63}$": {"$ref": "#/$defs/form"}}, "additionalProperties": false
     },
     "autoplay": {
       "type": "object", "required": ["bucket", "weight", "minDelayMs", "maxDelayMs", "cooldownGroups"], "additionalProperties": false,
@@ -101,7 +101,7 @@
     },
     "transformations": {
       "type": "object", "maxProperties": 32,
-      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/transformation"}
+      "patternProperties": {"^[a-z][A-Za-z0-9]{0,63}$": {"$ref": "#/$defs/transformation"}}, "additionalProperties": false
     },
     "sequenceStep": {
       "type": "object", "required": ["action", "repeatCount", "holdMs", "safeStopAfter"], "additionalProperties": false,
@@ -113,7 +113,7 @@
     },
     "sequences": {
       "type": "object", "maxProperties": 16,
-      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/sequence"}
+      "patternProperties": {"^[a-z][A-Za-z0-9]{0,63}$": {"$ref": "#/$defs/sequence"}}, "additionalProperties": false
     }
   }
 }
