@@ -2442,6 +2442,60 @@ def test_effects_quality_switch_redraws_fixed_v4_gaze_with_selected_quality(
         controller.shutdown()
 
 
+def test_effects_quality_public_menu_keeps_scripted_action_above_saved_fixed_look(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("ritual")
+        assert controller.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE
+        controller._animation_tick()
+        assert controller.window.current_frame.identity[1] == "spell"
+        controller.dispatch_menu(MenuCommand("look", 0.0))
+        assert controller._fixed_look_degrees == 0.0
+        assert controller.window.current_frame.identity[1] == "spell"
+
+        controller.dispatch_menu(MenuCommand("effects_quality", "simplified"))
+
+        assert controller.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE
+        assert controller.window.current_frame.identity[1:4] == (
+            "spell",
+            "simplified",
+            0,
+        )
+    finally:
+        controller.shutdown()
+
+
+def test_empty_definition_v4_still_exposes_effects_quality_menu(qapp, tmp_path):
+    definition = _v4_definition(tmp_path)
+    definition = replace(
+        definition,
+        forms=(definition.forms[0],),
+        transformations=(),
+        sequences=(),
+        cooldown_groups=(),
+    )
+    legacy = PetRegistry(resource_root() / "pets", None).refresh().by_id("shiyi")
+    assert legacy is not None
+    controller, *_ = _controller(
+        qapp,
+        settings=replace(AppSettings(), pet_id=definition.pet_id),
+        pet_registry=_StaticPetRegistry(definition, legacy),
+        catalog_factory=None,
+    )
+
+    try:
+        controller.body_menu.aboutToShow.emit()
+        labels = [action.text() for action in controller.body_menu.actions()]
+        assert "特效质量" in labels
+        assert "变身" not in labels
+    finally:
+        controller.shutdown()
+
+
 def test_v4_sequence_repeats_complete_actions_then_holds_before_next_step(
     qapp, tmp_path
 ):

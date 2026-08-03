@@ -97,6 +97,7 @@ class MultiformController:
         self._sequence_steps: deque[PetSequenceStep] = deque()
         self._pending: _PendingRequest | None = None
         self._stop_requested = False
+        self._restore_requested = False
 
     @property
     def current_form(self) -> str:
@@ -172,10 +173,12 @@ class MultiformController:
     def request_restore(self) -> RuntimeCommand | None:
         """Safely stop active work or exit an idle non-default form."""
         self._pending = None
+        self._restore_requested = True
         if self.busy:
             self._stop_requested = True
             return None
         if self._current_form == self._default_form:
+            self._restore_requested = False
             return None
 
         transformation = self._transformation_by_form[self._current_form]
@@ -210,6 +213,7 @@ class MultiformController:
         )
         self._operation = _Operation.ENTER
         self._stop_requested = False
+        self._restore_requested = False
         return RuntimeCommand(
             RuntimeCommandKind.PLAY,
             action=transformation.enter_action,
@@ -258,6 +262,7 @@ class MultiformController:
         self._transformation = None
         self._resident_deadline_ms = None
         self._stop_requested = False
+        self._restore_requested = False
         pending_command = self._consume_pending(now_ms)
         if pending_command is not None:
             return self._apply_form_change(pending_command, previous_form)
@@ -272,6 +277,7 @@ class MultiformController:
         self._sequence_steps = deque(sequence.steps)
         self._operation = _Operation.SEQUENCE
         self._stop_requested = False
+        self._restore_requested = False
         command = self._step_command(self._sequence_steps[0])
         return RuntimeCommand(
             command.kind,
@@ -303,6 +309,18 @@ class MultiformController:
 
         self._operation = _Operation.IDLE
         self._stop_requested = False
+        if self._restore_requested:
+            self._restore_requested = False
+            if self._current_form == self._default_form:
+                return RuntimeCommand(RuntimeCommandKind.FINISH)
+            transformation = self._transformation_by_form[self._current_form]
+            self._transformation = transformation
+            self._operation = _Operation.EXIT
+            return RuntimeCommand(
+                RuntimeCommandKind.SET_FORM,
+                action=transformation.exit_action,
+                form=self._current_form,
+            )
         pending_command = self._consume_pending(now_ms)
         if pending_command is not None:
             return self._apply_form_change(pending_command, previous_form)
@@ -385,3 +403,4 @@ class MultiformController:
         self._sequence_steps.clear()
         self._pending = None
         self._stop_requested = False
+        self._restore_requested = False

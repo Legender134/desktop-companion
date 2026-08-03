@@ -241,6 +241,7 @@ def _menu_items(
     shortcut_labels: tuple[tuple[int, str], ...] = (),
     transformation_items: tuple[PetTransformationDefinition, ...] = (),
     sequence_items: tuple[PetSequenceDefinition, ...] = (),
+    effects_quality_available: bool = False,
 ) -> tuple[MenuItem, ...]:
     action_details = action_details or {}
     gaze_step = 360.0 / gaze_frame_count if gaze_frame_count else 0.0
@@ -628,7 +629,7 @@ def _menu_items(
                     ),
                 ),
             )
-            if transformation_items or sequence_items
+            if effects_quality_available
             else ()
         ),
         MenuItem(
@@ -714,6 +715,7 @@ class MenuController:
         sequence_items_supplier: Callable[
             [], tuple[PetSequenceDefinition, ...]
         ] | None = None,
+        effects_quality_available_supplier: Callable[[], bool] | None = None,
     ) -> None:
         self._settings_supplier = settings_supplier
         self._startup_supplier = startup_supplier
@@ -733,6 +735,9 @@ class MenuController:
             transformation_items_supplier or (lambda: ())
         )
         self._sequence_items_supplier = sequence_items_supplier or (lambda: ())
+        self._effects_quality_available_supplier = (
+            effects_quality_available_supplier or (lambda: False)
+        )
         self._menus: list[QMenu] = []
 
     @property
@@ -746,6 +751,7 @@ class MenuController:
             self._shortcut_labels(),
             self._transformation_items(),
             self._sequence_items(),
+            self._effects_quality_available(),
         )
 
     def flattened_labels(self) -> tuple[str, ...]:
@@ -930,6 +936,20 @@ class MenuController:
         except Exception as error:
             self._report_supplier_error("sequence items supplier", error)
             return ()
+
+    def _effects_quality_available(self) -> bool:
+        try:
+            available = self._effects_quality_available_supplier()
+            if not isinstance(available, bool):
+                raise TypeError(
+                    "effects quality available supplier returned an invalid value"
+                )
+            return available
+        except Exception as error:
+            self._report_supplier_error(
+                "effects quality available supplier", error
+            )
+            return False
 
     def _report_supplier_error(self, context: str, error: Exception) -> None:
         error_type = type(error).__name__

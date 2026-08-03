@@ -358,6 +358,7 @@ class DesktopPetApplication:
             shortcut_labels_supplier=lambda: self.catalog.digit_shortcut_labels(),
             transformation_items_supplier=self._transformation_menu_items,
             sequence_items_supplier=self._sequence_menu_items,
+            effects_quality_available_supplier=lambda: self.catalog.sprite_version == 4,
         )
         self.body_menu = self.menu_controller.create_menu(self.window)
         self.tray = tray_factory(self.window, self.menu_controller)
@@ -1757,13 +1758,29 @@ class DesktopPetApplication:
 
     def _render_current_frame(self) -> None:
         self._displayed_frame = None
+        now_ms = self._now_ms()
+        if (
+            self.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE
+            and self.behavior.current_action is not None
+        ):
+            action = self.behavior.current_action
+            step = self.timeline.advance(
+                self._adjusted_animation_time(now_ms),
+                self.catalog.spec(action),
+            )
+            self._show_frame(
+                self.catalog.rendered_frames(
+                    action, self._effects_quality()
+                )[step.frame_index]
+            )
+            return
         if self._fixed_look_degrees is not None or self.behavior.mode is BehaviorMode.GAZE:
-            self._render_base(self._now_ms())
+            self._render_base(now_ms)
             return
         action = self.timeline.action
         if action in self.catalog.action_ids:
             step = self.timeline.advance(
-                self._adjusted_animation_time(self._now_ms()),
+                self._adjusted_animation_time(now_ms),
                 self.catalog.spec(action),
             )
             self._show_frame(
@@ -1772,7 +1789,7 @@ class DesktopPetApplication:
                 )[step.frame_index]
             )
         else:
-            self._render_base(self._now_ms())
+            self._render_base(now_ms)
 
     def _resume_base_mode(self) -> None:
         now = self._now_ms()

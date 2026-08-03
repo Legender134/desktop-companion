@@ -434,12 +434,14 @@ def test_v4_dynamic_forms_and_sequences_use_definition_order_visibility_and_kind
             (PetSequenceStep("hidden", 1, 0, None, True),),
         ),
     ]
+    effects_available = [True]
     controller = MenuController(
         AppSettings,
         lambda: False,
         lambda command: None,
         transformation_items_supplier=lambda: tuple(transformations),
         sequence_items_supplier=lambda: tuple(sequences),
+        effects_quality_available_supplier=lambda: effects_available[0],
     )
 
     action_menu = next(item for item in controller.items if item.label == "动作")
@@ -464,6 +466,7 @@ def test_v4_dynamic_forms_and_sequences_use_definition_order_visibility_and_kind
 
     transformations.clear()
     sequences.clear()
+    effects_available[0] = False
     menu = controller.create_menu()
     menu.aboutToShow.emit()
     assert _action(menu, "变身") is None
@@ -491,6 +494,7 @@ def test_effects_quality_menu_dispatches_and_refreshes_radio_state(qtbot):
         lambda: False,
         dispatched.append,
         transformation_items_supplier=lambda: (transformation,),
+        effects_quality_available_supplier=lambda: True,
     )
     menu = controller.create_menu()
     menu.aboutToShow.emit()
@@ -503,6 +507,26 @@ def test_effects_quality_menu_dispatches_and_refreshes_radio_state(qtbot):
     menu.aboutToShow.emit()
     assert not _action(_submenu(menu, "特效质量"), "完整").isChecked()
     assert _action(_submenu(menu, "特效质量"), "简化").isChecked()
+
+
+def test_effects_quality_capability_is_independent_of_dynamic_definition_counts(qtbot):
+    available = [True]
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        lambda command: None,
+        transformation_items_supplier=lambda: (),
+        sequence_items_supplier=lambda: (),
+        effects_quality_available_supplier=lambda: available[0],
+    )
+    menu = controller.create_menu()
+
+    assert _action(menu, "变身") is None
+    assert _action(menu, "特效质量") is not None
+
+    available[0] = False
+    menu.aboutToShow.emit()
+    assert _action(menu, "特效质量") is None
 
 
 def test_dynamic_action_menu_accepts_variable_count_and_hides_unsupported_gaze(qtbot):

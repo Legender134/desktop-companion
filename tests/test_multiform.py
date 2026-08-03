@@ -23,6 +23,7 @@ def _controller(
     *,
     sequence_safe_flags: tuple[bool, ...] = (False, True, False),
     include_sequence_only_form: bool = False,
+    leave_as_fox_safe: bool = True,
 ) -> MultiformController:
     forms = (
         PetFormDefinition(
@@ -152,7 +153,11 @@ def _controller(
             "leaveAsFox",
             "Leave as fox",
             True,
-            (PetSequenceStep("becomeFox", 1, 0, "whiteFox", True),),
+            (
+                PetSequenceStep(
+                    "becomeFox", 1, 0, "whiteFox", leave_as_fox_safe
+                ),
+            ),
         ),
     )
     return MultiformController(
@@ -384,6 +389,40 @@ def test_restore_while_busy_discards_pending_and_uses_safe_stop_boundary():
     command = controller.action_finished(200)
 
     assert command.kind is RuntimeCommandKind.CLEANUP
+    assert controller.current_form == DEFAULT_FORM
+    assert controller.busy is False
+
+
+def test_restore_after_sequence_without_safe_boundary_exits_final_non_default_form():
+    controller = _controller(leave_as_fox_safe=False)
+    controller.request_sequence("leaveAsFox", manual=True, now_ms=0)
+    assert controller.request_restore() is None
+
+    command = controller.action_finished(100)
+
+    assert command == RuntimeCommand(
+        RuntimeCommandKind.SET_FORM,
+        action="whiteFoxExit",
+        form="whiteFox",
+    )
+    assert controller.current_form == "whiteFox"
+    assert controller.busy is True
+    assert controller.action_finished(200) == RuntimeCommand(
+        RuntimeCommandKind.SET_FORM,
+        form=DEFAULT_FORM,
+    )
+
+
+def test_restore_after_sequence_without_safe_boundary_finishing_default_is_finish():
+    controller = _controller(sequence_safe_flags=(False, False, False))
+    controller.request_sequence("spell", manual=True, now_ms=0)
+    assert controller.request_restore() is None
+
+    assert controller.action_finished(100).action == "b"
+    assert controller.action_finished(200).action == "c"
+    command = controller.action_finished(300)
+
+    assert command == RuntimeCommand(RuntimeCommandKind.FINISH)
     assert controller.current_form == DEFAULT_FORM
     assert controller.busy is False
 
