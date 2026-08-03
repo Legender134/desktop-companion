@@ -75,8 +75,19 @@ class PetRegistrySnapshot:
         return tuple((pet.pet_id, pet.display_name) for pet in self.pets)
 
     def by_id(self, pet_id: str) -> PetDefinition | None:
-        normalized = str(pet_id).lower()
-        return next((pet for pet in self.pets if pet.pet_id == normalized), None)
+        requested = str(pet_id)
+        exact = next((pet for pet in self.pets if pet.pet_id == requested), None)
+        if exact is not None:
+            return exact
+        normalized = requested.lower()
+        return next(
+            (
+                pet
+                for pet in self.pets
+                if pet.sprite_version in {2, 3} and pet.pet_id == normalized
+            ),
+            None,
+        )
 
 
 def is_valid_pet_id(value: object) -> bool:
@@ -182,13 +193,23 @@ class PetRegistry:
         if not isinstance(manifest, dict):
             raise ValueError("pet.json must contain an object")
 
+        sprite_version = manifest.get("spriteVersionNumber")
+        if (
+            not isinstance(sprite_version, int)
+            or isinstance(sprite_version, bool)
+            or sprite_version not in {2, 3, 4}
+        ):
+            raise ValueError("unsupported sprite version; expected 2, 3, or 4")
+
         pet_id = manifest.get("id")
-        if not is_valid_pet_id(pet_id) or pet_id != pet_id.lower():
+        if sprite_version == 4:
+            if not isinstance(pet_id, str) or _V4_KEY.fullmatch(pet_id) is None:
+                raise ValueError("invalid v4 pet id")
+        elif not is_valid_pet_id(pet_id) or pet_id != pet_id.lower():
             raise ValueError("invalid pet id")
         if directory.name != pet_id:
             raise ValueError("pet id must match its directory name")
 
-        sprite_version = manifest.get("spriteVersionNumber")
         display_name = manifest.get("displayName")
         if not isinstance(display_name, str) or not display_name.strip():
             raise ValueError("displayName is required")
@@ -212,8 +233,6 @@ class PetRegistry:
         ):
             raise ValueError("description contains control characters")
 
-        if sprite_version not in {2, 3, 4}:
-            raise ValueError("unsupported sprite version; expected 2, 3, or 4")
         if sprite_version == 4:
             allowed_v4_fields = {
                 "id",

@@ -162,7 +162,7 @@ def _valid_v4_manifest() -> dict[str, object]:
         "cooldownGroups": ["global"],
     }
     return {
-        "id": "fixture_v4",
+        "id": "fixtureV4",
         "displayName": "Fixture v4",
         "description": "Valid two-atlas v4 fixture",
         "spriteVersionNumber": 4,
@@ -353,9 +353,9 @@ def test_v4_domain_models_are_immutable_and_use_tuple_collections():
 
 
 def test_registry_loads_v4_forms_layers_transformations_and_sequences(tmp_path: Path):
-    directory = _write_valid_v4_pack(tmp_path / "pets", "fixture_v4")
+    directory = _write_valid_v4_pack(tmp_path / "pets", "fixtureV4")
 
-    definition = PetRegistry(tmp_path / "pets", None).refresh().by_id("fixture_v4")
+    definition = PetRegistry(tmp_path / "pets", None).refresh().by_id("fixtureV4")
 
     assert definition.sprite_version == 4
     assert definition.default_form == "foxEaredHuman"
@@ -370,9 +370,32 @@ def test_registry_uses_v4_label_limits_for_display_name(tmp_path: Path):
     manifest = _valid_v4_manifest()
     manifest["displayName"] = "V" * 80
 
-    definition = _write_and_refresh_v4(tmp_path, manifest).by_id("fixture_v4")
+    definition = _write_and_refresh_v4(tmp_path, manifest).by_id("fixtureV4")
 
     assert definition.display_name == "V" * 80
+
+
+def test_registry_accepts_schema_valid_v4_camel_case_pet_id(tmp_path: Path):
+    manifest = _valid_v4_manifest()
+    manifest["id"] = "foxPet"
+
+    snapshot = _write_and_refresh_v4(tmp_path, manifest)
+
+    assert snapshot.by_id("foxPet").pet_id == "foxPet"
+    assert snapshot.issues == ()
+
+
+@pytest.mark.parametrize("pet_id", ("fox_pet", "FoxPet"))
+def test_registry_rejects_v4_pet_id_outside_schema_grammar(
+    tmp_path: Path, pet_id: str
+):
+    manifest = _valid_v4_manifest()
+    manifest["id"] = pet_id
+
+    snapshot = _write_and_refresh_v4(tmp_path, manifest)
+
+    assert snapshot.pets == ()
+    assert "invalid v4 pet id" in snapshot.issues[0].message
 
 
 def _remove_character_atlas(directory: Path) -> None:
@@ -620,6 +643,47 @@ def test_registry_requires_canonical_lowercase_id_and_directory(tmp_path: Path):
 
     assert snapshot.choices == (("shiyi", "Shiyi"),)
     assert "invalid pet id" in snapshot.issues[0].message
+
+
+@pytest.mark.parametrize("sprite_version", (2, 3))
+def test_registry_preserves_canonical_lowercase_ids_for_v2_and_v3(
+    tmp_path: Path, sprite_version: int
+):
+    root = tmp_path / "pets"
+    actions = _valid_v3_actions() if sprite_version == 3 else None
+    _write_pack(
+        root,
+        f"legacyv{sprite_version}good",
+        sprite_version=sprite_version,
+        actions=actions,
+    )
+    _write_pack(
+        root,
+        f"LegacyV{sprite_version}bad",
+        sprite_version=sprite_version,
+        actions=actions,
+    )
+
+    snapshot = PetRegistry(root, None).refresh()
+
+    assert snapshot.choices == (
+        (f"legacyv{sprite_version}good", f"Legacyv{sprite_version}Good"),
+    )
+    assert len(snapshot.issues) == 1
+    assert "invalid pet id" in snapshot.issues[0].message
+
+
+@pytest.mark.parametrize("sprite_version", (None, "4", [], {}, 5))
+def test_registry_quarantines_malformed_or_unsupported_sprite_versions(
+    tmp_path: Path, sprite_version
+):
+    root = tmp_path / "pets"
+    _write_pack(root, "badversion", sprite_version=sprite_version)
+
+    snapshot = PetRegistry(root, None).refresh()
+
+    assert snapshot.pets == ()
+    assert len(snapshot.issues) == 1
 
 
 def test_registry_accepts_valid_icon_frame_and_rejects_invalid_values(tmp_path: Path):
