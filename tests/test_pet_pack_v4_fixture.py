@@ -1,11 +1,15 @@
+from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 import random
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 from PIL import Image
 from PySide6.QtCore import QPoint, QRect, QSize
+import pytest
 
+from shiyi_desktop_pet.app import DesktopPetApplication
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.autoplay import AutoplayBucketScheduler
 from shiyi_desktop_pet.multiform import MultiformController, RuntimeCommandKind
@@ -52,13 +56,50 @@ def test_fixture_manifest_validates_against_the_published_schema(repo_root: Path
     Draft202012Validator(schema).validate(manifest)
 
 
+@pytest.mark.parametrize(
+    "invalid_change",
+    (
+        lambda manifest: manifest.__setitem__("unknownRootField", True),
+        lambda manifest: manifest.__setitem__("id", "multiform_v4"),
+        lambda manifest: manifest["actions"]["humanIdle"].__setitem__(
+            "frameCount", "2"
+        ),
+    ),
+    ids=("unknown-root-field", "underscore-id", "wrong-field-type"),
+)
+def test_published_schema_independently_rejects_invalid_fixture_mutations(
+    repo_root: Path, invalid_change
+):
+    schema = json.loads(
+        (repo_root / "schemas" / "pet-pack-v4.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest = json.loads(
+        (FIXTURE_ROOT / "multiformV4" / "pet.json").read_text(encoding="utf-8")
+    )
+    invalid_manifest = deepcopy(manifest)
+    invalid_change(invalid_manifest)
+
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema).validate(invalid_manifest)
+
+
 def test_lossless_geometric_atlases_have_stable_sizes_and_alpha():
     expected = {
-        "character.webp": ((768, 2496), 9_670),
-        "effects.webp": ((1152, 208), 1_644),
+        "character.webp": (
+            (768, 2496),
+            9_670,
+            "0a9bdfdb8eab232aca063f8d28fbd35ac8749f5182d9b36ab4f07a6d632c29b9",
+        ),
+        "effects.webp": (
+            (1152, 208),
+            1_644,
+            "72a8f337557aaa4e47f9cbcf761b0a329e704d1ff9130c3008969168e869b3a1",
+        ),
     }
 
-    for name, (size, encoded_bytes) in expected.items():
+    for name, (size, encoded_bytes, sha256) in expected.items():
         path = FIXTURE_ROOT / "multiformV4" / name
         with Image.open(path) as atlas:
             assert atlas.format == "WEBP"
@@ -66,6 +107,7 @@ def test_lossless_geometric_atlases_have_stable_sizes_and_alpha():
             assert atlas.size == size
         assert path.read_bytes()[12:16] == b"VP8L"
         assert path.stat().st_size == encoded_bytes
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == sha256
 
 
 def test_full_and_simplified_composition_preserve_body_world_anchor():
@@ -172,6 +214,54 @@ def test_fixture_transformation_sequence_and_hard_cleanup_are_runtime_driven():
     assert first_cleanup[0].kind is RuntimeCommandKind.CLEANUP
     assert controller.current_form == "defaultHuman"
     assert not controller.busy
+
+
+def test_real_application_cleanup_strips_wide_effect_without_a_qt_event_loop():
+    definition, catalog = _load_fixture()
+    controller = MultiformController(
+        default_form=definition.default_form,
+        forms=definition.forms,
+        transformations=definition.transformations,
+        sequences=definition.sequences,
+        rng=random.Random(7),
+    )
+    controller.request_sequence("shapeBurst", manual=True, now_ms=0)
+
+    class MinimalBehavior:
+        def __init__(self):
+            self.scripted_finished_count = 0
+
+        def scripted_finished(self):
+            self.scripted_finished_count += 1
+
+    application = object.__new__(DesktopPetApplication)
+    application.catalog = catalog
+    application.multiform = controller
+    application.v4_autoplay = None
+    application.behavior = MinimalBehavior()
+    application._runtime_repeat_remaining = 9
+    application._runtime_step_hold_ms = 875
+    application._runtime_hold_until_ms = 1_234
+    application._displayed_frame = ("wide-effect",)
+    shown_frames = []
+    application._show_frame = shown_frames.append
+
+    assert DesktopPetApplication._hard_cancel_v4(application)
+
+    assert not controller.busy
+    assert controller.current_form == "defaultHuman"
+    assert not controller._sequence_steps
+    assert application._runtime_repeat_remaining == 0
+    assert application._runtime_step_hold_ms == 0
+    assert application._runtime_hold_until_ms is None
+    assert application.behavior.scripted_finished_count == 1
+    assert len(shown_frames) == 1
+    cleanup_frame = shown_frames[0]
+    assert cleanup_frame.image == cleanup_frame.body_image
+    assert cleanup_frame.body_rect == QRect(
+        0, 0, cleanup_frame.body_image.width(), cleanup_frame.body_image.height()
+    )
+    assert cleanup_frame.image.size() == QSize(192, 208)
 
 
 def test_fixture_autoplay_uses_one_bucket_deadline_and_shared_cooldown():

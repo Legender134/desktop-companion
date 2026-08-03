@@ -25,6 +25,7 @@ def test_documentation_local_links_point_to_existing_files(repo_root: Path):
         repo_root / "README.md",
         repo_root / "docs" / "新手使用指南.md",
         repo_root / "docs" / "添加新宠物指南.md",
+        repo_root / "docs" / "pet-pack-format-v4.md",
         repo_root / "docs" / "pet-pack-format-v3.md",
         repo_root / "docs" / "pet-pack-format-v2.md",
         repo_root / "examples" / "pet-pack-template" / "README.md",
@@ -40,6 +41,24 @@ def test_documentation_local_links_point_to_existing_files(repo_root: Path):
                 missing.append(f"{document.relative_to(repo_root)} -> {target}")
 
     assert missing == []
+
+
+def test_v4_documentation_explains_renderability_and_zero_value_role_exceptions(
+    repo_root: Path,
+):
+    format_guide = (repo_root / "docs" / "pet-pack-format-v4.md").read_text(
+        encoding="utf-8"
+    )
+    new_pet_guide = (repo_root / "docs" / "添加新宠物指南.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "每一种特效质量下的每一个 action 帧" in format_guide
+    assert "action <id> frame has no rendered layers" in format_guide
+    assert "显式 `minDistance: 0`" in format_guide
+    assert "显式 `autoplayGroup: \"\"`" in format_guide
+    assert "上面的 pytest 命令只验证仓库自带 fixture" in new_pet_guide
+    assert "自己的 v4 包" in new_pet_guide
 
 
 def test_pet_pack_template_matches_runtime_manifest_contract(
