@@ -169,7 +169,13 @@ def test_transformation_enters_changes_form_resides_until_deadline_and_exits():
 
     assert controller.request_transformation(
         "whiteFoxChange", manual=True, now_ms=100
-    ) == RuntimeCommand(RuntimeCommandKind.PLAY, action="whiteFoxEnter")
+    ) == RuntimeCommand(
+        RuntimeCommandKind.PLAY,
+        action="whiteFoxEnter",
+        started_kind="transformation",
+        started_key="whiteFoxChange",
+        started_manual=True,
+    )
     assert controller.current_form == DEFAULT_FORM
     assert controller.busy is True
 
@@ -204,7 +210,13 @@ def test_idle_request_for_current_form_plays_its_representative_action():
 
     assert controller.request_transformation(
         "whiteFoxChange", manual=True, now_ms=200
-    ) == RuntimeCommand(RuntimeCommandKind.PLAY, action="whiteFoxGreet")
+    ) == RuntimeCommand(
+        RuntimeCommandKind.PLAY,
+        action="whiteFoxGreet",
+        started_kind="transformation",
+        started_key="whiteFoxChange",
+        started_manual=True,
+    )
     assert controller.current_form == "whiteFox"
     assert controller.busy is False
 
@@ -230,6 +242,9 @@ def test_busy_manual_request_overwrites_one_pending_target_across_request_kinds(
         form=DEFAULT_FORM,
         repeat_count=2,
         hold_ms=25,
+        started_kind="sequence",
+        started_key="spell",
+        started_manual=True,
     )
     assert controller.current_form == DEFAULT_FORM
     assert controller.busy is True
@@ -268,6 +283,9 @@ def test_later_busy_manual_request_is_retained_after_automatic_request_is_ignore
         RuntimeCommandKind.SET_FORM,
         action="fullHumanEnter",
         form=DEFAULT_FORM,
+        started_kind="transformation",
+        started_key="fullHumanChange",
+        started_manual=True,
     )
     assert controller.busy is True
 
@@ -288,6 +306,9 @@ def test_manual_switch_from_an_idle_non_default_form_exits_before_new_enter():
         RuntimeCommandKind.SET_FORM,
         action="fullHumanEnter",
         form=DEFAULT_FORM,
+        started_kind="transformation",
+        started_key="fullHumanChange",
+        started_manual=True,
     )
 
 
@@ -299,6 +320,9 @@ def test_sequence_propagates_repeat_hold_and_form_changes_at_step_boundaries():
         action="a",
         repeat_count=2,
         hold_ms=25,
+        started_kind="sequence",
+        started_key="spell",
+        started_manual=True,
     )
     assert controller.action_finished(100) == RuntimeCommand(
         RuntimeCommandKind.SET_FORM,
@@ -412,3 +436,55 @@ def test_controller_rejects_non_default_form_without_a_declared_exit():
         match="non-default forms must have a transformation exit: sequenceOnly",
     ):
         _controller(include_sequence_only_form=True)
+
+
+@pytest.mark.parametrize(
+    ("kind", "key", "manual"),
+    (
+        ("transformation", "whiteFoxChange", True),
+        ("sequence", "spell", True),
+        ("sequence", "spell", False),
+    ),
+)
+def test_start_command_carries_unambiguous_request_identity(kind, key, manual):
+    controller = _controller()
+
+    if kind == "transformation":
+        command = controller.request_transformation(key, manual=manual, now_ms=0)
+    else:
+        command = controller.request_sequence(key, manual=manual, now_ms=0)
+
+    assert command.started_kind == kind
+    assert command.started_key == key
+    assert command.started_manual is manual
+
+
+def test_non_default_switch_reports_start_only_after_exit_completes():
+    controller = _controller()
+    controller.request_sequence("leaveAsFox", manual=True, now_ms=0)
+    controller.action_finished(100)
+
+    exit_command = controller.request_transformation(
+        "fullHumanChange", manual=True, now_ms=200
+    )
+    assert exit_command.started_key is None
+
+    start_command = controller.action_finished(300)
+    assert start_command.started_kind == "transformation"
+    assert start_command.started_key == "fullHumanChange"
+    assert start_command.started_manual is True
+
+
+def test_busy_manual_overwrite_reports_only_the_last_pending_start():
+    controller = _controller()
+    controller.request_transformation("whiteFoxChange", manual=True, now_ms=0)
+    controller.action_finished(1)
+    controller.request_transformation("fullHumanChange", manual=True, now_ms=2)
+    controller.request_sequence("spell", manual=True, now_ms=3)
+    controller.action_finished(2_000)
+
+    start_command = controller.action_finished(2_100)
+
+    assert start_command.started_kind == "sequence"
+    assert start_command.started_key == "spell"
+    assert start_command.started_manual is True

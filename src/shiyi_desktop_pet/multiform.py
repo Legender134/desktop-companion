@@ -30,6 +30,9 @@ class RuntimeCommand:
     form: str | None = None
     repeat_count: int = 1
     hold_ms: int = 0
+    started_kind: str | None = None
+    started_key: str | None = None
+    started_manual: bool | None = None
 
 
 class _Operation(StrEnum):
@@ -118,6 +121,9 @@ class MultiformController:
             return RuntimeCommand(
                 RuntimeCommandKind.PLAY,
                 action=self._form_map[self._current_form].representative_action,
+                started_kind=_RequestKind.TRANSFORMATION,
+                started_key=key,
+                started_manual=manual,
             )
         if self._current_form != self._default_form:
             if not manual:
@@ -133,7 +139,7 @@ class MultiformController:
                 RuntimeCommandKind.PLAY,
                 action=current.exit_action,
             )
-        return self._start_transformation(transformation, now_ms)
+        return self._start_transformation(transformation, now_ms, manual=manual)
 
     def request_sequence(
         self, key: str, *, manual: bool, now_ms: int
@@ -145,7 +151,7 @@ class MultiformController:
             return None
         if not manual and self._current_form != self._default_form:
             return None
-        return self._start_sequence(sequence)
+        return self._start_sequence(sequence, manual=manual)
 
     def action_finished(self, now_ms: int) -> RuntimeCommand:
         if self._operation is _Operation.ENTER:
@@ -173,7 +179,11 @@ class MultiformController:
         )
 
     def _start_transformation(
-        self, transformation: PetTransformationDefinition, now_ms: int
+        self,
+        transformation: PetTransformationDefinition,
+        now_ms: int,
+        *,
+        manual: bool,
     ) -> RuntimeCommand:
         self._transformation = transformation
         self._resident_deadline_ms = now_ms + self._rng.randint(
@@ -185,6 +195,9 @@ class MultiformController:
         return RuntimeCommand(
             RuntimeCommandKind.PLAY,
             action=transformation.enter_action,
+            started_kind=_RequestKind.TRANSFORMATION,
+            started_key=transformation.key,
+            started_manual=manual,
         )
 
     def _enter_finished(self, now_ms: int) -> RuntimeCommand:
@@ -235,11 +248,23 @@ class MultiformController:
             form=self._default_form,
         )
 
-    def _start_sequence(self, sequence: PetSequenceDefinition) -> RuntimeCommand:
+    def _start_sequence(
+        self, sequence: PetSequenceDefinition, *, manual: bool
+    ) -> RuntimeCommand:
         self._sequence_steps = deque(sequence.steps)
         self._operation = _Operation.SEQUENCE
         self._stop_requested = False
-        return self._step_command(self._sequence_steps[0])
+        command = self._step_command(self._sequence_steps[0])
+        return RuntimeCommand(
+            command.kind,
+            action=command.action,
+            form=command.form,
+            repeat_count=command.repeat_count,
+            hold_ms=command.hold_ms,
+            started_kind=_RequestKind.SEQUENCE,
+            started_key=sequence.key,
+            started_manual=manual,
+        )
 
     def _sequence_step_finished(self, now_ms: int) -> RuntimeCommand:
         previous_form = self._current_form
@@ -308,6 +333,9 @@ class MultiformController:
             form=self._current_form,
             repeat_count=command.repeat_count,
             hold_ms=command.hold_ms,
+            started_kind=command.started_kind,
+            started_key=command.started_key,
+            started_manual=command.started_manual,
         )
 
     def _choose_resident(

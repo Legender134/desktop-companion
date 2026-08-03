@@ -439,6 +439,9 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
     atlas_path = tmp_path / "runtime.webp"
     atlas = QImage(64 * 8, 12 * 8, QImage.Format.Format_RGBA8888)
     atlas.fill(QColor(80, 120, 200, 255))
+    for y in range(8):
+        for x in range(8, 16):
+            atlas.setPixelColor(x, y, QColor(220, 60, 80, 255))
     atlas.setPixelColor(atlas.width() - 1, atlas.height() - 1, QColor(0, 0, 0, 0))
     assert atlas.save(str(atlas_path), "WEBP")
     atlas_definition = PetAtlasDefinition("runtime", atlas_path, 8, 8)
@@ -452,6 +455,7 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
         role=ActionRole.INTERACTION,
         direction=0,
         optional_effect=False,
+        inline_effect=False,
     ):
         layers = [
             PetActionLayerDefinition(
@@ -470,6 +474,17 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
                     optional_in_simplified=True,
                 )
             )
+        if inline_effect:
+            layers.append(
+                PetActionLayerDefinition(
+                    "runtime",
+                    row,
+                    1,
+                    4,
+                    8,
+                    opacity_percent=50,
+                )
+            )
         return PetActionDefinition(
             key,
             key,
@@ -482,7 +497,13 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
         )
 
     actions = (
-        action("humanIdle", 0, loops=None, role=ActionRole.IDLE),
+        action(
+            "humanIdle",
+            0,
+            loops=None,
+            role=ActionRole.IDLE,
+            inline_effect=True,
+        ),
         action("humanRight", 1, loops=None, role=ActionRole.MOVE, direction=1),
         action("humanLeft", 2, loops=None, role=ActionRole.MOVE, direction=-1),
         action("humanGaze", 3, 64, loops=None, role=ActionRole.GAZE),
@@ -516,6 +537,16 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
             "foxIdle",
             ("foxResident",),
         ),
+        PetFormDefinition(
+            "fullHuman",
+            "Full human",
+            "humanIdle",
+            "humanRight",
+            "humanLeft",
+            "humanGaze",
+            "humanIdle",
+            ("spell",),
+        ),
     )
     autoplay = PetAutoplayDefinition("rare", 1, 500, 500, ("magic",))
     transformation = PetTransformationDefinition(
@@ -523,6 +554,19 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
         "White fox",
         "human",
         "whiteFox",
+        "changeEnter",
+        (PetStateActionChoice("foxResident", 1),),
+        "changeExit",
+        300,
+        300,
+        True,
+        autoplay,
+    )
+    full_human_transformation = PetTransformationDefinition(
+        "fullHumanChange",
+        "Full human",
+        "human",
+        "fullHuman",
         "changeEnter",
         (PetStateActionChoice("foxResident", 1),),
         "changeExit",
@@ -541,6 +585,12 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
         ),
         autoplay,
     )
+    leave_as_fox = PetSequenceDefinition(
+        "leaveAsFox",
+        "Leave as fox",
+        False,
+        (PetSequenceStep("finalPose", 1, 0, "whiteFox", True),),
+    )
     return PetDefinition(
         "runtime-v4",
         "Runtime v4",
@@ -554,9 +604,9 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
         atlases=(atlas_definition,),
         forms=forms,
         default_form="human",
-        transformations=(transformation,),
+        transformations=(transformation, full_human_transformation),
         cooldown_groups=(PetCooldownGroupDefinition("magic", 1_000),),
-        sequences=(sequence,),
+        sequences=(sequence, leave_as_fox),
         icon_atlas="runtime",
     )
 
@@ -2296,6 +2346,45 @@ def test_v4_non_default_form_suspends_gaze_and_restores_it_after_exit(
         controller.shutdown()
 
 
+def test_v4_fixed_gaze_does_not_freeze_scripted_sequence(qapp, tmp_path):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("ritual")
+        controller._fixed_look_degrees = 0.0
+
+        now[0] = 100
+        controller._animation_tick()
+
+        assert controller.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE
+        assert controller.current_action == "spell"
+        assert controller.timeline.started_ms == 100
+        assert controller.window.current_frame.identity[1] == "spell"
+    finally:
+        controller.shutdown()
+
+
+def test_v4_fixed_gaze_does_not_render_default_form_gaze_in_gazeless_form(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("leaveAsFox")
+        now[0] = 100
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "whiteFox"
+        controller._fixed_look_degrees = 0.0
+
+        controller._animation_tick()
+
+        assert controller.window.current_frame.identity[1] == "foxIdle"
+    finally:
+        controller.shutdown()
+
+
 def test_v4_autoplay_consumes_deadline_only_after_accepted_offer(
     qapp, tmp_path, monkeypatch
 ):
@@ -2406,6 +2495,25 @@ def test_v4_hard_cleanup_is_idempotent_at_every_runtime_boundary(
     controller.shutdown()
 
 
+def test_v4_cleanup_strips_non_optional_effect_inside_body_bounds(qapp, tmp_path):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    try:
+        layered_idle = controller.catalog.rendered_frames("humanIdle", "full")[0]
+        assert layered_idle.image.size() == layered_idle.body_image.size()
+        assert layered_idle.body_rect == QRect(
+            0, 0, layered_idle.body_image.width(), layered_idle.body_image.height()
+        )
+        assert layered_idle.image != layered_idle.body_image
+
+        controller.trigger_sequence("ritual")
+        controller._hard_cancel_v4()
+
+        cleaned = controller.window.current_frame
+        assert cleaned.image == cleaned.body_image
+    finally:
+        controller.shutdown()
+
+
 def test_legacy_catalogs_do_not_construct_v4_runtime(qapp):
     v2, *_ = _controller(qapp)
     v3, *_ = _controller(qapp, catalog_factory=_state_catalog)
@@ -2447,17 +2555,92 @@ def test_v4_random_interaction_fallback_uses_current_form_pool(qapp, tmp_path):
         controller.shutdown()
 
 
-def test_v4_manual_start_records_cooldown_without_consuming_bucket(qapp, tmp_path):
+def test_v4_manual_start_records_cooldown_once_without_consuming_bucket(
+    qapp, tmp_path, monkeypatch
+):
     controller, *_ = _v4_controller(qapp, tmp_path)
     controller._now_ms = lambda: 100
     scheduler = controller.v4_autoplay
+    calls = []
+    original_record_started = scheduler.record_started
+
+    def record_started(candidate, now_ms, *, automatic=False):
+        calls.append((candidate.kind, candidate.key, automatic))
+        original_record_started(candidate, now_ms, automatic=automatic)
+
+    monkeypatch.setattr(scheduler, "record_started", record_started)
     try:
         scheduler.deadlines["rare"] = 500
 
         assert controller.trigger_sequence("ritual", manual=True)
 
+        assert calls == [("sequence", "ritual", False)]
         assert scheduler.deadlines["rare"] == 500
         assert scheduler.cooldown_deadlines["magic"] == 1_100
+    finally:
+        controller.shutdown()
+
+
+def test_v4_non_default_switch_records_pending_manual_only_when_enter_starts(
+    qapp, tmp_path, monkeypatch
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    scheduler = controller.v4_autoplay
+    calls = []
+    original_record_started = scheduler.record_started
+
+    def record_started(candidate, now_ms, *, automatic=False):
+        calls.append((candidate.kind, candidate.key, automatic))
+        original_record_started(candidate, now_ms, automatic=automatic)
+
+    monkeypatch.setattr(scheduler, "record_started", record_started)
+    try:
+        controller.trigger_sequence("leaveAsFox")
+        now[0] = 100
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "whiteFox"
+
+        assert controller.trigger_transformation("fullHumanChange")
+        assert calls == []
+
+        now[0] = 300
+        controller._advance_manual(now[0])
+        assert calls == [("transformation", "fullHumanChange", False)]
+    finally:
+        controller.shutdown()
+
+
+def test_v4_busy_manual_overwrite_records_only_last_pending_candidate(
+    qapp, tmp_path, monkeypatch
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    scheduler = controller.v4_autoplay
+    calls = []
+    original_record_started = scheduler.record_started
+
+    def record_started(candidate, now_ms, *, automatic=False):
+        calls.append((candidate.kind, candidate.key, automatic))
+        original_record_started(candidate, now_ms, automatic=automatic)
+
+    monkeypatch.setattr(scheduler, "record_started", record_started)
+    try:
+        controller.trigger_transformation("whiteFoxChange")
+        calls.clear()
+        now[0] = 200
+        controller._advance_manual(now[0])
+
+        assert not controller.trigger_transformation("fullHumanChange")
+        assert not controller.trigger_sequence("ritual")
+        now[0] = 300
+        controller._advance_manual(now[0])
+        now[0] = 500
+        controller._advance_manual(now[0])
+
+        assert calls == [("sequence", "ritual", False)]
     finally:
         controller.shutdown()
 
@@ -2484,5 +2667,24 @@ def test_v4_autonomous_timer_uses_earlier_bucket_and_retains_due_while_busy(
         controller._schedule_autonomous()
         assert controller.autonomous_timer.interval() == 1
         assert scheduler.deadlines["rare"] == 0
+    finally:
+        controller.shutdown()
+
+
+def test_v4_due_bucket_blocked_by_cooldown_defers_without_hot_polling(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    controller._now_ms = lambda: 100
+    scheduler = controller.v4_autoplay
+    try:
+        controller._autonomous_not_before_ms = 5_000
+        scheduler.deadlines["rare"] = 100
+        scheduler.cooldown_deadlines["magic"] = 1_000
+
+        controller._autonomous_timeout()
+
+        assert scheduler.deadlines["rare"] == 1_100
+        assert controller.autonomous_timer.interval() == 1_000
     finally:
         controller.shutdown()

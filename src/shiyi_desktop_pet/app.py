@@ -14,7 +14,16 @@ from random import Random
 import sys
 from collections.abc import Callable, Mapping
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QTimer, Qt, QUrl, qVersion
+from PySide6.QtCore import (
+    QElapsedTimer,
+    QPoint,
+    QPointF,
+    QRect,
+    QTimer,
+    Qt,
+    QUrl,
+    qVersion,
+)
 from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QImage, QImageReader
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -482,9 +491,6 @@ class DesktopPetApplication:
         self._cancel_showcase()
         self._execute_runtime_command(command)
         if manual:
-            candidate = self._v4_candidate("transformation", key)
-            if candidate is not None and self.v4_autoplay is not None:
-                self.v4_autoplay.record_started(candidate, self._now_ms())
             self._defer_autonomous()
         return True
 
@@ -500,13 +506,11 @@ class DesktopPetApplication:
         self._cancel_showcase()
         self._execute_runtime_command(command)
         if manual:
-            candidate = self._v4_candidate("sequence", key)
-            if candidate is not None and self.v4_autoplay is not None:
-                self.v4_autoplay.record_started(candidate, self._now_ms())
             self._defer_autonomous()
         return True
 
     def _execute_runtime_command(self, command: RuntimeCommand) -> None:
+        self._record_v4_started(command)
         if command.kind is RuntimeCommandKind.CLEANUP:
             self._runtime_repeat_remaining = 0
             self._runtime_step_hold_ms = 0
@@ -538,17 +542,33 @@ class DesktopPetApplication:
         self._manual_burst_target = None
         self._last_action_played_ms[action] = self._now_ms()
 
+    def _record_v4_started(self, command: RuntimeCommand) -> None:
+        scheduler = self.v4_autoplay
+        if (
+            scheduler is None
+            or command.started_kind is None
+            or command.started_key is None
+            or command.started_manual is None
+        ):
+            return
+        candidate = self._v4_candidate(command.started_kind, command.started_key)
+        if candidate is not None:
+            scheduler.record_started(
+                candidate,
+                self._now_ms(),
+                automatic=not command.started_manual,
+            )
+
     def _show_v4_cleanup_frame(self) -> None:
         action = self.catalog.idle_action_for(self.catalog.default_form)
         frame = self.catalog.rendered_frames(action, "simplified")[0]
-        if frame.image.size() != frame.body_image.size() or frame.body_rect.topLeft() != QPoint():
-            frame = RenderedFrame(
-                frame.body_image,
-                frame.body_image,
-                QRect(0, 0, frame.body_image.width(), frame.body_image.height()),
-                frame.anchor - frame.body_rect.topLeft(),
-                ("v4-cleanup", frame.identity),
-            )
+        frame = RenderedFrame(
+            frame.body_image,
+            frame.body_image,
+            QRect(0, 0, frame.body_image.width(), frame.body_image.height()),
+            frame.anchor - frame.body_rect.topLeft(),
+            ("v4-cleanup", frame.identity),
+        )
         self._displayed_frame = None
         self._show_frame(frame)
 
@@ -1325,14 +1345,21 @@ class DesktopPetApplication:
         if mode is BehaviorMode.DRAGGING or mode is BehaviorMode.SHUTTING_DOWN:
             self._refresh_hover_snapshot()
             return
-        if self._fixed_look_degrees is not None and self.catalog.supports_gaze:
+        if mode is BehaviorMode.SCRIPTED_SEQUENCE:
+            self._advance_manual(now_ms)
+            return
+        current_form = self._current_form()
+        if (
+            self._fixed_look_degrees is not None
+            and self.catalog.supports_gaze_for(current_form)
+        ):
             self._show_frame(
                 self.catalog.look_frame_for(
-                    self.catalog.default_form, self._fixed_look_degrees
+                    current_form, self._fixed_look_degrees
                 )
             )
             return
-        if mode in {BehaviorMode.MANUAL_ACTION, BehaviorMode.SCRIPTED_SEQUENCE}:
+        if mode is BehaviorMode.MANUAL_ACTION:
             self._advance_manual(now_ms)
             return
         if mode is BehaviorMode.WANDER and self._wander_target is not None:
@@ -1787,6 +1814,7 @@ class DesktopPetApplication:
             return
         now_ms = self._now_ms()
         if self.v4_autoplay is not None and self.multiform is not None:
+            bucket_deadline = self.v4_autoplay.next_deadline_ms()
             candidate = self.v4_autoplay.choose_due(
                 now_ms,
                 self._current_form(),
@@ -1801,17 +1829,13 @@ class DesktopPetApplication:
             )
             if candidate is not None:
                 if candidate.kind == "transformation":
-                    accepted = self.trigger_transformation(
-                        candidate.key, manual=False
-                    )
+                    self.trigger_transformation(candidate.key, manual=False)
                 else:
-                    accepted = self.trigger_sequence(candidate.key, manual=False)
-                if accepted:
-                    self.v4_autoplay.record_started(
-                        candidate, now_ms, automatic=True
-                    )
+                    self.trigger_sequence(candidate.key, manual=False)
                 self._schedule_autonomous()
                 return
+            if bucket_deadline is not None and bucket_deadline <= now_ms:
+                self.v4_autoplay.defer(now_ms)
         if now_ms < self._autonomous_not_before_ms:
             self._schedule_autonomous()
             return
