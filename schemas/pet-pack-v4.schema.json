@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Legender134/desktop-companion/main/schemas/pet-pack-v4.schema.json",
+  "title": "Desktop Companion v4 pet-pack manifest",
+  "type": "object",
+  "required": ["id", "displayName", "spriteVersionNumber", "defaultForm", "atlases", "actions", "forms"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"$ref": "#/$defs/id"},
+    "displayName": {"$ref": "#/$defs/label"},
+    "description": {"type": "string", "maxLength": 500, "pattern": "^[^\\u0000-\\u001F\\u007F]*$"},
+    "spriteVersionNumber": {"const": 4},
+    "defaultForm": {"$ref": "#/$defs/id"},
+    "iconFrame": {"$ref": "#/$defs/iconFrame"},
+    "atlases": {"$ref": "#/$defs/atlases"},
+    "cooldownGroups": {"$ref": "#/$defs/cooldownGroups"},
+    "actions": {"$ref": "#/$defs/actions", "maxProperties": 128},
+    "forms": {"$ref": "#/$defs/forms", "maxProperties": 16},
+    "transformations": {"$ref": "#/$defs/transformations", "maxProperties": 32},
+    "sequences": {"$ref": "#/$defs/sequences", "maxProperties": 16}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][A-Za-z0-9]{0,63}$"},
+    "label": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[^\\u0000-\\u001F\\u007F]+$"},
+    "path": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.webp$"},
+    "iconFrame": {
+      "type": "object", "required": ["atlas", "row", "column"], "additionalProperties": false,
+      "properties": {"atlas": {"$ref": "#/$defs/id"}, "row": {"type": "integer", "minimum": 0}, "column": {"type": "integer", "minimum": 0}}
+    },
+    "atlas": {
+      "type": "object", "required": ["path", "cellWidth", "cellHeight"], "additionalProperties": false,
+      "properties": {"path": {"$ref": "#/$defs/path"}, "cellWidth": {"type": "integer", "minimum": 1}, "cellHeight": {"type": "integer", "minimum": 1}}
+    },
+    "atlases": {
+      "type": "object", "minProperties": 1, "maxProperties": 8,
+      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/atlas"}
+    },
+    "cooldownGroup": {
+      "type": "object", "required": ["cooldownMs"], "additionalProperties": false,
+      "properties": {"cooldownMs": {"type": "integer", "minimum": 0, "maximum": 1200000}}
+    },
+    "cooldownGroups": {
+      "type": "object", "maxProperties": 32,
+      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/cooldownGroup"}
+    },
+    "layer": {
+      "type": "object", "required": ["atlas", "row", "startColumn", "anchorX", "anchorY"], "additionalProperties": false,
+      "properties": {
+        "atlas": {"$ref": "#/$defs/id"}, "row": {"type": "integer", "minimum": 0}, "startColumn": {"type": "integer", "minimum": 0},
+        "anchorX": {"type": "integer", "minimum": 0}, "anchorY": {"type": "integer", "minimum": 0},
+        "offsetX": {"type": "integer", "minimum": -100000, "maximum": 100000}, "offsetY": {"type": "integer", "minimum": -100000, "maximum": 100000},
+        "scalePercent": {"type": "integer", "minimum": 1, "maximum": 1000}, "opacityPercent": {"type": "integer", "minimum": 0, "maximum": 100},
+        "hitTest": {"type": "boolean"}, "optionalInSimplified": {"type": "boolean"},
+        "frameMap": {"type": ["array", "null"], "minItems": 1, "maxItems": 512, "items": {"type": ["integer", "null"], "minimum": 0}}
+      }
+    },
+    "action": {
+      "type": "object", "required": ["label", "role", "frameCount", "layers"], "additionalProperties": false,
+      "properties": {
+        "label": {"$ref": "#/$defs/label"}, "role": {"enum": ["idle", "move", "interaction", "burstMove", "gaze"]}, "direction": {"enum": ["left", "right"]},
+        "showInMenu": {"type": "boolean"}, "includeInShowcase": {"type": "boolean"}, "autoplayWeight": {"type": "integer", "minimum": 0, "maximum": 100},
+        "cooldownMs": {"type": "integer", "minimum": 0, "maximum": 1200000}, "autoplayGroup": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/id"}]},
+        "minDistance": {"type": "integer", "minimum": 0, "maximum": 10000}, "travelDistanceRatio": {"type": "number", "minimum": 0.05, "maximum": 1}, "maxVerticalRatio": {"type": "number", "minimum": 0, "maximum": 1},
+        "mirrorOf": {"$ref": "#/$defs/id"}, "frameCount": {"type": "integer", "minimum": 1, "maximum": 512},
+        "frameMs": {"type": "integer", "minimum": 33, "maximum": 2000}, "frameDurations": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"type": "integer", "minimum": 33, "maximum": 2000}},
+        "loop": {"type": "boolean"}, "repeatCount": {"type": "integer", "minimum": 1, "maximum": 20}, "holdMs": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "travelStartFrame": {"type": "integer", "minimum": 0, "maximum": 511}, "travelEndFrame": {"type": "integer", "minimum": 1, "maximum": 511},
+        "layers": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/layer"}}
+      },
+      "oneOf": [{"required": ["frameMs"], "not": {"required": ["frameDurations"]}}, {"required": ["frameDurations"], "not": {"required": ["frameMs"]}}]
+    },
+    "actions": {
+      "type": "object", "minProperties": 1, "maxProperties": 128,
+      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/action"}
+    },
+    "form": {
+      "type": "object", "required": ["label", "idleAction", "moveRightAction", "moveLeftAction", "representativeAction", "interactionActions"], "additionalProperties": false,
+      "properties": {
+        "label": {"$ref": "#/$defs/label"}, "idleAction": {"$ref": "#/$defs/id"}, "moveRightAction": {"$ref": "#/$defs/id"}, "moveLeftAction": {"$ref": "#/$defs/id"}, "gazeAction": {"$ref": "#/$defs/id"}, "representativeAction": {"$ref": "#/$defs/id"},
+        "interactionActions": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "forms": {
+      "type": "object", "minProperties": 1, "maxProperties": 16,
+      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/form"}
+    },
+    "autoplay": {
+      "type": "object", "required": ["bucket", "weight", "minDelayMs", "maxDelayMs", "cooldownGroups"], "additionalProperties": false,
+      "properties": {"bucket": {"$ref": "#/$defs/id"}, "weight": {"type": "integer", "minimum": 1, "maximum": 100}, "minDelayMs": {"type": "integer", "minimum": 0, "maximum": 1200000}, "maxDelayMs": {"type": "integer", "minimum": 0, "maximum": 1200000}, "cooldownGroups": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/id"}}}
+    },
+    "stateChoice": {
+      "type": "object", "required": ["action", "weight"], "additionalProperties": false,
+      "properties": {"action": {"$ref": "#/$defs/id"}, "weight": {"type": "integer", "minimum": 1, "maximum": 100}}
+    },
+    "transformation": {
+      "type": "object", "required": ["label", "fromForm", "toForm", "enterAction", "residentActions", "exitAction", "minDurationMs", "maxDurationMs", "showInMenu"], "additionalProperties": false,
+      "properties": {
+        "label": {"$ref": "#/$defs/label"}, "fromForm": {"$ref": "#/$defs/id"}, "toForm": {"$ref": "#/$defs/id"}, "enterAction": {"$ref": "#/$defs/id"}, "residentActions": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/stateChoice"}}, "exitAction": {"$ref": "#/$defs/id"},
+        "minDurationMs": {"type": "integer", "minimum": 0, "maximum": 1200000}, "maxDurationMs": {"type": "integer", "minimum": 0, "maximum": 1200000}, "showInMenu": {"type": "boolean"}, "autoplay": {"$ref": "#/$defs/autoplay"}
+      }
+    },
+    "transformations": {
+      "type": "object", "maxProperties": 32,
+      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/transformation"}
+    },
+    "sequenceStep": {
+      "type": "object", "required": ["action", "repeatCount", "holdMs", "safeStopAfter"], "additionalProperties": false,
+      "properties": {"action": {"$ref": "#/$defs/id"}, "repeatCount": {"type": "integer", "minimum": 1, "maximum": 20}, "holdMs": {"type": "integer", "minimum": 0, "maximum": 10000}, "formAfter": {"$ref": "#/$defs/id"}, "safeStopAfter": {"type": "boolean"}}
+    },
+    "sequence": {
+      "type": "object", "required": ["label", "showInMenu", "steps"], "additionalProperties": false,
+      "properties": {"label": {"$ref": "#/$defs/label"}, "showInMenu": {"type": "boolean"}, "steps": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/sequenceStep"}}, "autoplay": {"$ref": "#/$defs/autoplay"}}
+    },
+    "sequences": {
+      "type": "object", "maxProperties": 16,
+      "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/sequence"}
+    }
+  }
+}

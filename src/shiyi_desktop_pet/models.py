@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
+from PySide6.QtCore import QPoint, QRect
 from PySide6.QtGui import QImage
 
 
@@ -31,6 +33,30 @@ ActionKey = ActionId | str
 
 
 @dataclass(frozen=True)
+class PetAtlasDefinition:
+    key: str
+    path: Path
+    cell_width: int
+    cell_height: int
+
+
+@dataclass(frozen=True)
+class PetActionLayerDefinition:
+    atlas_id: str
+    row: int
+    start_column: int
+    anchor_x: int
+    anchor_y: int
+    offset_x: int = 0
+    offset_y: int = 0
+    scale_percent: int = 100
+    opacity_percent: int = 100
+    hit_test: bool = False
+    optional_in_simplified: bool = False
+    frame_map: tuple[int | None, ...] | None = None
+
+
+@dataclass(frozen=True)
 class PetActionDefinition:
     """Pet-specific presentation and behavior for one atlas animation."""
 
@@ -51,6 +77,67 @@ class PetActionDefinition:
     travel_distance_ratio: float | None = None
     max_vertical_ratio: float | None = None
     mirror_of: ActionKey | None = None
+    layers: tuple[PetActionLayerDefinition, ...] = ()
+
+
+@dataclass(frozen=True)
+class PetFormDefinition:
+    key: str
+    label: str
+    idle_action: ActionKey
+    move_right_action: ActionKey
+    move_left_action: ActionKey
+    gaze_action: ActionKey | None
+    representative_action: ActionKey
+    interaction_actions: tuple[ActionKey, ...]
+
+
+@dataclass(frozen=True)
+class PetAutoplayDefinition:
+    bucket: str
+    weight: int
+    min_delay_ms: int
+    max_delay_ms: int
+    cooldown_groups: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PetTransformationDefinition:
+    key: str
+    label: str
+    from_form: str
+    to_form: str
+    enter_action: ActionKey
+    resident_actions: tuple["PetStateActionChoice", ...]
+    exit_action: ActionKey
+    min_duration_ms: int
+    max_duration_ms: int
+    show_in_menu: bool
+    autoplay: PetAutoplayDefinition | None = None
+
+
+@dataclass(frozen=True)
+class PetCooldownGroupDefinition:
+    key: str
+    cooldown_ms: int
+
+
+@dataclass(frozen=True)
+class PetSequenceStep:
+    action_id: ActionKey
+    repeat_count: int
+    hold_ms: int
+    form_after: str | None
+    safe_stop_after: bool
+
+
+@dataclass(frozen=True)
+class PetSequenceDefinition:
+    key: str
+    label: str
+    show_in_menu: bool
+    steps: tuple[PetSequenceStep, ...]
+    autoplay: PetAutoplayDefinition | None = None
 
 
 @dataclass(frozen=True)
@@ -117,3 +204,12 @@ class FrameAsset:
     row: int
     column: int
     variant: str = ""
+
+
+@dataclass(frozen=True)
+class RenderedFrame:
+    image: QImage
+    body_image: QImage
+    body_rect: QRect
+    anchor: QPoint
+    identity: tuple[object, ...]

@@ -6,7 +6,19 @@ import pytest
 from PySide6.QtGui import QColor, QImage
 
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
-from shiyi_desktop_pet.models import ActionId, ActionRole
+from shiyi_desktop_pet.models import (
+    ActionId,
+    ActionRole,
+    PetActionDefinition,
+    PetActionLayerDefinition,
+    PetAtlasDefinition,
+    PetAutoplayDefinition,
+    PetCooldownGroupDefinition,
+    PetFormDefinition,
+    PetSequenceDefinition,
+    PetSequenceStep,
+    PetTransformationDefinition,
+)
 from shiyi_desktop_pet.pet_registry import PetRegistry
 from shiyi_desktop_pet.resource_locator import resource_root
 
@@ -45,6 +57,53 @@ def _write_pack(
     if spritesheet_path == "spritesheet.webp":
         (directory / spritesheet_path).write_bytes(sprite_bytes)
     return directory
+
+
+def test_v4_schema_declares_fixed_limits_and_required_sections():
+    schema = json.loads(
+        (Path(__file__).parents[1] / "schemas" / "pet-pack-v4.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert schema["properties"]["spriteVersionNumber"]["const"] == 4
+    assert schema["properties"]["actions"]["maxProperties"] == 128
+    assert schema["properties"]["forms"]["maxProperties"] == 16
+    assert schema["properties"]["transformations"]["maxProperties"] == 32
+    assert schema["properties"]["sequences"]["maxProperties"] == 16
+    assert set(schema["required"]) >= {
+        "id",
+        "displayName",
+        "spriteVersionNumber",
+        "defaultForm",
+        "atlases",
+        "actions",
+        "forms",
+    }
+
+
+def test_v4_domain_models_are_immutable_and_use_tuple_collections():
+    layer = PetActionLayerDefinition("character", 0, 0, 96, 200, hit_test=True)
+    action = PetActionDefinition("idle", "idle", "Idle", 0, layers=(layer,))
+    atlas = PetAtlasDefinition("character", Path("character.webp"), 192, 208)
+    form = PetFormDefinition(
+        "defaultHuman", "Default", "idle", "moveRight", "moveLeft", None, "idle", ("idle",)
+    )
+    autoplay = PetAutoplayDefinition("common", 1, 1000, 2000, ("global",))
+    transformation = PetTransformationDefinition(
+        "change", "Change", "defaultHuman", "animal", "enter", (), "exit", 1000, 2000, True, autoplay
+    )
+    cooldown = PetCooldownGroupDefinition("global", 1000)
+    step = PetSequenceStep("idle", 1, 0, "defaultHuman", True)
+    sequence = PetSequenceDefinition("spell", "Spell", True, (step,), autoplay)
+
+    assert action.layers == (layer,)
+    assert atlas.path == Path("character.webp")
+    assert form.interaction_actions == ("idle",)
+    assert transformation.autoplay is autoplay
+    assert cooldown.cooldown_ms == 1000
+    assert sequence.steps == (step,)
+    with pytest.raises(AttributeError):
+        layer.hit_test = False
 
 
 def test_registry_discovers_bundled_and_user_pets_and_creates_user_root(tmp_path: Path):
