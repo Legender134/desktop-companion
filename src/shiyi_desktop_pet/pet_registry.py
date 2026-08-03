@@ -1,4 +1,4 @@
-"""Discover safe data-only desktop-pet packs in legacy v2 or dynamic v3 form."""
+"""Discover safe data-only desktop-pet packs in v2, v3, or layered v4 form."""
 
 from __future__ import annotations
 
@@ -14,8 +14,16 @@ from .models import (
     ActionRole,
     AnimationSpec,
     PetActionDefinition,
+    PetActionLayerDefinition,
+    PetAtlasDefinition,
+    PetAutoplayDefinition,
+    PetCooldownGroupDefinition,
+    PetFormDefinition,
+    PetSequenceDefinition,
+    PetSequenceStep,
     PetStateActionChoice,
     PetStateDefinition,
+    PetTransformationDefinition,
 )
 
 
@@ -23,6 +31,8 @@ _PET_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _ACTION_KEY = re.compile(r"^[a-z][a-zA-Z0-9_-]{0,63}$")
 _AUTOPLAY_GROUP = re.compile(r"^[a-z][a-zA-Z0-9_-]{0,31}$")
 _STATE_KEY = re.compile(r"^[a-z][a-zA-Z0-9_-]{0,63}$")
+_V4_KEY = re.compile(r"^[a-z][A-Za-z0-9]{0,63}$")
+_V4_ATLAS_PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.webp$")
 _MANIFEST_NAME = "pet.json"
 _SPRITESHEET_NAME = "spritesheet.webp"
 _MAX_MANIFEST_BYTES = 64 * 1024
@@ -41,6 +51,12 @@ class PetDefinition:
     actions: tuple[PetActionDefinition, ...]
     states: tuple[PetStateDefinition, ...] = ()
     sprite_version: int = 2
+    atlases: tuple[PetAtlasDefinition, ...] = ()
+    forms: tuple[PetFormDefinition, ...] = ()
+    default_form: str = ""
+    transformations: tuple[PetTransformationDefinition, ...] = ()
+    cooldown_groups: tuple[PetCooldownGroupDefinition, ...] = ()
+    sequences: tuple[PetSequenceDefinition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,62 +188,154 @@ class PetRegistry:
         if directory.name != pet_id:
             raise ValueError("pet id must match its directory name")
 
+        sprite_version = manifest.get("spriteVersionNumber")
         display_name = manifest.get("displayName")
         if not isinstance(display_name, str) or not display_name.strip():
             raise ValueError("displayName is required")
         display_name = display_name.strip()
-        if len(display_name) > 64:
+        display_name_limit = 80 if sprite_version == 4 else 64
+        if len(display_name) > display_name_limit or (
+            sprite_version == 4
+            and any(
+                ord(character) < 32 or 127 <= ord(character) <= 159
+                for character in display_name
+            )
+        ):
             raise ValueError("displayName is too long")
 
         description = manifest.get("description", "")
         if not isinstance(description, str) or len(description) > 500:
             raise ValueError("description must be text with at most 500 characters")
+        if sprite_version == 4 and any(
+            ord(character) < 32 or ord(character) == 127
+            for character in description
+        ):
+            raise ValueError("description contains control characters")
 
-        sprite_version = manifest.get("spriteVersionNumber")
-        if sprite_version not in {2, 3}:
-            raise ValueError("unsupported sprite version; expected 2 or 3")
-        if manifest.get("spritesheetPath") != _SPRITESHEET_NAME:
+        if sprite_version not in {2, 3, 4}:
+            raise ValueError("unsupported sprite version; expected 2, 3, or 4")
+        if sprite_version == 4:
+            allowed_v4_fields = {
+                "id",
+                "displayName",
+                "description",
+                "spriteVersionNumber",
+                "defaultForm",
+                "iconFrame",
+                "atlases",
+                "cooldownGroups",
+                "actions",
+                "forms",
+                "transformations",
+                "sequences",
+            }
+            unknown = set(manifest) - allowed_v4_fields
+            if unknown:
+                raise ValueError(
+                    f"v4 manifest contains unknown fields: {', '.join(sorted(unknown))}"
+                )
+            if "spritesheetPath" in manifest:
+                raise ValueError("spritesheetPath is not supported by sprite version 4")
+        elif manifest.get("spritesheetPath") != _SPRITESHEET_NAME:
             raise ValueError("spritesheetPath must be spritesheet.webp")
 
-        icon_frame = manifest.get("iconFrame", {"row": 0, "column": 0})
-        if not isinstance(icon_frame, dict) or set(icon_frame) != {"row", "column"}:
-            raise ValueError("iconFrame must contain row and column")
+        if sprite_version == 4:
+            raw_atlases = manifest.get("atlases")
+            first_atlas = next(iter(raw_atlases), "") if isinstance(raw_atlases, dict) else ""
+            default_icon_frame = {"atlas": first_atlas, "row": 0, "column": 0}
+        else:
+            default_icon_frame = {"row": 0, "column": 0}
+        icon_frame = manifest.get("iconFrame", default_icon_frame)
+        expected_icon_fields = (
+            {"atlas", "row", "column"}
+            if sprite_version == 4
+            else {"row", "column"}
+        )
+        if not isinstance(icon_frame, dict) or set(icon_frame) != expected_icon_fields:
+            raise ValueError(
+                "iconFrame must contain atlas, row, and column"
+                if sprite_version == 4
+                else "iconFrame must contain row and column"
+            )
         icon_row = icon_frame["row"]
         icon_column = icon_frame["column"]
-        row_limit = 10 if sprite_version == 2 else 127
-        column_limit = 7 if sprite_version == 2 else 63
-        if (
-            not isinstance(icon_row, int)
-            or isinstance(icon_row, bool)
-            or not 0 <= icon_row <= row_limit
-            or not isinstance(icon_column, int)
-            or isinstance(icon_column, bool)
-            or not 0 <= icon_column <= column_limit
-        ):
-            raise ValueError("iconFrame is outside the supported atlas grid")
+        if sprite_version == 4:
+            if not PetRegistry._is_int_between(icon_row, 0, 2**31 - 1) or not PetRegistry._is_int_between(
+                icon_column, 0, 2**31 - 1
+            ):
+                raise ValueError("iconFrame is outside the supported atlas grid")
+        else:
+            row_limit = 10 if sprite_version == 2 else 127
+            column_limit = 7 if sprite_version == 2 else 63
+            if (
+                not isinstance(icon_row, int)
+                or isinstance(icon_row, bool)
+                or not 0 <= icon_row <= row_limit
+                or not isinstance(icon_column, int)
+                or isinstance(icon_column, bool)
+                or not 0 <= icon_column <= column_limit
+            ):
+                raise ValueError("iconFrame is outside the supported atlas grid")
 
-        actions = (
-            PetRegistry._parse_actions(manifest.get("actions"))
-            if sprite_version == 2
-            else PetRegistry._parse_v3_actions(manifest.get("actions"))
-        )
         if sprite_version == 2:
+            actions = PetRegistry._parse_actions(manifest.get("actions"))
             if "states" in manifest:
                 raise ValueError("states are only supported by sprite version 3")
             states: tuple[PetStateDefinition, ...] = ()
-        else:
+            atlases: tuple[PetAtlasDefinition, ...] = ()
+            forms: tuple[PetFormDefinition, ...] = ()
+            default_form = ""
+            transformations: tuple[PetTransformationDefinition, ...] = ()
+            cooldown_groups: tuple[PetCooldownGroupDefinition, ...] = ()
+            sequences: tuple[PetSequenceDefinition, ...] = ()
+        elif sprite_version == 3:
+            actions = PetRegistry._parse_v3_actions(manifest.get("actions"))
             states = PetRegistry._parse_v3_states(
                 manifest.get("states"), actions
             )
+            atlases = ()
+            forms = ()
+            default_form = ""
+            transformations = ()
+            cooldown_groups = ()
+            sequences = ()
+        else:
+            if "states" in manifest:
+                raise ValueError("states are only supported by sprite version 3")
+            atlases = PetRegistry._parse_v4_atlases(manifest.get("atlases"), directory)
+            actions = PetRegistry._parse_v4_actions(manifest.get("actions"))
+            forms = PetRegistry._parse_v4_forms(manifest.get("forms"))
+            default_form = manifest.get("defaultForm")
+            transformations = PetRegistry._parse_v4_transformations(
+                manifest.get("transformations")
+            )
+            cooldown_groups = PetRegistry._parse_v4_cooldown_groups(
+                manifest.get("cooldownGroups")
+            )
+            sequences = PetRegistry._parse_v4_sequences(manifest.get("sequences"))
+            PetRegistry._validate_v4_references(
+                atlases,
+                actions,
+                forms,
+                default_form,
+                transformations,
+                cooldown_groups,
+                sequences,
+                icon_frame["atlas"],
+            )
+            states = ()
 
-        spritesheet_path = directory / _SPRITESHEET_NAME
-        if not spritesheet_path.is_file():
-            raise ValueError("spritesheet.webp is missing")
-        if spritesheet_path.is_symlink():
-            raise ValueError("spritesheet.webp cannot be a link")
-        sprite_size = spritesheet_path.stat().st_size
-        if sprite_size <= 0 or sprite_size > _MAX_SPRITESHEET_BYTES:
-            raise ValueError("spritesheet.webp has an invalid file size")
+        if sprite_version == 4:
+            spritesheet_path = atlases[0].path
+        else:
+            spritesheet_path = directory / _SPRITESHEET_NAME
+            if not spritesheet_path.is_file():
+                raise ValueError("spritesheet.webp is missing")
+            if spritesheet_path.is_symlink():
+                raise ValueError("spritesheet.webp cannot be a link")
+            sprite_size = spritesheet_path.stat().st_size
+            if sprite_size <= 0 or sprite_size > _MAX_SPRITESHEET_BYTES:
+                raise ValueError("spritesheet.webp has an invalid file size")
 
         return PetDefinition(
             pet_id=pet_id,
@@ -240,7 +348,800 @@ class PetRegistry:
             actions=actions,
             states=states,
             sprite_version=sprite_version,
+            atlases=atlases,
+            forms=forms,
+            default_form=default_form,
+            transformations=transformations,
+            cooldown_groups=cooldown_groups,
+            sequences=sequences,
         )
+
+    @staticmethod
+    def _parse_v4_atlases(
+        value: object, directory: Path
+    ) -> tuple[PetAtlasDefinition, ...]:
+        if not isinstance(value, dict) or not 1 <= len(value) <= 8:
+            raise ValueError("v4 atlases must contain 1 through 8 named atlases")
+        PetRegistry._validate_v4_keys(value, "atlas")
+
+        definitions: list[PetAtlasDefinition] = []
+        paths: set[str] = set()
+        encoded_bytes = 0
+        for key, raw_entry in value.items():
+            if not isinstance(raw_entry, dict) or set(raw_entry) != {
+                "path",
+                "cellWidth",
+                "cellHeight",
+            }:
+                raise ValueError(
+                    f"atlases.{key} must contain path, cellWidth, and cellHeight"
+                )
+            path_value = raw_entry["path"]
+            if (
+                not isinstance(path_value, str)
+                or _V4_ATLAS_PATH.fullmatch(path_value) is None
+                or Path(path_value).name != path_value
+            ):
+                raise ValueError(f"atlases.{key}.path must be a bare WebP filename")
+            if path_value in paths:
+                raise ValueError("v4 atlases must use distinct files")
+            cell_width = raw_entry["cellWidth"]
+            cell_height = raw_entry["cellHeight"]
+            if not PetRegistry._is_int_between(cell_width, 1, 2**31 - 1):
+                raise ValueError(f"atlases.{key}.cellWidth must be a positive integer")
+            if not PetRegistry._is_int_between(cell_height, 1, 2**31 - 1):
+                raise ValueError(f"atlases.{key}.cellHeight must be a positive integer")
+
+            path = directory / path_value
+            if not path.is_file():
+                raise ValueError(f"atlases.{key} atlas file is missing")
+            if path.is_symlink():
+                raise ValueError(f"atlases.{key} atlas file cannot be a link")
+            size = path.stat().st_size
+            if size <= 0:
+                raise ValueError(f"atlases.{key} atlas file is empty")
+            encoded_bytes += size
+            if encoded_bytes > _MAX_SPRITESHEET_BYTES:
+                raise ValueError("v4 encoded atlas files may total at most 32 MiB")
+            paths.add(path_value)
+            definitions.append(
+                PetAtlasDefinition(key, path, cell_width, cell_height)
+            )
+        return tuple(definitions)
+
+    @staticmethod
+    def _parse_v4_actions(value: object) -> tuple[PetActionDefinition, ...]:
+        if not isinstance(value, dict) or not 1 <= len(value) <= 128:
+            raise ValueError("v4 actions must contain 1 through 128 named actions")
+        PetRegistry._validate_v4_keys(value, "action")
+        definitions: list[PetActionDefinition] = []
+        allowed = {
+            "label",
+            "role",
+            "direction",
+            "showInMenu",
+            "includeInShowcase",
+            "autoplayWeight",
+            "cooldownMs",
+            "autoplayGroup",
+            "minDistance",
+            "travelDistanceRatio",
+            "maxVerticalRatio",
+            "mirrorOf",
+            "frameCount",
+            "frameMs",
+            "frameDurations",
+            "loop",
+            "repeatCount",
+            "holdMs",
+            "travelStartFrame",
+            "travelEndFrame",
+            "layers",
+        }
+        for key, raw_entry in value.items():
+            if not isinstance(raw_entry, dict):
+                raise ValueError(f"actions.{key} must contain an object")
+            unknown = set(raw_entry) - allowed
+            if unknown:
+                raise ValueError(
+                    f"actions.{key} contains unknown fields: {', '.join(sorted(unknown))}"
+                )
+            if not {"label", "role", "frameCount", "layers"} <= set(raw_entry):
+                raise ValueError(f"actions.{key} is missing required v4 fields")
+
+            label = PetRegistry._parse_v4_label(raw_entry["label"], f"actions.{key}.label")
+            try:
+                role = ActionRole(raw_entry["role"])
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"actions.{key}.role is unsupported") from error
+            direction_value = raw_entry.get("direction")
+            if role in {ActionRole.MOVE, ActionRole.BURST_MOVE}:
+                if direction_value not in {"left", "right"}:
+                    raise ValueError(f"actions.{key}.direction must be left or right")
+                direction = -1 if direction_value == "left" else 1
+            else:
+                if direction_value is not None:
+                    raise ValueError(
+                        f"actions.{key}.direction is only valid for movement"
+                    )
+                direction = 0
+
+            frame_count = raw_entry["frameCount"]
+            if not PetRegistry._is_int_between(frame_count, 1, 512):
+                raise ValueError(f"actions.{key}.frameCount must be 1 through 512")
+            frame_ms = raw_entry.get("frameMs")
+            durations_value = raw_entry.get("frameDurations")
+            if (frame_ms is None) == (durations_value is None):
+                raise ValueError(
+                    f"actions.{key} must contain exactly one of frameMs or frameDurations"
+                )
+            durations: tuple[int, ...] | None = None
+            if frame_ms is not None:
+                if not PetRegistry._is_int_between(frame_ms, 33, 2_000):
+                    raise ValueError(f"actions.{key}.frameMs must be 33 through 2000")
+            else:
+                if (
+                    not isinstance(durations_value, list)
+                    or len(durations_value) != frame_count
+                    or any(
+                        not PetRegistry._is_int_between(item, 33, 2_000)
+                        for item in durations_value
+                    )
+                ):
+                    raise ValueError(
+                        f"actions.{key}.frameDurations must match frameCount with values 33 through 2000"
+                    )
+                durations = tuple(durations_value)
+                frame_ms = durations[0]
+
+            loop = raw_entry.get("loop", role is ActionRole.IDLE)
+            if not isinstance(loop, bool):
+                raise ValueError(f"actions.{key}.loop must be boolean")
+            repeat_count = raw_entry.get("repeatCount", 1)
+            if not PetRegistry._is_int_between(repeat_count, 1, 20):
+                raise ValueError(f"actions.{key}.repeatCount must be 1 through 20")
+            if loop and "repeatCount" in raw_entry:
+                raise ValueError(f"actions.{key}.repeatCount cannot be used with loop")
+            hold_ms = raw_entry.get("holdMs", 0)
+            if not PetRegistry._is_int_between(hold_ms, 0, 10_000):
+                raise ValueError(f"actions.{key}.holdMs must be 0 through 10000")
+            if role is ActionRole.IDLE and not loop:
+                raise ValueError(f"actions.{key} idle action must loop")
+            if role in {ActionRole.INTERACTION, ActionRole.BURST_MOVE} and loop:
+                raise ValueError(f"actions.{key} finite action cannot loop forever")
+            if role is ActionRole.BURST_MOVE and repeat_count != 1:
+                raise ValueError(f"actions.{key} burstMove repeatCount must be 1")
+            if role is ActionRole.GAZE and frame_count not in {16, 32, 64}:
+                raise ValueError(
+                    f"actions.{key} gaze action must contain 16, 32, or 64 frames"
+                )
+
+            weight = raw_entry.get("autoplayWeight", 10 if role is ActionRole.MOVE else 0)
+            if not PetRegistry._is_int_between(weight, 0, 100):
+                raise ValueError(f"actions.{key}.autoplayWeight must be 0 through 100")
+            if role in {ActionRole.IDLE, ActionRole.GAZE} and weight:
+                raise ValueError(f"actions.{key}.autoplayWeight must be 0 for its role")
+            show = raw_entry.get("showInMenu", role is not ActionRole.GAZE)
+            include = raw_entry.get("includeInShowcase", True)
+            if not isinstance(show, bool):
+                raise ValueError(f"actions.{key}.showInMenu must be boolean")
+            if not isinstance(include, bool):
+                raise ValueError(f"actions.{key}.includeInShowcase must be boolean")
+            cooldown = raw_entry.get("cooldownMs", 0)
+            if not PetRegistry._is_int_between(cooldown, 0, 1_200_000):
+                raise ValueError(f"actions.{key}.cooldownMs must be 0 through 1200000")
+            autoplay_group = raw_entry.get("autoplayGroup", "")
+            if not isinstance(autoplay_group, str) or (
+                autoplay_group and _V4_KEY.fullmatch(autoplay_group) is None
+            ):
+                raise ValueError(f"actions.{key}.autoplayGroup must be empty or a safe id")
+            if role is not ActionRole.INTERACTION and autoplay_group:
+                raise ValueError(
+                    f"actions.{key}.autoplayGroup is only valid for interaction actions"
+                )
+            min_distance = raw_entry.get("minDistance", 0)
+            if not PetRegistry._is_int_between(min_distance, 0, 10_000):
+                raise ValueError(f"actions.{key}.minDistance must be 0 through 10000")
+            if role is not ActionRole.BURST_MOVE and min_distance:
+                raise ValueError(f"actions.{key}.minDistance is only valid for burstMove")
+            travel_ratio = raw_entry.get("travelDistanceRatio")
+            vertical_ratio = raw_entry.get("maxVerticalRatio")
+            if travel_ratio is not None and not PetRegistry._is_number_between(
+                travel_ratio, 0.05, 1.0
+            ):
+                raise ValueError(
+                    f"actions.{key}.travelDistanceRatio must be 0.05 through 1"
+                )
+            if vertical_ratio is not None and not PetRegistry._is_number_between(
+                vertical_ratio, 0.0, 1.0
+            ):
+                raise ValueError(f"actions.{key}.maxVerticalRatio must be 0 through 1")
+            if role is not ActionRole.BURST_MOVE and (
+                travel_ratio is not None or vertical_ratio is not None
+            ):
+                raise ValueError(f"actions.{key} travel ratios require burstMove")
+
+            travel_start: int | None = None
+            travel_end: int | None = None
+            if role is ActionRole.BURST_MOVE:
+                if frame_count < 3:
+                    raise ValueError(f"actions.{key} burstMove must contain at least 3 frames")
+                travel_start = raw_entry.get("travelStartFrame", max(1, frame_count // 3))
+                travel_end = raw_entry.get(
+                    "travelEndFrame",
+                    min(frame_count - 1, max(travel_start + 1, frame_count * 2 // 3))
+                    if isinstance(travel_start, int) and not isinstance(travel_start, bool)
+                    else None,
+                )
+                if not PetRegistry._is_int_between(travel_start, 0, frame_count - 2) or not PetRegistry._is_int_between(
+                    travel_end, travel_start + 1 if isinstance(travel_start, int) else 1, frame_count - 1
+                ):
+                    raise ValueError(
+                        f"actions.{key} travel frames must satisfy 0 <= start < end < frameCount"
+                    )
+            elif "travelStartFrame" in raw_entry or "travelEndFrame" in raw_entry:
+                raise ValueError(f"actions.{key} travel frames require burstMove")
+
+            layers_value = raw_entry["layers"]
+            if not isinstance(layers_value, list) or not 1 <= len(layers_value) <= 8:
+                raise ValueError(f"actions.{key}.layers must contain 1 through 8 layers")
+            layers: list[PetActionLayerDefinition] = []
+            for index, layer_value in enumerate(layers_value):
+                layers.append(
+                    PetRegistry._parse_v4_layer(key, index, layer_value, frame_count)
+                )
+            if sum(layer.hit_test for layer in layers) != 1:
+                raise ValueError(f"actions.{key} must contain exactly one hitTest layer")
+
+            mirror_of = raw_entry.get("mirrorOf")
+            if mirror_of is not None and (
+                not isinstance(mirror_of, str) or _V4_KEY.fullmatch(mirror_of) is None
+            ):
+                raise ValueError(f"actions.{key}.mirrorOf must be a safe action id")
+            definitions.append(
+                PetActionDefinition(
+                    key,
+                    key,
+                    label,
+                    weight,
+                    spec=AnimationSpec(
+                        0,
+                        frame_count,
+                        frame_ms,
+                        None if loop else repeat_count,
+                        hold_ms=hold_ms,
+                        movement=direction if role is ActionRole.MOVE else 0,
+                        frame_durations=durations,
+                    ),
+                    role=role,
+                    direction=direction,
+                    show_in_menu=show,
+                    include_in_showcase=include,
+                    cooldown_ms=cooldown,
+                    autoplay_group=autoplay_group,
+                    min_distance=min_distance,
+                    travel_start_frame=travel_start,
+                    travel_end_frame=travel_end,
+                    travel_distance_ratio=float(travel_ratio) if travel_ratio is not None else None,
+                    max_vertical_ratio=float(vertical_ratio) if vertical_ratio is not None else None,
+                    mirror_of=mirror_of,
+                    layers=tuple(layers),
+                )
+            )
+        return tuple(definitions)
+
+    @staticmethod
+    def _parse_v4_layer(
+        action_key: str, index: int, value: object, frame_count: int
+    ) -> PetActionLayerDefinition:
+        required = {"atlas", "row", "startColumn", "anchorX", "anchorY"}
+        allowed = required | {
+            "offsetX",
+            "offsetY",
+            "scalePercent",
+            "opacityPercent",
+            "hitTest",
+            "optionalInSimplified",
+            "frameMap",
+        }
+        prefix = f"actions.{action_key}.layers[{index}]"
+        if not isinstance(value, dict) or not required <= set(value) or set(value) - allowed:
+            raise ValueError(f"{prefix} does not match the documented layer fields")
+        atlas_id = value["atlas"]
+        if not isinstance(atlas_id, str) or _V4_KEY.fullmatch(atlas_id) is None:
+            raise ValueError(f"{prefix}.atlas must be a safe atlas id")
+        for name in ("row", "startColumn", "anchorX", "anchorY"):
+            if not PetRegistry._is_int_between(value[name], 0, 2**31 - 1):
+                raise ValueError(f"{prefix}.{name} must be a non-negative integer")
+        offset_x = value.get("offsetX", 0)
+        offset_y = value.get("offsetY", 0)
+        if not PetRegistry._is_int_between(offset_x, -100_000, 100_000) or not PetRegistry._is_int_between(
+            offset_y, -100_000, 100_000
+        ):
+            raise ValueError(f"{prefix} offsets must be -100000 through 100000")
+        scale = value.get("scalePercent", 100)
+        opacity = value.get("opacityPercent", 100)
+        if not PetRegistry._is_int_between(scale, 1, 1_000):
+            raise ValueError(f"{prefix}.scalePercent must be 1 through 1000")
+        if not PetRegistry._is_int_between(opacity, 0, 100):
+            raise ValueError(f"{prefix}.opacityPercent must be 0 through 100")
+        hit_test = value.get("hitTest", False)
+        optional = value.get("optionalInSimplified", False)
+        if not isinstance(hit_test, bool) or not isinstance(optional, bool):
+            raise ValueError(f"{prefix} layer flags must be boolean")
+        frame_map_value = value.get("frameMap")
+        frame_map: tuple[int | None, ...] | None = None
+        if frame_map_value is not None:
+            if not isinstance(frame_map_value, list) or len(frame_map_value) != frame_count:
+                raise ValueError(f"{prefix}.frameMap length must match frameCount")
+            if any(
+                item is not None
+                and not PetRegistry._is_int_between(item, 0, frame_count - 1)
+                for item in frame_map_value
+            ):
+                raise ValueError(f"{prefix}.frameMap references an unavailable atlas cell")
+            frame_map = tuple(frame_map_value)
+        return PetActionLayerDefinition(
+            atlas_id,
+            value["row"],
+            value["startColumn"],
+            value["anchorX"],
+            value["anchorY"],
+            offset_x=offset_x,
+            offset_y=offset_y,
+            scale_percent=scale,
+            opacity_percent=opacity,
+            hit_test=hit_test,
+            optional_in_simplified=optional,
+            frame_map=frame_map,
+        )
+
+    @staticmethod
+    def _parse_v4_forms(value: object) -> tuple[PetFormDefinition, ...]:
+        if not isinstance(value, dict) or not 1 <= len(value) <= 16:
+            raise ValueError("v4 forms must contain 1 through 16 named forms")
+        PetRegistry._validate_v4_keys(value, "form")
+        definitions: list[PetFormDefinition] = []
+        required = {
+            "label",
+            "idleAction",
+            "moveRightAction",
+            "moveLeftAction",
+            "representativeAction",
+            "interactionActions",
+        }
+        allowed = required | {"gazeAction"}
+        for key, raw_entry in value.items():
+            if (
+                not isinstance(raw_entry, dict)
+                or not required <= set(raw_entry)
+                or set(raw_entry) - allowed
+            ):
+                raise ValueError(f"forms.{key} does not match the documented form fields")
+            label = PetRegistry._parse_v4_label(raw_entry["label"], f"forms.{key}.label")
+            reference_names = (
+                "idleAction",
+                "moveRightAction",
+                "moveLeftAction",
+                "representativeAction",
+            )
+            if any(
+                not isinstance(raw_entry[name], str)
+                or _V4_KEY.fullmatch(raw_entry[name]) is None
+                for name in reference_names
+            ):
+                raise ValueError(f"forms.{key} action references must be safe ids")
+            gaze = raw_entry.get("gazeAction")
+            if gaze is not None and (
+                not isinstance(gaze, str) or _V4_KEY.fullmatch(gaze) is None
+            ):
+                raise ValueError(f"forms.{key}.gazeAction must be a safe action id")
+            interactions = raw_entry["interactionActions"]
+            if (
+                not isinstance(interactions, list)
+                or not 1 <= len(interactions) <= 128
+                or any(
+                    not isinstance(item, str) or _V4_KEY.fullmatch(item) is None
+                    for item in interactions
+                )
+                or len(set(interactions)) != len(interactions)
+            ):
+                raise ValueError(
+                    f"forms.{key}.interactionActions must contain distinct safe action ids"
+                )
+            definitions.append(
+                PetFormDefinition(
+                    key,
+                    label,
+                    raw_entry["idleAction"],
+                    raw_entry["moveRightAction"],
+                    raw_entry["moveLeftAction"],
+                    gaze,
+                    raw_entry["representativeAction"],
+                    tuple(interactions),
+                )
+            )
+        return tuple(definitions)
+
+    @staticmethod
+    def _parse_v4_transformations(
+        value: object,
+    ) -> tuple[PetTransformationDefinition, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, dict) or len(value) > 32:
+            raise ValueError("v4 transformations may contain at most 32 entries")
+        PetRegistry._validate_v4_keys(value, "transformation")
+        definitions: list[PetTransformationDefinition] = []
+        required = {
+            "label",
+            "fromForm",
+            "toForm",
+            "enterAction",
+            "residentActions",
+            "exitAction",
+            "minDurationMs",
+            "maxDurationMs",
+            "showInMenu",
+        }
+        allowed = required | {"autoplay"}
+        for key, raw_entry in value.items():
+            if (
+                not isinstance(raw_entry, dict)
+                or not required <= set(raw_entry)
+                or set(raw_entry) - allowed
+            ):
+                raise ValueError(
+                    f"transformations.{key} does not match the documented fields"
+                )
+            label = PetRegistry._parse_v4_label(
+                raw_entry["label"], f"transformations.{key}.label"
+            )
+            references = ("fromForm", "toForm", "enterAction", "exitAction")
+            if any(
+                not isinstance(raw_entry[name], str)
+                or _V4_KEY.fullmatch(raw_entry[name]) is None
+                for name in references
+            ):
+                raise ValueError(f"transformations.{key} references must be safe ids")
+            residents = PetRegistry._parse_v4_resident_actions(
+                raw_entry["residentActions"], f"transformations.{key}.residentActions"
+            )
+            minimum = raw_entry["minDurationMs"]
+            maximum = raw_entry["maxDurationMs"]
+            if not PetRegistry._is_int_between(minimum, 0, 1_200_000) or not PetRegistry._is_int_between(
+                maximum, 0, 1_200_000
+            ):
+                raise ValueError(
+                    f"transformations.{key} durations must be 0 through 1200000"
+                )
+            if minimum > maximum:
+                raise ValueError(
+                    f"transformations.{key}.minDurationMs cannot exceed maxDurationMs"
+                )
+            show = raw_entry["showInMenu"]
+            if not isinstance(show, bool):
+                raise ValueError(f"transformations.{key}.showInMenu must be boolean")
+            autoplay = PetRegistry._parse_v4_autoplay(
+                raw_entry.get("autoplay"), f"transformations.{key}.autoplay"
+            )
+            definitions.append(
+                PetTransformationDefinition(
+                    key,
+                    label,
+                    raw_entry["fromForm"],
+                    raw_entry["toForm"],
+                    raw_entry["enterAction"],
+                    residents,
+                    raw_entry["exitAction"],
+                    minimum,
+                    maximum,
+                    show,
+                    autoplay,
+                )
+            )
+        return tuple(definitions)
+
+    @staticmethod
+    def _parse_v4_cooldown_groups(
+        value: object,
+    ) -> tuple[PetCooldownGroupDefinition, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, dict) or len(value) > 32:
+            raise ValueError("v4 cooldownGroups may contain at most 32 entries")
+        PetRegistry._validate_v4_keys(value, "cooldown group")
+        definitions: list[PetCooldownGroupDefinition] = []
+        for key, raw_entry in value.items():
+            if not isinstance(raw_entry, dict) or set(raw_entry) != {"cooldownMs"}:
+                raise ValueError(f"cooldownGroups.{key} must contain cooldownMs")
+            cooldown = raw_entry["cooldownMs"]
+            if not PetRegistry._is_int_between(cooldown, 0, 1_200_000):
+                raise ValueError(
+                    f"cooldownGroups.{key}.cooldownMs must be 0 through 1200000"
+                )
+            definitions.append(PetCooldownGroupDefinition(key, cooldown))
+        return tuple(definitions)
+
+    @staticmethod
+    def _parse_v4_sequences(value: object) -> tuple[PetSequenceDefinition, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, dict) or len(value) > 16:
+            raise ValueError("v4 sequences may contain at most 16 entries")
+        PetRegistry._validate_v4_keys(value, "sequence")
+        definitions: list[PetSequenceDefinition] = []
+        for key, raw_entry in value.items():
+            required = {"label", "showInMenu", "steps"}
+            if (
+                not isinstance(raw_entry, dict)
+                or not required <= set(raw_entry)
+                or set(raw_entry) - (required | {"autoplay"})
+            ):
+                raise ValueError(f"sequences.{key} does not match the documented fields")
+            label = PetRegistry._parse_v4_label(
+                raw_entry["label"], f"sequences.{key}.label"
+            )
+            show = raw_entry["showInMenu"]
+            if not isinstance(show, bool):
+                raise ValueError(f"sequences.{key}.showInMenu must be boolean")
+            steps_value = raw_entry["steps"]
+            if not isinstance(steps_value, list) or not 1 <= len(steps_value) <= 128:
+                raise ValueError(f"sequences.{key}.steps must contain 1 through 128 steps")
+            steps: list[PetSequenceStep] = []
+            for index, step_value in enumerate(steps_value):
+                required_step = {"action", "repeatCount", "holdMs", "safeStopAfter"}
+                if (
+                    not isinstance(step_value, dict)
+                    or not required_step <= set(step_value)
+                    or set(step_value) - (required_step | {"formAfter"})
+                ):
+                    raise ValueError(
+                        f"sequences.{key}.steps[{index}] does not match the documented fields"
+                    )
+                action_id = step_value["action"]
+                form_after = step_value.get("formAfter")
+                if not isinstance(action_id, str) or _V4_KEY.fullmatch(action_id) is None:
+                    raise ValueError(f"sequences.{key}.steps[{index}].action must be a safe id")
+                if form_after is not None and (
+                    not isinstance(form_after, str)
+                    or _V4_KEY.fullmatch(form_after) is None
+                ):
+                    raise ValueError(
+                        f"sequences.{key}.steps[{index}].formAfter must be a safe id"
+                    )
+                repeat_count = step_value["repeatCount"]
+                hold_ms = step_value["holdMs"]
+                safe_stop = step_value["safeStopAfter"]
+                if not PetRegistry._is_int_between(repeat_count, 1, 20):
+                    raise ValueError(
+                        f"sequences.{key}.steps[{index}].repeatCount must be 1 through 20"
+                    )
+                if not PetRegistry._is_int_between(hold_ms, 0, 10_000):
+                    raise ValueError(
+                        f"sequences.{key}.steps[{index}].holdMs must be 0 through 10000"
+                    )
+                if not isinstance(safe_stop, bool):
+                    raise ValueError(
+                        f"sequences.{key}.steps[{index}].safeStopAfter must be boolean"
+                    )
+                steps.append(
+                    PetSequenceStep(
+                        action_id, repeat_count, hold_ms, form_after, safe_stop
+                    )
+                )
+            autoplay = PetRegistry._parse_v4_autoplay(
+                raw_entry.get("autoplay"), f"sequences.{key}.autoplay"
+            )
+            definitions.append(
+                PetSequenceDefinition(key, label, show, tuple(steps), autoplay)
+            )
+        return tuple(definitions)
+
+    @staticmethod
+    def _parse_v4_resident_actions(
+        value: object, prefix: str
+    ) -> tuple[PetStateActionChoice, ...]:
+        if not isinstance(value, list) or not 1 <= len(value) <= 128:
+            raise ValueError(f"{prefix} must contain 1 through 128 choices")
+        choices: list[PetStateActionChoice] = []
+        seen: set[str] = set()
+        for index, raw_choice in enumerate(value):
+            if not isinstance(raw_choice, dict) or set(raw_choice) != {"action", "weight"}:
+                raise ValueError(f"{prefix}[{index}] must contain action and weight")
+            action_id = raw_choice["action"]
+            weight = raw_choice["weight"]
+            if not isinstance(action_id, str) or _V4_KEY.fullmatch(action_id) is None:
+                raise ValueError(f"{prefix}[{index}].action must be a safe id")
+            if action_id in seen:
+                raise ValueError(f"{prefix} cannot repeat an action")
+            if not PetRegistry._is_int_between(weight, 1, 100):
+                raise ValueError(f"{prefix}[{index}].weight must be 1 through 100")
+            seen.add(action_id)
+            choices.append(PetStateActionChoice(action_id, weight))
+        return tuple(choices)
+
+    @staticmethod
+    def _parse_v4_autoplay(
+        value: object, prefix: str
+    ) -> PetAutoplayDefinition | None:
+        if value is None:
+            return None
+        required = {"bucket", "weight", "minDelayMs", "maxDelayMs", "cooldownGroups"}
+        if not isinstance(value, dict) or set(value) != required:
+            raise ValueError(f"{prefix} must contain the documented autoplay fields")
+        bucket = value["bucket"]
+        if not isinstance(bucket, str) or _V4_KEY.fullmatch(bucket) is None:
+            raise ValueError(f"{prefix}.bucket must be a safe id")
+        weight = value["weight"]
+        minimum = value["minDelayMs"]
+        maximum = value["maxDelayMs"]
+        if not PetRegistry._is_int_between(weight, 1, 100):
+            raise ValueError(f"{prefix}.weight must be 1 through 100")
+        if not PetRegistry._is_int_between(minimum, 0, 1_200_000) or not PetRegistry._is_int_between(
+            maximum, 0, 1_200_000
+        ):
+            raise ValueError(f"{prefix} delays must be 0 through 1200000")
+        if minimum > maximum:
+            raise ValueError(f"{prefix}.minDelayMs cannot exceed maxDelayMs")
+        groups = value["cooldownGroups"]
+        if (
+            not isinstance(groups, list)
+            or len(groups) > 32
+            or any(
+                not isinstance(group, str) or _V4_KEY.fullmatch(group) is None
+                for group in groups
+            )
+            or len(set(groups)) != len(groups)
+        ):
+            raise ValueError(f"{prefix}.cooldownGroups must contain distinct safe ids")
+        return PetAutoplayDefinition(bucket, weight, minimum, maximum, tuple(groups))
+
+    @staticmethod
+    def _validate_v4_references(
+        atlases: tuple[PetAtlasDefinition, ...],
+        actions: tuple[PetActionDefinition, ...],
+        forms: tuple[PetFormDefinition, ...],
+        default_form: object,
+        transformations: tuple[PetTransformationDefinition, ...],
+        cooldown_groups: tuple[PetCooldownGroupDefinition, ...],
+        sequences: tuple[PetSequenceDefinition, ...],
+        icon_atlas: object,
+    ) -> None:
+        atlas_map = {item.key: item for item in atlases}
+        action_map = {str(item.action_id): item for item in actions}
+        form_map = {item.key: item for item in forms}
+        group_keys = {item.key for item in cooldown_groups}
+        sequence_keys = {item.key for item in sequences}
+
+        if not isinstance(default_form, str) or default_form not in form_map:
+            raise ValueError("v4 manifest contains an unknown defaultForm")
+        if icon_atlas not in atlas_map:
+            raise ValueError("iconFrame references an unknown atlas")
+        for action in actions:
+            for layer in action.layers:
+                if layer.atlas_id not in atlas_map:
+                    raise ValueError(
+                        f"actions.{action.key}.layers references an unknown atlas"
+                    )
+            if action.mirror_of is not None:
+                source = action_map.get(str(action.mirror_of))
+                if source is None:
+                    raise ValueError(f"actions.{action.key}.mirrorOf references an unknown action")
+                if source.mirror_of is not None:
+                    raise ValueError(f"actions.{action.key}.mirrorOf must name a direct action")
+                if source.role is not action.role or source.direction != -action.direction:
+                    raise ValueError(
+                        f"actions.{action.key} must mirror the opposite direction of the same role"
+                    )
+
+        for form in forms:
+            references = (
+                form.idle_action,
+                form.move_right_action,
+                form.move_left_action,
+                form.representative_action,
+                *form.interaction_actions,
+            )
+            if form.gaze_action is not None:
+                references += (form.gaze_action,)
+            if any(str(reference) not in action_map for reference in references):
+                raise ValueError(f"forms.{form.key} references an unknown action")
+            idle = action_map[str(form.idle_action)]
+            right = action_map[str(form.move_right_action)]
+            left = action_map[str(form.move_left_action)]
+            capabilities_valid = (
+                idle.role is ActionRole.IDLE
+                and right.role is ActionRole.MOVE
+                and right.direction == 1
+                and left.role is ActionRole.MOVE
+                and left.direction == -1
+            )
+            if not capabilities_valid:
+                if form.key == default_form:
+                    raise ValueError(
+                        "default form must define idle and both move directions"
+                    )
+                raise ValueError(
+                    f"forms.{form.key} must define idle and both move directions"
+                )
+            if any(
+                action_map[str(action_id)].role is not ActionRole.INTERACTION
+                for action_id in form.interaction_actions
+            ):
+                raise ValueError(f"forms.{form.key}.interactionActions must be interactions")
+            if form.gaze_action is not None:
+                if form.key != default_form:
+                    raise ValueError("only the default form may define gazeAction")
+                if action_map[str(form.gaze_action)].role is not ActionRole.GAZE:
+                    raise ValueError(f"forms.{form.key}.gazeAction must name a gaze action")
+
+        for transformation in transformations:
+            if transformation.from_form not in form_map or transformation.to_form not in form_map:
+                raise ValueError(f"transformations.{transformation.key} references an unknown form")
+            if transformation.from_form != default_form:
+                raise ValueError("transformations must originate from defaultForm")
+            action_ids = (
+                transformation.enter_action,
+                *(choice.action_id for choice in transformation.resident_actions),
+                transformation.exit_action,
+            )
+            if any(str(action_id) not in action_map for action_id in action_ids):
+                raise ValueError(
+                    f"transformations.{transformation.key} references an unknown action"
+                )
+
+        for sequence in sequences:
+            for step in sequence.steps:
+                action_id = str(step.action_id)
+                if action_id not in action_map:
+                    if action_id in sequence_keys:
+                        raise ValueError("sequence steps may reference actions only")
+                    raise ValueError(f"sequences.{sequence.key} references an unknown action")
+                if step.form_after is not None and step.form_after not in form_map:
+                    raise ValueError(f"sequences.{sequence.key} references an unknown form")
+
+        bucket_specs: dict[str, tuple[int, int, tuple[str, ...]]] = {}
+        autoplays = [
+            item.autoplay
+            for item in (*transformations, *sequences)
+            if item.autoplay is not None
+        ]
+        for autoplay in autoplays:
+            unknown_groups = set(autoplay.cooldown_groups) - group_keys
+            if unknown_groups:
+                raise ValueError(
+                    f"autoplay bucket {autoplay.bucket} references an unknown cooldown group"
+                )
+            signature = (
+                autoplay.min_delay_ms,
+                autoplay.max_delay_ms,
+                autoplay.cooldown_groups,
+            )
+            existing = bucket_specs.setdefault(autoplay.bucket, signature)
+            if existing != signature:
+                raise ValueError("autoplay bucket definitions must match")
+
+    @staticmethod
+    def _validate_v4_keys(value: dict[object, object], name: str) -> None:
+        if any(
+            not isinstance(key, str) or _V4_KEY.fullmatch(key) is None
+            for key in value
+        ):
+            raise ValueError(f"v4 {name} ids must be safe 1 through 64 character names")
+
+    @staticmethod
+    def _parse_v4_label(value: object, prefix: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{prefix} must be text")
+        label = value.strip()
+        if (
+            not label
+            or len(label) > 80
+            or any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in label)
+        ):
+            raise ValueError(f"{prefix} must be 1 through 80 printable characters")
+        return label
 
     @staticmethod
     def _parse_actions(value: object) -> tuple[PetActionDefinition, ...]:
@@ -851,5 +1752,5 @@ class PetRegistry:
         return (
             isinstance(value, (int, float))
             and not isinstance(value, bool)
-            and lower <= float(value) <= upper
+            and lower <= value <= upper
         )

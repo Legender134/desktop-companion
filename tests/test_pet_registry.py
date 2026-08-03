@@ -29,35 +29,237 @@ def _write_pack(
     pet_id: str,
     *,
     manifest_id: str | None = None,
+    display_name: str | None = None,
+    description: str | None = None,
     sprite_version: int = 2,
     spritesheet_path: str = "spritesheet.webp",
     sprite_bytes: bytes = b"fake-webp",
     icon_frame: object | None = None,
     actions: object | None = None,
     states: object | None = None,
+    atlases: object | None = None,
+    forms: object | None = None,
+    default_form: object | None = None,
+    transformations: object | None = None,
+    cooldown_groups: object | None = None,
+    sequences: object | None = None,
 ) -> Path:
     directory = root / pet_id
     directory.mkdir(parents=True)
     manifest = {
         "id": manifest_id or pet_id,
-        "displayName": pet_id.title(),
-        "description": f"{pet_id} test pet",
+        "displayName": display_name or pet_id.title(),
+        "description": description if description is not None else f"{pet_id} test pet",
         "spriteVersionNumber": sprite_version,
-        "spritesheetPath": spritesheet_path,
     }
+    if sprite_version != 4:
+        manifest["spritesheetPath"] = spritesheet_path
     if icon_frame is not None:
         manifest["iconFrame"] = icon_frame
     if actions is not None:
         manifest["actions"] = actions
     if states is not None:
         manifest["states"] = states
+    if atlases is not None:
+        manifest["atlases"] = atlases
+    if forms is not None:
+        manifest["forms"] = forms
+    if default_form is not None:
+        manifest["defaultForm"] = default_form
+    if transformations is not None:
+        manifest["transformations"] = transformations
+    if cooldown_groups is not None:
+        manifest["cooldownGroups"] = cooldown_groups
+    if sequences is not None:
+        manifest["sequences"] = sequences
     (directory / "pet.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
     )
-    if spritesheet_path == "spritesheet.webp":
+    if sprite_version == 4 and isinstance(atlases, dict):
+        for atlas in atlases.values():
+            if isinstance(atlas, dict) and isinstance(atlas.get("path"), str):
+                path = atlas["path"]
+                if Path(path).name == path:
+                    (directory / path).write_bytes(sprite_bytes)
+    elif spritesheet_path == "spritesheet.webp":
         (directory / spritesheet_path).write_bytes(sprite_bytes)
     return directory
+
+
+def _valid_v4_manifest() -> dict[str, object]:
+    def layer(
+        atlas: str = "character",
+        row: int = 0,
+        *,
+        hit_test: bool = True,
+        frame_map: list[int | None] | None = None,
+    ) -> dict[str, object]:
+        result: dict[str, object] = {
+            "atlas": atlas,
+            "row": row,
+            "startColumn": 0,
+            "anchorX": 96,
+            "anchorY": 200,
+            "hitTest": hit_test,
+        }
+        if frame_map is not None:
+            result["frameMap"] = frame_map
+        return result
+
+    def action(
+        label: str,
+        role: str,
+        row: int,
+        *,
+        direction: str | None = None,
+        frame_count: int = 4,
+        layers: list[dict[str, object]] | None = None,
+        loop: bool = False,
+    ) -> dict[str, object]:
+        result: dict[str, object] = {
+            "label": label,
+            "role": role,
+            "frameCount": frame_count,
+            "frameMs": 100,
+            "loop": loop,
+            "layers": layers or [layer(row=row)],
+        }
+        if direction is not None:
+            result["direction"] = direction
+        return result
+
+    actions = {
+        "idle": action("Idle", "idle", 0, loop=True),
+        "moveRight": action("Move right", "move", 1, direction="right", loop=True),
+        "moveLeft": action("Move left", "move", 2, direction="left", loop=True),
+        "gaze": action("Gaze", "gaze", 3, frame_count=16, loop=True),
+        "spell": action(
+            "Spell",
+            "interaction",
+            4,
+            layers=[
+                layer("effects", 0, hit_test=False, frame_map=[0, 1, 2, 3]),
+                layer("character", 4, hit_test=True),
+            ],
+        ),
+        "transformEnter": action("Transform", "interaction", 5),
+        "whiteFoxIdle": action("Fox idle", "idle", 6, loop=True),
+        "whiteFoxMoveRight": action(
+            "Fox move right", "move", 7, direction="right", loop=True
+        ),
+        "whiteFoxMoveLeft": action(
+            "Fox move left", "move", 8, direction="left", loop=True
+        ),
+        "whiteFoxRest": action("Fox rest", "interaction", 9),
+        "transformExit": action("Return", "interaction", 10),
+    }
+    autoplay = {
+        "bucket": "commonTransform",
+        "weight": 20,
+        "minDelayMs": 1000,
+        "maxDelayMs": 2000,
+        "cooldownGroups": ["global"],
+    }
+    return {
+        "id": "fixture_v4",
+        "displayName": "Fixture v4",
+        "description": "Valid two-atlas v4 fixture",
+        "spriteVersionNumber": 4,
+        "defaultForm": "foxEaredHuman",
+        "iconFrame": {"atlas": "character", "row": 0, "column": 0},
+        "atlases": {
+            "character": {"path": "character.webp", "cellWidth": 192, "cellHeight": 208},
+            "effects": {"path": "effects.webp", "cellWidth": 384, "cellHeight": 416},
+        },
+        "cooldownGroups": {"global": {"cooldownMs": 5000}},
+        "actions": actions,
+        "forms": {
+            "foxEaredHuman": {
+                "label": "Fox-eared human",
+                "idleAction": "idle",
+                "moveRightAction": "moveRight",
+                "moveLeftAction": "moveLeft",
+                "gazeAction": "gaze",
+                "representativeAction": "idle",
+                "interactionActions": ["spell", "transformEnter"],
+            },
+            "whiteFox": {
+                "label": "White fox",
+                "idleAction": "whiteFoxIdle",
+                "moveRightAction": "whiteFoxMoveRight",
+                "moveLeftAction": "whiteFoxMoveLeft",
+                "representativeAction": "whiteFoxIdle",
+                "interactionActions": ["whiteFoxRest"],
+            },
+        },
+        "transformations": {
+            "becomeWhiteFox": {
+                "label": "Become a white fox",
+                "fromForm": "foxEaredHuman",
+                "toForm": "whiteFox",
+                "enterAction": "transformEnter",
+                "residentActions": [{"action": "whiteFoxRest", "weight": 100}],
+                "exitAction": "transformExit",
+                "minDurationMs": 1000,
+                "maxDurationMs": 2000,
+                "showInMenu": True,
+                "autoplay": autoplay,
+            }
+        },
+        "sequences": {
+            "spellSequence": {
+                "label": "Cast spell",
+                "showInMenu": True,
+                "steps": [
+                    {
+                        "action": "spell",
+                        "repeatCount": 1,
+                        "holdMs": 0,
+                        "safeStopAfter": True,
+                    }
+                ],
+            }
+        },
+    }
+
+
+def _write_v4_manifest(root: Path, manifest: dict[str, object]) -> Path:
+    pet_id = str(manifest["id"])
+    return _write_pack(
+        root,
+        pet_id,
+        sprite_version=4,
+        atlases=manifest.get("atlases"),
+        forms=manifest.get("forms"),
+        default_form=manifest.get("defaultForm"),
+        actions=manifest.get("actions"),
+        transformations=manifest.get("transformations"),
+        cooldown_groups=manifest.get("cooldownGroups"),
+        sequences=manifest.get("sequences"),
+        icon_frame=manifest.get("iconFrame"),
+        display_name=manifest.get("displayName"),
+        description=manifest.get("description"),
+    )
+
+
+def _write_valid_v4_pack(root: Path, pet_id: str) -> Path:
+    manifest = _valid_v4_manifest()
+    manifest["id"] = pet_id
+    manifest["displayName"] = pet_id.title()
+    return _write_v4_manifest(root, manifest)
+
+
+def _write_and_refresh_v4(
+    tmp_path: Path,
+    manifest: dict[str, object],
+    prepare_directory=None,
+):
+    root = tmp_path / "pets"
+    directory = _write_v4_manifest(root, manifest)
+    if prepare_directory is not None:
+        prepare_directory(directory)
+    return PetRegistry(root, None).refresh()
 
 
 def test_v4_schema_declares_fixed_limits_and_required_sections():
@@ -148,6 +350,206 @@ def test_v4_domain_models_are_immutable_and_use_tuple_collections():
     assert sequence.steps == (step,)
     with pytest.raises(AttributeError):
         layer.hit_test = False
+
+
+def test_registry_loads_v4_forms_layers_transformations_and_sequences(tmp_path: Path):
+    directory = _write_valid_v4_pack(tmp_path / "pets", "fixture_v4")
+
+    definition = PetRegistry(tmp_path / "pets", None).refresh().by_id("fixture_v4")
+
+    assert definition.sprite_version == 4
+    assert definition.default_form == "foxEaredHuman"
+    assert tuple(item.key for item in definition.atlases) == ("character", "effects")
+    assert definition.actions[0].layers[0].hit_test is True
+    assert definition.transformations[0].autoplay.bucket == "commonTransform"
+    assert definition.sequences[0].steps[0].safe_stop_after is True
+    assert directory.joinpath("character.webp").is_file()
+
+
+def test_registry_uses_v4_label_limits_for_display_name(tmp_path: Path):
+    manifest = _valid_v4_manifest()
+    manifest["displayName"] = "V" * 80
+
+    definition = _write_and_refresh_v4(tmp_path, manifest).by_id("fixture_v4")
+
+    assert definition.display_name == "V" * 80
+
+
+def _remove_character_atlas(directory: Path) -> None:
+    directory.joinpath("character.webp").unlink()
+
+
+def _make_atlas_total_too_large(directory: Path) -> None:
+    with directory.joinpath("character.webp").open("wb") as stream:
+        stream.seek(32 * 1024 * 1024)
+        stream.write(b"x")
+
+
+def _add_mismatched_sequence_autoplay(pack: dict[str, object]) -> None:
+    transformation = pack["transformations"]["becomeWhiteFox"]
+    autoplay = dict(transformation["autoplay"])
+    autoplay["maxDelayMs"] = 3000
+    pack["sequences"]["spellSequence"]["autoplay"] = autoplay
+
+
+@pytest.mark.parametrize(
+    ("mutate", "prepare_directory", "message"),
+    (
+        (
+            lambda pack: pack["atlases"]["character"].update(
+                path="nested/character.webp"
+            ),
+            None,
+            "bare WebP filename",
+        ),
+        (
+            lambda pack: pack["atlases"]["character"].update(
+                path="../character.webp"
+            ),
+            None,
+            "bare WebP filename",
+        ),
+        (lambda pack: None, _remove_character_atlas, "atlas file is missing"),
+        (
+            lambda pack: pack["actions"]["idle"]["layers"][0].update(
+                atlas="missing"
+            ),
+            None,
+            "unknown atlas",
+        ),
+        (
+            lambda pack: pack["actions"]["idle"]["layers"].append(
+                dict(pack["actions"]["idle"]["layers"][0])
+            ),
+            None,
+            "exactly one hitTest layer",
+        ),
+        (lambda pack: pack.update(defaultForm="missing"), None, "unknown defaultForm"),
+        (
+            lambda pack: pack["forms"]["foxEaredHuman"].update(
+                representativeAction="missing"
+            ),
+            None,
+            "unknown action",
+        ),
+        (
+            lambda pack: pack["sequences"]["spellSequence"]["steps"][0].update(
+                action="missing"
+            ),
+            None,
+            "unknown action",
+        ),
+        (
+            lambda pack: pack["transformations"]["becomeWhiteFox"].update(
+                toForm="missing"
+            ),
+            None,
+            "unknown form",
+        ),
+        (
+            lambda pack: pack["transformations"]["becomeWhiteFox"][
+                "autoplay"
+            ].update(cooldownGroups=["missing"]),
+            None,
+            "unknown cooldown group",
+        ),
+        (
+            lambda pack: pack["forms"]["foxEaredHuman"].update(
+                moveRightAction="spell"
+            ),
+            None,
+            "default form must define idle and both move directions",
+        ),
+        (
+            lambda pack: pack["actions"]["gaze"].update(frameCount=15),
+            None,
+            "16, 32, or 64 frames",
+        ),
+        (
+            lambda pack: pack["actions"]["spell"].update(
+                role="burstMove",
+                direction="right",
+                travelDistanceRatio=10**400,
+            ),
+            None,
+            "travelDistanceRatio must be 0.05 through 1",
+        ),
+        (
+            lambda pack: pack["forms"]["whiteFox"].update(gazeAction="gaze"),
+            None,
+            "only the default form may define gazeAction",
+        ),
+        (
+            lambda pack: pack["actions"]["spell"]["layers"][0].update(
+                frameMap=[0, 1]
+            ),
+            None,
+            "frameMap length must match frameCount",
+        ),
+        (
+            lambda pack: pack["actions"]["spell"]["layers"][0].update(
+                frameMap=[0, 1, 2, 4]
+            ),
+            None,
+            "frameMap references an unavailable atlas cell",
+        ),
+        (_add_mismatched_sequence_autoplay, None, "autoplay bucket definitions must match"),
+        (
+            lambda pack: pack["sequences"]["spellSequence"]["steps"][0].update(
+                action="spellSequence"
+            ),
+            None,
+            "sequence steps may reference actions only",
+        ),
+        (
+            lambda pack: pack["transformations"]["becomeWhiteFox"].update(
+                fromForm="whiteFox"
+            ),
+            None,
+            "transformations must originate from defaultForm",
+        ),
+        (
+            lambda pack: pack["transformations"]["becomeWhiteFox"].update(
+                minDurationMs=3000
+            ),
+            None,
+            "minDurationMs cannot exceed maxDurationMs",
+        ),
+        (lambda pack: None, _make_atlas_total_too_large, "32 MiB"),
+        (
+            lambda pack: pack.update(description="unsafe\ndescription"),
+            None,
+            "description contains control characters",
+        ),
+    ),
+)
+def test_registry_rejects_incoherent_v4_references(
+    tmp_path: Path, mutate, prepare_directory, message: str
+):
+    manifest = _valid_v4_manifest()
+    mutate(manifest)
+
+    snapshot = _write_and_refresh_v4(tmp_path, manifest, prepare_directory)
+
+    assert snapshot.pets == ()
+    assert message in snapshot.issues[0].message
+
+
+def test_registry_defaults_v4_collections_for_legacy_packs(tmp_path: Path):
+    root = tmp_path / "pets"
+    _write_pack(root, "legacy")
+    _write_pack(root, "dynamic", sprite_version=3, actions=_valid_v3_actions())
+
+    snapshot = PetRegistry(root, None).refresh()
+
+    for pet_id in ("legacy", "dynamic"):
+        definition = snapshot.by_id(pet_id)
+        assert definition.atlases == ()
+        assert definition.forms == ()
+        assert definition.default_form == ""
+        assert definition.transformations == ()
+        assert definition.cooldown_groups == ()
+        assert definition.sequences == ()
 
 
 def test_registry_discovers_bundled_and_user_pets_and_creates_user_root(tmp_path: Path):
