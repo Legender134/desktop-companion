@@ -80,8 +80,10 @@ class AutoplayBucketScheduler:
         self._bucket_specs: dict[str, PetAutoplayDefinition] = {}
         for candidate in self.candidates:
             autoplay = candidate.autoplay
-            if autoplay.weight <= 0:
-                raise ValueError("autoplay candidate weight must be positive")
+            if type(autoplay.weight) is not int or autoplay.weight <= 0:
+                raise ValueError(
+                    "autoplay candidate weight must be a positive integer"
+                )
             bucket_lists.setdefault(autoplay.bucket, []).append(candidate)
             existing = self._bucket_specs.setdefault(autoplay.bucket, autoplay)
             existing_signature = (
@@ -174,7 +176,7 @@ class AutoplayBucketScheduler:
     ) -> None:
         """Record an accepted start, consuming a bucket only when automatic."""
 
-        if candidate not in self.candidates:
+        if not any(candidate is owned for owned in self.candidates):
             raise ValueError("autoplay candidate does not belong to this scheduler")
 
         for group in candidate.autoplay.cooldown_groups:

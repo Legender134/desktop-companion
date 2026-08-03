@@ -331,6 +331,30 @@ def test_record_started_rejects_a_foreign_candidate_without_mutating_state():
     assert scheduler.cooldown_deadlines == expected_cooldowns
 
 
+def test_value_equal_candidate_from_another_scheduler_is_still_foreign():
+    scheduler = _silvermoon_like_scheduler(random.Random(0))
+    other_scheduler = _silvermoon_like_scheduler(random.Random(1))
+    scheduler.reset(0)
+    owned = next(
+        candidate for candidate in scheduler.candidates if candidate.key == "fox"
+    )
+    foreign = next(
+        candidate
+        for candidate in other_scheduler.candidates
+        if candidate.key == "fox"
+    )
+    assert foreign == owned
+    assert foreign is not owned
+    expected_deadlines = dict(scheduler.deadlines)
+    expected_cooldowns = dict(scheduler.cooldown_deadlines)
+
+    with pytest.raises(ValueError, match="does not belong"):
+        scheduler.record_started(foreign, 1_000, automatic=True)
+
+    assert scheduler.deadlines == expected_deadlines
+    assert scheduler.cooldown_deadlines == expected_cooldowns
+
+
 @pytest.mark.parametrize(
     ("current_form", "pause_flags"),
     [
@@ -409,11 +433,13 @@ def test_manual_start_is_bookkept_even_when_scheduler_would_not_deliver_it():
     assert scheduler.deadlines["commonTransform"] == initial_deadline
 
 
-@pytest.mark.parametrize("weight", [0, -1])
-def test_scheduler_rejects_non_positive_autoplay_weights(weight: int):
+@pytest.mark.parametrize("weight", [0, -1, 1.0, True])
+def test_scheduler_rejects_non_positive_integer_autoplay_weights(
+    weight: int | float,
+):
     invalid = _sequence("invalid", _autoplay("invalidBucket", weight, 0, 0))
 
-    with pytest.raises(ValueError, match="weight must be positive"):
+    with pytest.raises(ValueError, match="weight must be a positive integer"):
         AutoplayBucketScheduler(
             (),
             (invalid,),
