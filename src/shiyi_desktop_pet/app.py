@@ -1082,7 +1082,15 @@ class DesktopPetApplication:
             self.wander_timer.stop()
             self._fixed_look_degrees = degrees
             self.behavior.request_gaze(degrees)
-            self._show_frame(self.catalog.look_frame_for(self.catalog.default_form, degrees))
+            if self.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE:
+                return
+            current_form = self._current_form()
+            if self.catalog.supports_gaze_for(current_form):
+                self._show_frame(
+                    self.catalog.look_frame_for(current_form, degrees)
+                )
+            else:
+                self._render_base(self._now_ms())
             return
         if kind == "showcase":
             self.start_showcase()

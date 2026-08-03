@@ -2385,6 +2385,51 @@ def test_v4_fixed_gaze_does_not_render_default_form_gaze_in_gazeless_form(
         controller.shutdown()
 
 
+def test_v4_look_menu_saves_fixed_gaze_without_overwriting_scripted_frame(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("ritual")
+        controller._advance_manual(0)
+        assert controller.window.current_frame.identity[1] == "spell"
+
+        controller.dispatch_menu(MenuCommand("look", 0.0))
+
+        assert controller._fixed_look_degrees == 0.0
+        assert controller.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE
+        assert controller.window.current_frame.identity[1] == "spell"
+        now[0] = 100
+        controller._animation_tick()
+        assert controller.timeline.started_ms == 100
+    finally:
+        controller.shutdown()
+
+
+def test_v4_look_menu_keeps_gazeless_form_base_instead_of_default_gaze(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("leaveAsFox")
+        now[0] = 100
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "whiteFox"
+        assert controller.window.current_frame.identity[1] == "foxIdle"
+
+        controller.dispatch_menu(MenuCommand("look", 0.0))
+
+        assert controller._fixed_look_degrees == 0.0
+        assert controller._current_form() == "whiteFox"
+        assert controller.window.current_frame.identity[1] == "foxIdle"
+    finally:
+        controller.shutdown()
+
+
 def test_v4_autoplay_consumes_deadline_only_after_accepted_offer(
     qapp, tmp_path, monkeypatch
 ):
