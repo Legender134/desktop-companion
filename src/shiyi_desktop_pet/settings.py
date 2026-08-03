@@ -13,11 +13,12 @@ from .pet_registry import is_valid_pet_id
 from .product import DEFAULT_PET_ID
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 VALID_SCALES = frozenset({75, 100, 125, 150})
 VALID_SPEEDS = frozenset({"slow", "normal", "fast"})
 VALID_WANDER_INTENSITIES = frozenset({"quiet", "standard", "active"})
 VALID_GAZE_MODES = frozenset({"active", "always"})
+VALID_EFFECTS_QUALITIES = frozenset({"full", "simplified"})
 
 
 class Logger(Protocol):
@@ -39,6 +40,7 @@ class AppSettings:
     scale_percent: int = 100
     animation_speed: str = "normal"
     movement_speed: str = "normal"
+    effects_quality: str = "full"
     screen_name: str = ""
     relative_x: float = 0.85
     relative_y: float = 0.75
@@ -129,6 +131,14 @@ class SettingsStore:
         values["movement_speed"] = (
             movement_speed if movement_speed in VALID_SPEEDS else defaults.movement_speed
         )
+        effects_quality = section.get(
+            "effects_quality", defaults.effects_quality
+        ).lower()
+        values["effects_quality"] = (
+            effects_quality
+            if effects_quality in VALID_EFFECTS_QUALITIES
+            else defaults.effects_quality
+        )
         values["screen_name"] = section.get("screen_name", defaults.screen_name)
         values["relative_x"] = self._clamp(
             self._read_float(section, "relative_x", defaults.relative_x), defaults.relative_x
@@ -211,6 +221,11 @@ class SettingsStore:
                 settings.movement_speed.lower()
                 if settings.movement_speed.lower() in VALID_SPEEDS
                 else AppSettings.movement_speed
+            ),
+            effects_quality=(
+                settings.effects_quality.lower()
+                if settings.effects_quality.lower() in VALID_EFFECTS_QUALITIES
+                else AppSettings.effects_quality
             ),
             screen_name=str(settings.screen_name),
             relative_x=SettingsStore._clamp(float(settings.relative_x), AppSettings.relative_x),

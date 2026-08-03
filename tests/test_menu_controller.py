@@ -6,7 +6,13 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QToolTip
 
 from shiyi_desktop_pet.menu_controller import MenuCommand, MenuController
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
-from shiyi_desktop_pet.models import ActionId
+from shiyi_desktop_pet.models import (
+    ActionId,
+    PetSequenceDefinition,
+    PetSequenceStep,
+    PetStateActionChoice,
+    PetTransformationDefinition,
+)
 from shiyi_desktop_pet.settings import AppSettings
 from shiyi_desktop_pet.tray_controller import TrayController
 
@@ -373,6 +379,130 @@ def test_action_names_are_rebuilt_from_the_current_pet(qtbot):
 
     assert _action(menu, "抬爪招呼") is None
     assert _action(menu, "挥手问候") is not None
+
+
+def test_v4_dynamic_forms_and_sequences_use_definition_order_visibility_and_kind(qtbot):
+    transformations = [
+        PetTransformationDefinition(
+            "shared",
+            "白狐形态",
+            "human",
+            "whiteFox",
+            "foxEnter",
+            (PetStateActionChoice("foxIdle", 1),),
+            "foxExit",
+            25_000,
+            60_000,
+            True,
+        ),
+        PetTransformationDefinition(
+            "hiddenTransform",
+            "隐藏变身",
+            "human",
+            "hidden",
+            "hiddenEnter",
+            (PetStateActionChoice("hiddenIdle", 1),),
+            "hiddenExit",
+            1_000,
+            2_000,
+            False,
+        ),
+        PetTransformationDefinition(
+            "rabbit",
+            "灵兔形态",
+            "human",
+            "rabbit",
+            "rabbitEnter",
+            (PetStateActionChoice("rabbitIdle", 1),),
+            "rabbitExit",
+            10_000,
+            20_000,
+            True,
+        ),
+    ]
+    sequences = [
+        PetSequenceDefinition(
+            "shared",
+            "月华术式",
+            True,
+            (PetSequenceStep("moonSpell", 2, 300, None, True),),
+        ),
+        PetSequenceDefinition(
+            "hiddenSequence",
+            "隐藏序列",
+            False,
+            (PetSequenceStep("hidden", 1, 0, None, True),),
+        ),
+    ]
+    controller = MenuController(
+        AppSettings,
+        lambda: False,
+        lambda command: None,
+        transformation_items_supplier=lambda: tuple(transformations),
+        sequence_items_supplier=lambda: tuple(sequences),
+    )
+
+    action_menu = next(item for item in controller.items if item.label == "动作")
+    assert [item.label for item in action_menu.children[:2]] == ["变身", "月华术式"]
+    transform_menu = action_menu.children[0]
+    assert [item.label for item in transform_menu.children] == [
+        "白狐形态",
+        "灵兔形态",
+        "恢复默认形态",
+    ]
+    assert [item.command for item in transform_menu.children] == [
+        MenuCommand("transformation", "shared"),
+        MenuCommand("transformation", "rabbit"),
+        MenuCommand("restore_form"),
+    ]
+    assert action_menu.children[1].command == MenuCommand("sequence", "shared")
+    assert "隐藏变身" not in controller.flattened_labels()
+    assert "隐藏序列" not in controller.flattened_labels()
+    assert "whiteFox" in transform_menu.children[0].description
+    assert "moonSpell" in action_menu.children[1].description
+    assert "银月" not in transform_menu.children[0].description
+
+    transformations.clear()
+    sequences.clear()
+    menu = controller.create_menu()
+    menu.aboutToShow.emit()
+    assert _action(menu, "变身") is None
+    assert _action(menu, "动作展示") is not None
+    assert _action(menu, "特效质量") is None
+
+
+def test_effects_quality_menu_dispatches_and_refreshes_radio_state(qtbot):
+    state = {"settings": AppSettings(effects_quality="full")}
+    dispatched = []
+    transformation = PetTransformationDefinition(
+        "fox",
+        "白狐形态",
+        "human",
+        "fox",
+        "foxEnter",
+        (PetStateActionChoice("foxIdle", 1),),
+        "foxExit",
+        1_000,
+        2_000,
+        True,
+    )
+    controller = MenuController(
+        lambda: state["settings"],
+        lambda: False,
+        dispatched.append,
+        transformation_items_supplier=lambda: (transformation,),
+    )
+    menu = controller.create_menu()
+    menu.aboutToShow.emit()
+
+    assert _action(_submenu(menu, "特效质量"), "完整").isChecked()
+    _action(_submenu(menu, "特效质量"), "简化").trigger()
+    assert dispatched == [MenuCommand("effects_quality", "simplified")]
+
+    state["settings"] = replace(state["settings"], effects_quality="simplified")
+    menu.aboutToShow.emit()
+    assert not _action(_submenu(menu, "特效质量"), "完整").isChecked()
+    assert _action(_submenu(menu, "特效质量"), "简化").isChecked()
 
 
 def test_dynamic_action_menu_accepts_variable_count_and_hides_unsupported_gaze(qtbot):

@@ -356,6 +356,8 @@ class DesktopPetApplication:
             action_details_supplier=self._action_menu_details,
             gaze_frame_count_supplier=lambda: len(self.catalog.look_degrees),
             shortcut_labels_supplier=lambda: self.catalog.digit_shortcut_labels(),
+            transformation_items_supplier=self._transformation_menu_items,
+            sequence_items_supplier=self._sequence_menu_items,
         )
         self.body_menu = self.menu_controller.create_menu(self.window)
         self.tray = tray_factory(self.window, self.menu_controller)
@@ -465,6 +467,26 @@ class DesktopPetApplication:
         if self.multiform is not None:
             return self.multiform.current_form
         return self.catalog.default_form
+
+    def _transformation_menu_items(self):
+        definition = self._pet_snapshot.by_id(self.catalog.pet_id)
+        if (
+            definition is None
+            or definition.sprite_version != 4
+            or self.catalog.sprite_version != 4
+        ):
+            return ()
+        return definition.transformations
+
+    def _sequence_menu_items(self):
+        definition = self._pet_snapshot.by_id(self.catalog.pet_id)
+        if (
+            definition is None
+            or definition.sprite_version != 4
+            or self.catalog.sprite_version != 4
+        ):
+            return ()
+        return definition.sequences
 
     def _v4_candidate(self, kind: str, key: str) -> AutoplayCandidate | None:
         scheduler = self.v4_autoplay
@@ -1059,7 +1081,8 @@ class DesktopPetApplication:
         self._last_frame_index = None
 
     def dispatch_menu(self, command: MenuCommand) -> None:
-        self._interrupt_wander(reschedule=False)
+        if command.kind != "effects_quality":
+            self._interrupt_wander(reschedule=False)
         try:
             self._dispatch_menu_command(command)
         finally:
@@ -1070,6 +1093,22 @@ class DesktopPetApplication:
         kind = command.kind
         if kind == "action":
             self.trigger_action(command.value)
+            return
+        if kind == "transformation":
+            self.trigger_transformation(str(command.value), manual=True)
+            return
+        if kind == "sequence":
+            self.trigger_sequence(str(command.value), manual=True)
+            return
+        if kind == "restore_form":
+            controller = self.multiform
+            if controller is None:
+                return
+            self._cancel_showcase()
+            restore_command = controller.request_restore()
+            if restore_command is not None:
+                self._execute_runtime_command(restore_command)
+            self._defer_autonomous()
             return
         if kind == "look":
             if not self.catalog.supports_gaze:
@@ -1087,7 +1126,7 @@ class DesktopPetApplication:
             current_form = self._current_form()
             if self.catalog.supports_gaze_for(current_form):
                 self._show_frame(
-                    self.catalog.look_frame_for(current_form, degrees)
+                    self._rendered_look_frame_for(degrees)
                 )
             else:
                 self._render_base(self._now_ms())
@@ -1115,6 +1154,18 @@ class DesktopPetApplication:
             return
         if kind == "animation_speed":
             self._settings = replace(self._settings, animation_speed=str(command.value))
+            return
+        if kind == "effects_quality":
+            value = str(command.value)
+            if value not in {"full", "simplified"}:
+                raise ValueError(f"unsupported effects quality: {value}")
+            if value == self._settings.effects_quality:
+                return
+            self._settings = replace(self._settings, effects_quality=value)
+            self._alpha_cache.clear()
+            self._displayed_frame = None
+            self._render_current_frame()
+            self.settings_store.save(self._settings)
             return
         if kind == "movement_speed":
             self._settings = replace(self._settings, movement_speed=str(command.value))
@@ -1362,9 +1413,7 @@ class DesktopPetApplication:
             and self.catalog.supports_gaze_for(current_form)
         ):
             self._show_frame(
-                self.catalog.look_frame_for(
-                    current_form, self._fixed_look_degrees
-                )
+                self._rendered_look_frame_for(self._fixed_look_degrees)
             )
             return
         if mode is BehaviorMode.MANUAL_ACTION:
@@ -1686,9 +1735,7 @@ class DesktopPetApplication:
         supports_gaze = self.catalog.supports_gaze_for(current_form)
         if self._fixed_look_degrees is not None and supports_gaze:
             self._show_frame(
-                self.catalog.look_frame_for(
-                    current_form, self._fixed_look_degrees
-                )
+                self._rendered_look_frame_for(self._fixed_look_degrees)
             )
             return
         if (
@@ -1710,12 +1757,15 @@ class DesktopPetApplication:
 
     def _render_current_frame(self) -> None:
         self._displayed_frame = None
-        if self.behavior.mode in {
-            BehaviorMode.MANUAL_ACTION,
-            BehaviorMode.SCRIPTED_SEQUENCE,
-        } and self.behavior.current_action:
-            action = self.behavior.current_action
-            step = self.timeline.advance(self._now_ms(), self.catalog.spec(action))
+        if self._fixed_look_degrees is not None or self.behavior.mode is BehaviorMode.GAZE:
+            self._render_base(self._now_ms())
+            return
+        action = self.timeline.action
+        if action in self.catalog.action_ids:
+            step = self.timeline.advance(
+                self._adjusted_animation_time(self._now_ms()),
+                self.catalog.spec(action),
+            )
             self._show_frame(
                 self.catalog.rendered_frames(
                     action, self._effects_quality()
@@ -1755,7 +1805,17 @@ class DesktopPetApplication:
                     (candidate - degrees + 180.0) % 360.0 - 180.0
                 ),
             )
-        return self.catalog.look_frame_for(self._current_form(), nearest)
+        return self._rendered_look_frame_for(nearest)
+
+    def _rendered_look_frame_for(self, degrees: float) -> RenderedFrame:
+        frame = self.catalog.look_frame_for(self._current_form(), degrees)
+        if self.catalog.sprite_version != 4:
+            return frame
+        action = frame.identity[1]
+        frame_index = frame.identity[3]
+        return self.catalog.rendered_frames(
+            action, self._effects_quality()
+        )[frame_index]
 
     def _schedule_wander(self) -> None:
         if (

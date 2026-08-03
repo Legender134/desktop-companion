@@ -514,6 +514,7 @@ def _v4_definition(tmp_path: Path) -> PetDefinition:
         action("foxResident", 8),
         action("changeExit", 9, 2),
         action("spell", 10, optional_effect=True),
+        action("qualitySpell", 10, 2, optional_effect=True),
         action("finalPose", 11),
     )
     forms = (
@@ -2254,6 +2255,189 @@ def test_v4_manual_transformation_runs_enter_resident_exit_and_restores_form(
         assert controller._current_form() == "human"
         assert controller.current_action == "humanIdle"
         assert controller.behavior.mode is BehaviorMode.IDLE
+    finally:
+        controller.shutdown()
+
+
+def test_v4_menu_definitions_refresh_after_switching_to_legacy(qapp, tmp_path):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+
+    def labels(menu):
+        result = []
+        for action in menu.actions():
+            result.append(action.text())
+            if action.menu() is not None:
+                result.extend(labels(action.menu()))
+        return result
+
+    try:
+        controller.body_menu.aboutToShow.emit()
+        v4_labels = labels(controller.body_menu)
+        assert "变身" in v4_labels
+        assert "White fox" in v4_labels
+        assert "Full human" in v4_labels
+        assert "Ritual" in v4_labels
+        assert "Leave as fox" not in v4_labels
+
+        controller.dispatch_menu(MenuCommand("pet", "shiyi"))
+        controller.body_menu.aboutToShow.emit()
+        legacy_labels = labels(controller.body_menu)
+        assert "变身" not in legacy_labels
+        assert "Ritual" not in legacy_labels
+        assert "动作展示" in legacy_labels
+    finally:
+        controller.shutdown()
+
+
+def test_v4_menu_commands_use_manual_runtime_apis_and_keep_kinds_distinct(
+    qapp, tmp_path, monkeypatch
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        controller,
+        "trigger_transformation",
+        lambda key, manual=True: calls.append(("transformation", key, manual)),
+    )
+    monkeypatch.setattr(
+        controller,
+        "trigger_sequence",
+        lambda key, manual=True: calls.append(("sequence", key, manual)),
+    )
+    try:
+        controller.dispatch_menu(MenuCommand("transformation", "shared"))
+        controller.dispatch_menu(MenuCommand("sequence", "shared"))
+
+        assert calls == [
+            ("transformation", "shared", True),
+            ("sequence", "shared", True),
+        ]
+    finally:
+        controller.shutdown()
+
+
+def test_v4_restore_menu_exits_idle_non_default_form_without_teleporting(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("leaveAsFox")
+        now[0] = 100
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "whiteFox"
+        assert controller.multiform.busy is False
+
+        controller.dispatch_menu(MenuCommand("restore_form"))
+
+        assert controller.current_action == "changeExit"
+        assert controller._current_form() == "whiteFox"
+        now[0] = 300
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "human"
+    finally:
+        controller.shutdown()
+
+
+def test_effects_quality_switch_saves_redraws_same_timeline_frame_and_preserves_body(
+    qapp, tmp_path
+):
+    controller, store, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_action("qualitySpell")
+        now[0] = 150
+        controller._render_current_frame()
+        before = controller.window.current_frame
+        assert before.identity[2:4] == ("full", 1)
+        anchor_before = controller.window.mapToGlobal(before.anchor)
+        body_before = controller.window.body_global_rect()
+        controller._alpha_cache[("stale-quality",)] = (b"stale", 1)
+
+        controller.dispatch_menu(MenuCommand("effects_quality", "simplified"))
+
+        after = controller.window.current_frame
+        assert controller.settings.effects_quality == "simplified"
+        assert store.saved[-1].effects_quality == "simplified"
+        assert after.identity[2:4] == ("simplified", 1)
+        assert controller.window.mapToGlobal(after.anchor) == anchor_before
+        assert controller.window.body_global_rect() == body_before
+        assert ("stale-quality",) not in controller._alpha_cache
+    finally:
+        controller.shutdown()
+
+
+def test_effects_quality_switch_is_safe_for_legacy_catalog(qapp):
+    controller, store, *_ = _controller(qapp)
+    try:
+        controller.dispatch_menu(MenuCommand("effects_quality", "simplified"))
+
+        assert controller.settings.effects_quality == "simplified"
+        assert store.saved[-1].effects_quality == "simplified"
+        assert controller.window.current_frame.identity[2] == "simplified"
+    finally:
+        controller.shutdown()
+
+
+def test_effects_quality_switch_does_not_interrupt_wander_or_change_frame_index(
+    qapp, tmp_path
+):
+    settings = replace(
+        AppSettings(),
+        pet_id="runtime-v4",
+        wander_enabled=True,
+        gaze_enabled=False,
+    )
+    controller, *_ = _v4_controller(qapp, tmp_path, settings=settings)
+    now = [150]
+    controller._now_ms = lambda: now[0]
+    target = Point(
+        float(controller.window.x() + 100),
+        float(controller.window.y()),
+    )
+    try:
+        controller._wander_target = target
+        controller._wander_direction = 1
+        controller._wander_action = "qualitySpell"
+        controller.timeline.start("qualitySpell", 0)
+        controller._show_frame(
+            controller.catalog.rendered_frames("qualitySpell", "full")[1]
+        )
+
+        controller.dispatch_menu(MenuCommand("effects_quality", "simplified"))
+
+        assert controller._wander_target == target
+        assert controller._wander_action == "qualitySpell"
+        assert controller.window.current_frame.identity[1:4] == (
+            "qualitySpell",
+            "simplified",
+            1,
+        )
+    finally:
+        controller.shutdown()
+
+
+def test_effects_quality_switch_redraws_fixed_v4_gaze_with_selected_quality(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    try:
+        controller.dispatch_menu(MenuCommand("look", 0.0))
+        assert controller.window.current_frame.identity[1:4] == (
+            "humanGaze",
+            "full",
+            0,
+        )
+
+        controller.dispatch_menu(MenuCommand("effects_quality", "simplified"))
+
+        assert controller.window.current_frame.identity[1:4] == (
+            "humanGaze",
+            "simplified",
+            0,
+        )
     finally:
         controller.shutdown()
 

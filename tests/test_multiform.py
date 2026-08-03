@@ -353,6 +353,41 @@ def test_sequence_stops_only_after_declared_boundary_and_cleans_to_default():
     assert controller.busy is False
 
 
+def test_restore_from_idle_non_default_form_plays_declared_exit_before_default():
+    controller = _controller()
+    controller.request_sequence("leaveAsFox", manual=True, now_ms=0)
+    controller.action_finished(100)
+    assert controller.current_form == "whiteFox"
+    assert controller.busy is False
+
+    command = controller.request_restore()
+
+    assert command == RuntimeCommand(
+        RuntimeCommandKind.PLAY,
+        action="whiteFoxExit",
+    )
+    assert controller.current_form == "whiteFox"
+    assert controller.busy is True
+    assert controller.action_finished(200) == RuntimeCommand(
+        RuntimeCommandKind.SET_FORM,
+        form=DEFAULT_FORM,
+    )
+
+
+def test_restore_while_busy_discards_pending_and_uses_safe_stop_boundary():
+    controller = _controller(sequence_safe_flags=(False, True, False))
+    controller.request_sequence("spell", manual=True, now_ms=0)
+    controller.request_transformation("whiteFoxChange", manual=True, now_ms=1)
+
+    assert controller.request_restore() is None
+    assert controller.action_finished(100).action == "b"
+    command = controller.action_finished(200)
+
+    assert command.kind is RuntimeCommandKind.CLEANUP
+    assert controller.current_form == DEFAULT_FORM
+    assert controller.busy is False
+
+
 @pytest.mark.parametrize("phase", ("enter", "resident", "exit"))
 def test_normal_transformation_stop_restores_through_exit_clip(phase: str):
     controller = _controller()

@@ -169,6 +169,24 @@ class MultiformController:
             self._stop_requested = True
         return None
 
+    def request_restore(self) -> RuntimeCommand | None:
+        """Safely stop active work or exit an idle non-default form."""
+        self._pending = None
+        if self.busy:
+            self._stop_requested = True
+            return None
+        if self._current_form == self._default_form:
+            return None
+
+        transformation = self._transformation_by_form[self._current_form]
+        self._transformation = transformation
+        self._operation = _Operation.EXIT
+        self._stop_requested = False
+        return RuntimeCommand(
+            RuntimeCommandKind.PLAY,
+            action=transformation.exit_action,
+        )
+
     def hard_cancel(self) -> tuple[RuntimeCommand, ...]:
         self._reset(default_form=True)
         return (

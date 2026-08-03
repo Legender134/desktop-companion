@@ -13,7 +13,12 @@ from PySide6.QtGui import QAction, QActionGroup, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QMenu, QToolTip, QWidget
 
 from .constants import DEFAULT_PET_ACTIONS
-from .models import ActionId, ActionKey
+from .models import (
+    ActionId,
+    ActionKey,
+    PetSequenceDefinition,
+    PetTransformationDefinition,
+)
 from .settings import AppSettings
 
 
@@ -234,6 +239,8 @@ def _menu_items(
     action_details: Mapping[ActionKey, str] | None = None,
     gaze_frame_count: int = 16,
     shortcut_labels: tuple[tuple[int, str], ...] = (),
+    transformation_items: tuple[PetTransformationDefinition, ...] = (),
+    sequence_items: tuple[PetSequenceDefinition, ...] = (),
 ) -> tuple[MenuItem, ...]:
     action_details = action_details or {}
     gaze_step = 360.0 / gaze_frame_count if gaze_frame_count else 0.0
@@ -311,10 +318,74 @@ def _menu_items(
         if look_degrees
         else ()
     )
+    visible_transformations = tuple(
+        definition
+        for definition in transformation_items
+        if definition.show_in_menu
+    )
+    visible_sequences = tuple(
+        definition for definition in sequence_items if definition.show_in_menu
+    )
+    transformation_menu = (
+        (
+            MenuItem(
+                "变身",
+                children=(
+                    *(
+                        MenuItem(
+                            definition.label,
+                            MenuCommand("transformation", definition.key),
+                            description=(
+                                f"播放“{definition.label}”变身：先执行 {definition.enter_action}，"
+                                f"进入 {definition.to_form} 形态并在声明的常驻动作中停留 "
+                                f"{definition.min_duration_ms / 1000:g}–"
+                                f"{definition.max_duration_ms / 1000:g} 秒；恢复时播放 "
+                                f"{definition.exit_action}。"
+                            ),
+                        )
+                        for definition in visible_transformations
+                    ),
+                    MenuItem(
+                        "恢复默认形态",
+                        MenuCommand("restore_form"),
+                        description=(
+                            "若变身或序列正在播放，会在定义允许的安全停止边界结束；若当前"
+                            "已空闲但仍是非默认形态，会先播放该形态声明的退出动作，再恢复"
+                            "默认形态。"
+                        ),
+                    ),
+                ),
+                description=(
+                    "这里按当前宠物 pet.json 的 transformations 定义顺序列出"
+                    " showInMenu=true 的变身；隐藏定义不会出现在菜单中。"
+                ),
+            ),
+        )
+        if transformation_items
+        else ()
+    )
+    sequence_menu_items = tuple(
+        MenuItem(
+            definition.label,
+            MenuCommand("sequence", definition.key),
+            description=(
+                f"播放“{definition.label}”序列，共 {len(definition.steps)} 个声明步骤："
+                + "；".join(
+                    f"{step.action_id} ×{step.repeat_count}"
+                    + (f"，停留 {step.hold_ms} 毫秒" if step.hold_ms else "")
+                    for step in definition.steps
+                )
+                + "。手动选择会按声明顺序、形态切换和安全停止边界执行。"
+            ),
+        )
+        for definition in visible_sequences
+    )
     return (
         MenuItem(
             "动作",
             children=(
+                *transformation_menu,
+                *sequence_menu_items,
                 *(
                     MenuItem(
                         label,
@@ -529,6 +600,37 @@ def _menu_items(
                 "但遁光位移与动画进度绑定，因此会随动画档位更早或更晚完成。"
             ),
         ),
+        *(
+            (
+                MenuItem(
+                    "特效质量",
+                    children=(
+                        _choice(
+                            "完整",
+                            "effects_quality",
+                            "full",
+                            "effects_quality",
+                            "effects_quality",
+                            "显示 pet.json 为动作声明的全部图层与可选特效。切换后会在当前动画的同一帧立即重绘。",
+                        ),
+                        _choice(
+                            "简化",
+                            "effects_quality",
+                            "simplified",
+                            "effects_quality",
+                            "effects_quality",
+                            "省略标记为 optionalInSimplified 的可选特效图层，身体图层、动作进度和当前位置保持不变。",
+                        ),
+                    ),
+                    description=(
+                        "完整模式渲染全部声明图层；简化模式只省略宠物包明确标记为可选的特效。"
+                        "质量切换不重启动画，也不改变身体锚点或屏幕位置。"
+                    ),
+                ),
+            )
+            if transformation_items or sequence_items
+            else ()
+        ),
         MenuItem(
             "移动速度",
             children=tuple(
@@ -606,6 +708,12 @@ class MenuController:
         action_details_supplier: Callable[[], Mapping[ActionKey, str]] | None = None,
         gaze_frame_count_supplier: Callable[[], int] | None = None,
         shortcut_labels_supplier: Callable[[], tuple[tuple[int, str], ...]] | None = None,
+        transformation_items_supplier: Callable[
+            [], tuple[PetTransformationDefinition, ...]
+        ] | None = None,
+        sequence_items_supplier: Callable[
+            [], tuple[PetSequenceDefinition, ...]
+        ] | None = None,
     ) -> None:
         self._settings_supplier = settings_supplier
         self._startup_supplier = startup_supplier
@@ -621,6 +729,10 @@ class MenuController:
         self._action_details_supplier = action_details_supplier or (lambda: {})
         self._gaze_frame_count_supplier = gaze_frame_count_supplier or (lambda: 16)
         self._shortcut_labels_supplier = shortcut_labels_supplier or (lambda: ())
+        self._transformation_items_supplier = (
+            transformation_items_supplier or (lambda: ())
+        )
+        self._sequence_items_supplier = sequence_items_supplier or (lambda: ())
         self._menus: list[QMenu] = []
 
     @property
@@ -632,6 +744,8 @@ class MenuController:
             self._action_details(),
             self._gaze_frame_count(),
             self._shortcut_labels(),
+            self._transformation_items(),
+            self._sequence_items(),
         )
 
     def flattened_labels(self) -> tuple[str, ...]:
@@ -791,6 +905,30 @@ class MenuController:
             return labels
         except Exception as error:
             self._report_supplier_error("shortcut labels supplier", error)
+            return ()
+
+    def _transformation_items(self) -> tuple[PetTransformationDefinition, ...]:
+        try:
+            items = tuple(self._transformation_items_supplier())
+            if any(
+                not isinstance(item, PetTransformationDefinition) for item in items
+            ):
+                raise TypeError(
+                    "transformation items supplier returned invalid values"
+                )
+            return items
+        except Exception as error:
+            self._report_supplier_error("transformation items supplier", error)
+            return ()
+
+    def _sequence_items(self) -> tuple[PetSequenceDefinition, ...]:
+        try:
+            items = tuple(self._sequence_items_supplier())
+            if any(not isinstance(item, PetSequenceDefinition) for item in items):
+                raise TypeError("sequence items supplier returned invalid values")
+            return items
+        except Exception as error:
+            self._report_supplier_error("sequence items supplier", error)
             return ()
 
     def _report_supplier_error(self, context: str, error: Exception) -> None:

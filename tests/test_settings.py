@@ -1,4 +1,7 @@
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from shiyi_desktop_pet.settings import AppSettings, SettingsStore
 
@@ -14,11 +17,12 @@ class FakeLogger:
 def test_first_launch_defaults_match_approved_design(tmp_path: Path):
     settings = SettingsStore(tmp_path / "settings.ini").load()
     assert settings == AppSettings(
-        schema_version=6, pet_id="shiyi", wander_enabled=False,
+        schema_version=7, pet_id="shiyi", wander_enabled=False,
         wander_intensity="standard", gaze_enabled=True, gaze_mode="active",
         autonomous_actions_enabled=True,
         hover_digits_enabled=True, always_on_top=True, menu_details_enabled=False,
         scale_percent=100, animation_speed="normal", movement_speed="normal",
+        effects_quality="full",
         screen_name="", relative_x=0.85, relative_y=0.75,
     )
 
@@ -45,7 +49,7 @@ def test_older_schema_is_migrated_with_new_defaults(tmp_path: Path):
     path = tmp_path / "settings.ini"
     path.write_text("[settings]\nschema_version=0\nwander_enabled=true\n", encoding="utf-8")
     loaded = SettingsStore(path).load()
-    assert loaded.schema_version == 6
+    assert loaded.schema_version == 7
     assert loaded.autonomous_actions_enabled is True
     assert loaded.pet_id == "shiyi"
     assert loaded.wander_enabled is True
@@ -77,7 +81,7 @@ def test_invalid_values_are_normalized_and_future_schema_falls_back(tmp_path: Pa
     assert settings.wander_intensity == "standard"
     assert (settings.relative_x, settings.relative_y) == (1.0, 0.0)
 
-    path.write_text("[settings]\nschema_version=7\n", encoding="utf-8")
+    path.write_text("[settings]\nschema_version=8\n", encoding="utf-8")
     assert SettingsStore(path).load() == AppSettings()
 
 
@@ -91,6 +95,25 @@ def test_gaze_mode_round_trips_and_invalid_values_use_active_default(tmp_path: P
         encoding="utf-8",
     )
     assert store.load().gaze_mode == "active"
+
+
+@pytest.mark.parametrize("quality", ("full", "simplified"))
+def test_effects_quality_round_trips(tmp_path: Path, quality: str):
+    store = SettingsStore(tmp_path / "settings.ini")
+
+    store.save(replace(AppSettings(), effects_quality=quality))
+
+    assert store.load().effects_quality == quality
+
+
+def test_invalid_effects_quality_falls_back_to_full(tmp_path: Path):
+    path = tmp_path / "settings.ini"
+    path.write_text(
+        "[settings]\nschema_version=7\neffects_quality=cinematic\n",
+        encoding="utf-8",
+    )
+
+    assert SettingsStore(path).load().effects_quality == "full"
 
 
 def test_non_finite_relative_positions_fall_back_to_defaults(tmp_path: Path):
