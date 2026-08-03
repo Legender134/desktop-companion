@@ -80,6 +80,8 @@ class AutoplayBucketScheduler:
         self._bucket_specs: dict[str, PetAutoplayDefinition] = {}
         for candidate in self.candidates:
             autoplay = candidate.autoplay
+            if autoplay.weight <= 0:
+                raise ValueError("autoplay candidate weight must be positive")
             bucket_lists.setdefault(autoplay.bucket, []).append(candidate)
             existing = self._bucket_specs.setdefault(autoplay.bucket, autoplay)
             existing_signature = (
@@ -160,13 +162,20 @@ class AutoplayBucketScheduler:
             )
             if not eligible:
                 continue
-            choice = self._weighted_choice(eligible, rng)
-            self._schedule_bucket(bucket, now_ms)
-            return choice
+            return self._weighted_choice(eligible, rng)
         return None
 
-    def record_started(self, candidate: AutoplayCandidate, now_ms: int) -> None:
-        """Bookkeep shared cooldowns for an automatic or manual start."""
+    def record_started(
+        self,
+        candidate: AutoplayCandidate,
+        now_ms: int,
+        *,
+        automatic: bool = False,
+    ) -> None:
+        """Record an accepted start, consuming a bucket only when automatic."""
+
+        if candidate not in self.candidates:
+            raise ValueError("autoplay candidate does not belong to this scheduler")
 
         for group in candidate.autoplay.cooldown_groups:
             duration = self._cooldown_durations[group]
@@ -174,6 +183,8 @@ class AutoplayBucketScheduler:
                 self.cooldown_deadlines.get(group, 0),
                 now_ms + duration,
             )
+        if automatic:
+            self._schedule_bucket(candidate.autoplay.bucket, now_ms)
 
     def defer(self, now_ms: int) -> None:
         """Move already-due buckets to the next short polling opportunity."""

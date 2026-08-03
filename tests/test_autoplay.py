@@ -67,7 +67,13 @@ def _silvermoon_candidates(
     rare = lambda weight, *groups: _autoplay(  # noqa: E731
         "rareEvent", weight, *rare_window, *groups
     )
-    spell = _autoplay("majorSpell", 4, *spell_window, "majorMagic")
+    spell = _autoplay(
+        "majorSpell",
+        4,
+        *spell_window,
+        "majorMagic",
+        "magicReserve",
+    )
     return (
         (
             _transformation("fox", common(8)),
@@ -90,6 +96,7 @@ def _silvermoon_like_scheduler(
     spell_window: tuple[int, int] = (720_000, 1_200_000),
     transform_cooldown_ms: int = 120_000,
     magic_cooldown_ms: int = 300_000,
+    magic_reserve_cooldown_ms: int = 180_000,
 ) -> AutoplayBucketScheduler:
     transformations, sequences = _silvermoon_candidates(
         common_window=common_window,
@@ -104,6 +111,9 @@ def _silvermoon_like_scheduler(
                 "globalTransform", transform_cooldown_ms
             ),
             PetCooldownGroupDefinition("majorMagic", magic_cooldown_ms),
+            PetCooldownGroupDefinition(
+                "magicReserve", magic_reserve_cooldown_ms
+            ),
         ),
         default_form=DEFAULT_FORM,
         rng=rng,
@@ -169,6 +179,7 @@ def test_rare_bucket_uses_weights_across_transformations_and_sequences():
         (
             PetCooldownGroupDefinition("globalTransform", 0),
             PetCooldownGroupDefinition("majorMagic", 0),
+            PetCooldownGroupDefinition("magicReserve", 0),
         ),
         default_form=DEFAULT_FORM,
         rng=random.Random(1),
@@ -183,6 +194,31 @@ def test_rare_bucket_uses_weights_across_transformations_and_sequences():
         counts[choice.key] += 1
 
     assert counts["corpse"] > counts["han"] > counts["wolf"] > 0
+
+
+def test_due_offer_is_not_consumed_until_automatic_start_is_accepted():
+    scheduler = _silvermoon_like_scheduler(
+        random.Random(0),
+        common_window=(100, 100),
+        rare_window=(10_000, 10_000),
+        spell_window=(20_000, 20_000),
+    )
+    scheduler.reset(0)
+    due_deadline = scheduler.deadlines["commonTransform"]
+
+    offered = scheduler.choose_due(100, DEFAULT_FORM, random.Random(0))
+
+    assert offered is not None
+    assert offered.autoplay.bucket == "commonTransform"
+    assert scheduler.deadlines["commonTransform"] == due_deadline
+
+    rejected_offer = scheduler.choose_due(101, DEFAULT_FORM, random.Random(1))
+    assert rejected_offer is not None
+    assert scheduler.deadlines["commonTransform"] == due_deadline
+
+    scheduler.record_started(offered, 101, automatic=True)
+
+    assert scheduler.deadlines["commonTransform"] == 201
 
 
 def test_recording_one_transform_group_candidate_blocks_every_group_member():
@@ -202,6 +238,97 @@ def test_recording_one_transform_group_candidate_blocks_every_group_member():
     choice = scheduler.choose_due(130_000, DEFAULT_FORM, random.Random(0))
     assert choice is not None
     assert "globalTransform" in choice.autoplay.cooldown_groups
+
+
+@pytest.mark.parametrize(
+    ("major_cooldown", "reserve_cooldown", "last_deadline"),
+    [(10, 5, 110), (5, 10, 110)],
+    ids=["first-group-blocks", "second-group-blocks"],
+)
+def test_every_named_shared_cooldown_blocks_a_two_group_candidate(
+    major_cooldown: int,
+    reserve_cooldown: int,
+    last_deadline: int,
+):
+    scheduler = _silvermoon_like_scheduler(
+        random.Random(0),
+        common_window=(10_000, 10_000),
+        rare_window=(20_000, 20_000),
+        spell_window=(0, 0),
+        magic_cooldown_ms=major_cooldown,
+        magic_reserve_cooldown_ms=reserve_cooldown,
+    )
+    scheduler.reset(0)
+    spell = next(
+        candidate for candidate in scheduler.candidates if candidate.key == "moonSpell"
+    )
+
+    scheduler.record_started(spell, 100)
+
+    assert scheduler.cooldown_deadlines == {
+        "globalTransform": 0,
+        "majorMagic": 100 + major_cooldown,
+        "magicReserve": 100 + reserve_cooldown,
+    }
+    assert (
+        scheduler.choose_due(
+            last_deadline - 1,
+            DEFAULT_FORM,
+            random.Random(0),
+        )
+        is None
+    )
+    assert scheduler.choose_due(last_deadline, DEFAULT_FORM, random.Random(0)) == spell
+
+
+def test_an_earlier_started_record_cannot_shorten_shared_cooldowns():
+    scheduler = _silvermoon_like_scheduler(
+        random.Random(0),
+        magic_cooldown_ms=300,
+        magic_reserve_cooldown_ms=200,
+    )
+    spell = next(
+        candidate for candidate in scheduler.candidates if candidate.key == "moonSpell"
+    )
+    expected = {
+        "globalTransform": 0,
+        "majorMagic": 1_300,
+        "magicReserve": 1_200,
+    }
+
+    scheduler.record_started(spell, 1_000)
+    scheduler.record_started(spell, 500)
+
+    assert scheduler.cooldown_deadlines == expected
+
+
+def test_record_started_rejects_a_foreign_candidate_without_mutating_state():
+    scheduler = _silvermoon_like_scheduler(random.Random(0))
+    scheduler.reset(0)
+    foreign_definition = _transformation(
+        "foreign",
+        _autoplay(
+            "commonTransform",
+            1,
+            180_000,
+            360_000,
+            "globalTransform",
+        ),
+    )
+    foreign = AutoplayCandidate(
+        "transformation",
+        foreign_definition.key,
+        foreign_definition,
+        foreign_definition.autoplay,
+    )
+    expected_deadlines = dict(scheduler.deadlines)
+    expected_cooldowns = dict(scheduler.cooldown_deadlines)
+
+    with pytest.raises(ValueError, match="does not belong"):
+        scheduler.record_started(foreign, 1_000, automatic=True)
+
+    assert scheduler.deadlines == expected_deadlines
+    assert scheduler.cooldown_deadlines == expected_cooldowns
 
 
 @pytest.mark.parametrize(
@@ -275,9 +402,25 @@ def test_manual_start_is_bookkept_even_when_scheduler_would_not_deliver_it():
     fox = next(candidate for candidate in scheduler.candidates if candidate.key == "fox")
 
     assert scheduler.choose_due(0, "whiteFox", random.Random(0)) is None
+    initial_deadline = scheduler.deadlines["commonTransform"]
     scheduler.record_started(fox, 7_000)
 
     assert scheduler.cooldown_deadlines["globalTransform"] == 127_000
+    assert scheduler.deadlines["commonTransform"] == initial_deadline
+
+
+@pytest.mark.parametrize("weight", [0, -1])
+def test_scheduler_rejects_non_positive_autoplay_weights(weight: int):
+    invalid = _sequence("invalid", _autoplay("invalidBucket", weight, 0, 0))
+
+    with pytest.raises(ValueError, match="weight must be positive"):
+        AutoplayBucketScheduler(
+            (),
+            (invalid,),
+            (),
+            default_form=DEFAULT_FORM,
+            rng=random.Random(0),
+        )
 
 
 def test_one_hundred_thousand_picks_preserve_windows_eligibility_and_cooldowns():
@@ -288,6 +431,7 @@ def test_one_hundred_thousand_picks_preserve_windows_eligibility_and_cooldowns()
         spell_window=(3, 9),
         transform_cooldown_ms=4,
         magic_cooldown_ms=5,
+        magic_reserve_cooldown_ms=7,
     )
     scheduler.reset(0)
     selection_rng = random.Random(91)
@@ -298,11 +442,16 @@ def test_one_hundred_thousand_picks_preserve_windows_eligibility_and_cooldowns()
     }
     all_keys = {candidate.key for candidate in scheduler.candidates}
     seen: set[str] = set()
+    cooldown_durations = {
+        "globalTransform": 4,
+        "majorMagic": 5,
+        "magicReserve": 7,
+    }
+    expected_cooldown_deadlines = {group: 0 for group in cooldown_durations}
     now = 0
 
     for _ in range(100_000):
         now = max(now, scheduler.next_deadline_ms())
-        before_cooldowns = dict(scheduler.cooldown_deadlines)
         choice = scheduler.choose_due(now, DEFAULT_FORM, selection_rng)
         if choice is None:
             scheduler.defer(now)
@@ -311,13 +460,20 @@ def test_one_hundred_thousand_picks_preserve_windows_eligibility_and_cooldowns()
         assert choice.key in all_keys
         assert choice.definition is not None
         assert all(
-            now >= before_cooldowns.get(group, 0)
+            now >= expected_cooldown_deadlines[group]
             for group in choice.autoplay.cooldown_groups
         )
+        assert scheduler.deadlines[choice.autoplay.bucket] <= now
+        scheduler.record_started(choice, now, automatic=True)
+        for group in choice.autoplay.cooldown_groups:
+            expected_cooldown_deadlines[group] = max(
+                expected_cooldown_deadlines[group],
+                now + cooldown_durations[group],
+            )
+        assert scheduler.cooldown_deadlines == expected_cooldown_deadlines
         minimum, maximum = windows[choice.autoplay.bucket]
         deadline = scheduler.deadlines[choice.autoplay.bucket]
         assert now + minimum <= deadline <= now + maximum
         seen.add(choice.key)
-        scheduler.record_started(choice, now)
 
     assert seen == all_keys
