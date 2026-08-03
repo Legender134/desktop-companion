@@ -14,18 +14,14 @@ from random import Random
 import sys
 from collections.abc import Callable, Mapping
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QTimer, Qt, QUrl, qVersion
+from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QTimer, Qt, QUrl, qVersion
 from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QImage, QImageReader
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .animation_catalog import AnimationCatalog
 from .animation_player import AnimationTimeline
 from .behavior import BehaviorEngine, BehaviorMode
-from .constants import (
-    CELL_HEIGHT,
-    CELL_WIDTH,
-    KEY_TO_ACTION,
-)
+from .constants import KEY_TO_ACTION
 from .gaze import GazeSmoother, cursor_angle
 from .geometry import Point, Rect, Size, clamp_position
 from .keyboard_hook import LowLevelKeyboardHook
@@ -36,9 +32,9 @@ from .models import (
     ActionKey,
     ActionRole,
     AnimationSpec,
-    FrameAsset,
     PetActionDefinition,
     PetStateDefinition,
+    RenderedFrame,
 )
 from .pet_registry import PetDefinition, PetRegistry
 from .pet_window import PetWindow
@@ -290,8 +286,8 @@ class DesktopPetApplication:
             Qt.WindowType.WindowStaysOnTopHint, self._settings.always_on_top
         )
         self._hover_snapshot = _EMPTY_HOVER_SNAPSHOT
-        self._alpha_cache: dict[tuple[int, int, str], tuple[bytes, int]] = {}
-        self._displayed_frame: tuple[int, int, str, int] | None = None
+        self._alpha_cache: dict[tuple[object, ...], tuple[bytes, int]] = {}
+        self._displayed_frame: tuple[tuple[object, ...], int] | None = None
         self._started = False
         self._shut_down = False
         self._wander_target: Point | None = None
@@ -371,7 +367,7 @@ class DesktopPetApplication:
         for screen in self.qapp.screens():
             self._connect_screen(screen)
 
-        initial = self.catalog.frames(self.catalog.idle_action)[0]
+        initial = self.catalog.rendered_frames(self.catalog.idle_action)[0]
         self._show_frame(initial)
         self._restore_position()
         self._refresh_hover_snapshot()
@@ -668,7 +664,7 @@ class DesktopPetApplication:
             return
         spec = self.catalog.spec(action)
         step = self.timeline.advance(self._adjusted_animation_time(now_ms), spec)
-        self._show_frame(self.catalog.frames(action)[step.frame_index])
+        self._show_frame(self.catalog.rendered_frames(action)[step.frame_index])
         if not step.finished:
             return
         if self._state_phase == "enter":
@@ -824,7 +820,7 @@ class DesktopPetApplication:
             return
         area = self._current_screen_area()
         self._fixed_look_degrees = None
-        current = Point(float(self.window.x()), float(self.window.y()))
+        current = self._pet_position()
         pet_size = self._pet_size()
         _minimum_delay, _maximum_delay, distance_ratio = _WANDER_PROFILES.get(
             self._settings.wander_intensity,
@@ -848,7 +844,7 @@ class DesktopPetApplication:
             self._wander_action = None
             self._wander_start = None
             self.timeline.start(self.catalog.idle_action, self._now_ms())
-            self._show_frame(self.catalog.frames(self.catalog.idle_action)[0])
+            self._show_frame(self.catalog.rendered_frames(self.catalog.idle_action)[0])
             self._schedule_wander()
             return
         distance = math.hypot(
@@ -896,7 +892,7 @@ class DesktopPetApplication:
             self.wander_timer.stop()
             self._fixed_look_degrees = degrees
             self.behavior.request_gaze(degrees)
-            self._show_frame(self.catalog.look_frame(degrees))
+            self._show_frame(self.catalog.look_frame_for(self.catalog.default_form, degrees))
             return
         if kind == "showcase":
             self.start_showcase()
@@ -1117,25 +1113,32 @@ class DesktopPetApplication:
             return
         cursor = cursor or QCursor.pos()
         alpha, stride = self._alpha_bytes(frame)
+        body_global = self.window.body_global_rect()
+        body_rect = frame.body_rect
+        scale = (
+            body_global.width() / body_rect.width()
+            if body_rect.width() > 0
+            else 0.0
+        )
         self._hover_snapshot = HoverSnapshot(
             alpha=alpha,
-            width=frame.image.width(),
-            height=frame.image.height(),
+            width=frame.body_image.width(),
+            height=frame.body_image.height(),
             bytes_per_line=stride,
-            scale=self._settings.scale_percent / 100.0,
-            window_x=float(self.window.x()),
-            window_y=float(self.window.y()),
+            scale=scale,
+            window_x=body_global.x(),
+            window_y=body_global.y(),
             visible=self.window.isVisible(),
             cursor_x=float(cursor.x()),
             cursor_y=float(cursor.y()),
         )
 
-    def _alpha_bytes(self, frame: FrameAsset) -> tuple[bytes, int]:
-        key = (frame.row, frame.column, frame.variant)
+    def _alpha_bytes(self, frame: RenderedFrame) -> tuple[bytes, int]:
+        key = frame.identity
         cached = self._alpha_cache.get(key)
         if cached is not None:
             return cached
-        image = frame.image.convertToFormat(QImage.Format.Format_Alpha8)
+        image = frame.body_image.convertToFormat(QImage.Format.Format_Alpha8)
         result = bytes(image.constBits()), image.bytesPerLine()
         self._alpha_cache[key] = result
         return result
@@ -1149,7 +1152,11 @@ class DesktopPetApplication:
             self._refresh_hover_snapshot()
             return
         if self._fixed_look_degrees is not None and self.catalog.supports_gaze:
-            self._show_frame(self.catalog.look_frame(self._fixed_look_degrees))
+            self._show_frame(
+                self.catalog.look_frame_for(
+                    self.catalog.default_form, self._fixed_look_degrees
+                )
+            )
             return
         if mode is BehaviorMode.MANUAL_ACTION:
             self._advance_manual(now_ms)
@@ -1176,7 +1183,7 @@ class DesktopPetApplication:
         )
         adjusted_now = self._adjusted_animation_time(now_ms)
         step = self.timeline.advance(adjusted_now, playback_spec)
-        frames = self.catalog.frames(action)
+        frames = self.catalog.rendered_frames(action)
         self._show_frame(frames[step.frame_index])
         if definition.role is ActionRole.BURST_MOVE:
             self._advance_manual_burst(adjusted_now, definition)
@@ -1207,7 +1214,8 @@ class DesktopPetApplication:
     def _manual_move(self, direction: int) -> None:
         area = self._current_screen_area()
         distance = 12.0 * self._settings.scale_percent / 100.0
-        desired = Point(self.window.x() + direction * distance, float(self.window.y()))
+        current = self._pet_position()
+        desired = Point(current.x + direction * distance, current.y)
         self._move_window(clamp_position(desired, self._pet_size(), area))
 
     def _resolve_manual_burst_action(
@@ -1219,7 +1227,7 @@ class DesktopPetApplication:
         area = self._current_screen_area()
         pet = self._pet_size()
         start = clamp_position(
-            Point(float(self.window.x()), float(self.window.y())), pet, area
+            self._pet_position(), pet, area
         )
         min_x = area.x
         max_x = max(area.x, area.x + area.width - pet.width)
@@ -1247,7 +1255,7 @@ class DesktopPetApplication:
         area = self._current_screen_area()
         pet = self._pet_size()
         start = clamp_position(
-            Point(float(self.window.x()), float(self.window.y())), pet, area
+            self._pet_position(), pet, area
         )
         if definition.travel_distance_ratio is not None:
             min_x = area.x
@@ -1290,9 +1298,9 @@ class DesktopPetApplication:
         adjusted_now = self._adjusted_animation_time(now_ms)
         elapsed = max(0, adjusted_now - self.timeline.started_ms)
         frame_index = spec.frame_index_at(elapsed)
-        self._show_frame(self.catalog.frames(action)[frame_index])
+        self._show_frame(self.catalog.rendered_frames(action)[frame_index])
 
-        current = Point(float(self.window.x()), float(self.window.y()))
+        current = self._pet_position()
         if definition.role is ActionRole.BURST_MOVE:
             start = self._wander_start or current
             progress = self._burst_progress(adjusted_now, definition)
@@ -1401,8 +1409,9 @@ class DesktopPetApplication:
         ):
             self._interrupt_wander(reschedule=False)
         self._live_gaze_active = True
-        center_x = self.window.x() + self.window.width() / 2
-        center_y = self.window.y() + self.window.height() / 2
+        body = self.window.body_global_rect()
+        center_x = body.center().x()
+        center_y = body.center().y()
         direction = cursor_angle(
             cursor.x() - center_x,
             cursor.y() - center_y,
@@ -1413,16 +1422,18 @@ class DesktopPetApplication:
 
     def _render_base(self, now_ms: int) -> None:
         if self._fixed_look_degrees is not None and self.catalog.supports_gaze:
-            self._show_frame(self.catalog.look_frame(self._fixed_look_degrees))
+            self._show_frame(
+                self.catalog.look_frame_for(
+                    self.catalog.default_form, self._fixed_look_degrees
+                )
+            )
             return
         if (
             self.catalog.supports_gaze
             and self.behavior.mode is BehaviorMode.GAZE
             and self.behavior.gaze_degrees is not None
         ):
-            self._show_frame(
-                self.catalog.nearest_look_frame(self.behavior.gaze_degrees)
-            )
+            self._show_frame(self._nearest_rendered_look_frame(self.behavior.gaze_degrees))
             return
         idle = self.catalog.idle_action
         spec = self.catalog.spec(idle)
@@ -1430,14 +1441,14 @@ class DesktopPetApplication:
         if self.timeline.action != idle:
             self.timeline.start(idle, now_ms)
             step = self.timeline.advance(now_ms, spec)
-        self._show_frame(self.catalog.frames(idle)[step.frame_index])
+        self._show_frame(self.catalog.rendered_frames(idle)[step.frame_index])
 
     def _render_current_frame(self) -> None:
         self._displayed_frame = None
         if self.behavior.mode is BehaviorMode.MANUAL_ACTION and self.behavior.current_action:
             action = self.behavior.current_action
             step = self.timeline.advance(self._now_ms(), self.catalog.spec(action))
-            self._show_frame(self.catalog.frames(action)[step.frame_index])
+            self._show_frame(self.catalog.rendered_frames(action)[step.frame_index])
         else:
             self._render_base(self._now_ms())
 
@@ -1450,17 +1461,19 @@ class DesktopPetApplication:
             self._schedule_wander()
         self._schedule_autonomous()
 
-    def _show_frame(self, frame: FrameAsset) -> None:
-        identity = (
-            frame.row,
-            frame.column,
-            frame.variant,
-            self._settings.scale_percent,
-        )
+    def _show_frame(self, frame: RenderedFrame) -> None:
+        identity = (frame.identity, self._settings.scale_percent)
         if self._displayed_frame != identity:
             self.window.set_frame(frame, self._settings.scale_percent)
             self._displayed_frame = identity
         self._refresh_hover_snapshot()
+
+    def _nearest_rendered_look_frame(self, degrees: float) -> RenderedFrame:
+        nearest = min(
+            self.catalog.look_degrees,
+            key=lambda candidate: abs((candidate - degrees + 180.0) % 360.0 - 180.0),
+        )
+        return self.catalog.look_frame_for(self.catalog.default_form, nearest)
 
     def _schedule_wander(self) -> None:
         if (
@@ -1598,7 +1611,7 @@ class DesktopPetApplication:
             now_ms = self._now_ms()
             self.timeline.start(self.catalog.idle_action, now_ms)
             self._last_frame_index = None
-            self._show_frame(self.catalog.frames(self.catalog.idle_action)[0])
+            self._show_frame(self.catalog.rendered_frames(self.catalog.idle_action)[0])
         if reschedule:
             self._schedule_wander()
             self._schedule_autonomous()
@@ -1617,14 +1630,14 @@ class DesktopPetApplication:
         self.behavior.begin_drag()
 
     def _drag_to(self, target: QPoint) -> None:
-        self.window.move(target)
+        self.window.move_pet(QPointF(target))
         self._refresh_hover_snapshot()
 
     def _finish_drag(self, target: QPoint) -> None:
-        self.window.move(target)
+        self.window.move_pet(QPointF(target))
         area = self._current_screen_area()
         clamped = clamp_position(
-            Point(float(self.window.x()), float(self.window.y())),
+            self._pet_position(),
             self._pet_size(),
             area,
         )
@@ -1642,22 +1655,18 @@ class DesktopPetApplication:
         self._move_window(position)
 
     def _save_window_position(self) -> None:
-        screen = QGuiApplication.screenAt(
-            QPoint(
-                self.window.x() + self.window.width() // 2,
-                self.window.y() + self.window.height() // 2,
-            )
-        ) or self.qapp.primaryScreen()
+        body = self.window.body_global_rect()
+        screen = QGuiApplication.screenAt(body.center().toPoint()) or self.qapp.primaryScreen()
         if screen is None:
             return
         area = self._rect_from_qrect(screen.availableGeometry())
         relative_x = (
-            (self.window.x() + self.window.width() / 2 - area.x) / area.width
+            (body.center().x() - area.x) / area.width
             if area.width > 0
             else 0.5
         )
         relative_y = (
-            (self.window.y() + self.window.height() / 2 - area.y) / area.height
+            (body.center().y() - area.y) / area.height
             if area.height > 0
             else 0.5
         )
@@ -1693,10 +1702,7 @@ class DesktopPetApplication:
         return Rect(float(rect.x()), float(rect.y()), float(rect.width()), float(rect.height()))
 
     def _current_screen_area(self) -> Rect:
-        center = QPoint(
-            self.window.x() + self.window.width() // 2,
-            self.window.y() + self.window.height() // 2,
-        )
+        center = self.window.body_global_rect().center().toPoint()
         screen = QGuiApplication.screenAt(center) or self.qapp.primaryScreen()
         if screen is None:
             raise RuntimeError("no screen is available")
@@ -1722,7 +1728,7 @@ class DesktopPetApplication:
         except RuntimeError:
             return
         position = clamp_position(
-            Point(float(self.window.x()), float(self.window.y())),
+            self._pet_position(),
             self._pet_size(),
             area,
         )
@@ -1730,12 +1736,16 @@ class DesktopPetApplication:
         self._schedule_wander()
 
     def _move_window(self, position: Point) -> None:
-        self.window.move(round(position.x), round(position.y))
+        self.window.move_pet(QPointF(position.x, position.y))
         self._refresh_hover_snapshot()
 
     def _pet_size(self) -> Size:
-        scale = self._settings.scale_percent / 100.0
-        return Size(CELL_WIDTH * scale, CELL_HEIGHT * scale)
+        size = self.window.pet_size()
+        return Size(size.width(), size.height())
+
+    def _pet_position(self) -> Point:
+        position = self.window.pet_position()
+        return Point(position.x(), position.y())
 
     def _now_ms(self) -> int:
         return int(self._clock.elapsed())

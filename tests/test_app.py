@@ -8,7 +8,7 @@ import shutil
 import sys
 
 import pytest
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage
 
 import shiyi_desktop_pet.app as app_module
@@ -27,7 +27,7 @@ from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.geometry import Point, Rect, Size
 from shiyi_desktop_pet.logging_setup import configure_logging, install_exception_hook
 from shiyi_desktop_pet.menu_controller import MenuCommand
-from shiyi_desktop_pet.models import ActionId, AnimationSpec
+from shiyi_desktop_pet.models import ActionId, AnimationSpec, RenderedFrame
 from shiyi_desktop_pet.pet_registry import PetRegistry
 from shiyi_desktop_pet.pet_window import PetWindow
 from shiyi_desktop_pet.resource_locator import resource_root
@@ -155,6 +155,36 @@ class _SignalBox(QObject):
 
 def _catalog():
     return AnimationCatalog.load_default()
+
+
+def _wide_effect_frames(frames):
+    rendered = []
+    for index, frame in enumerate(frames):
+        body_width = frame.body_rect.width()
+        body_image = QImage(frame.body_image.size(), QImage.Format.Format_RGBA8888)
+        body_image.fill(QColor(60, 120, 200, 255))
+        image = QImage(
+            body_width * 3,
+            frame.image.height(),
+            QImage.Format.Format_RGBA8888,
+        )
+        image.fill(QColor(180, 80, 220, 255))
+        body_rect = QRect(
+            body_width,
+            frame.body_rect.y(),
+            frame.body_rect.width(),
+            frame.body_rect.height(),
+        )
+        rendered.append(
+            RenderedFrame(
+                image=image,
+                body_image=body_image,
+                body_rect=body_rect,
+                anchor=frame.anchor + QPoint(body_width, 0),
+                identity=("wide-effect", index, frame.identity),
+            )
+        )
+    return tuple(rendered)
 
 
 def _dynamic_catalog():
@@ -497,6 +527,108 @@ def test_hover_snapshot_is_immutable_and_alpha_aware():
         snapshot.visible = False
 
 
+@pytest.mark.parametrize("scale_percent", (100, 125, 150))
+def test_wide_effect_movement_clamping_gaze_and_hover_use_body_geometry(
+    qapp, monkeypatch, scale_percent
+):
+    controller, _, _, _, _ = _controller(
+        qapp,
+        settings=replace(
+            AppSettings(),
+            scale_percent=scale_percent,
+            wander_enabled=False,
+            gaze_mode="always",
+        ),
+    )
+    try:
+        original_rendered_frames = controller.catalog.rendered_frames
+        wide_run_frames = _wide_effect_frames(
+            original_rendered_frames(ActionId.RUN_RIGHT)
+        )
+        monkeypatch.setattr(
+            controller.catalog,
+            "rendered_frames",
+            lambda action, effects_quality="full": (
+                wide_run_frames
+                if action is ActionId.RUN_RIGHT
+                else original_rendered_frames(action, effects_quality)
+            ),
+        )
+        area = controller._current_screen_area()
+        pet = controller.window.pet_size()
+        edge = QPointF(
+            area.x + area.width - pet.width(),
+            area.y + area.height - pet.height(),
+        )
+        controller.window.move_pet(edge)
+        scale = scale_percent / 100.0
+        current = controller.window.current_frame
+        anchor_before = controller.window.mapToGlobal(
+            QPoint(round(current.anchor.x() * scale), round(current.anchor.y() * scale))
+        )
+
+        controller.trigger_action(ActionId.RUN_RIGHT)
+        controller.timeline.started_ms = 0
+        controller._advance_manual(100)
+
+        controller.window.show()
+        body = controller.window.body_global_rect()
+        current = controller.window.current_frame
+        anchor_after = controller.window.mapToGlobal(
+            QPoint(round(current.anchor.x() * scale), round(current.anchor.y() * scale))
+        )
+        assert anchor_after == anchor_before
+        assert body.left() >= area.x
+        assert body.top() >= area.y
+        assert body.right() <= area.x + area.width
+        assert body.bottom() <= area.y + area.height
+        assert controller.window.width() == round(192 * 3 * scale)
+
+        opaque = next(
+            QPoint(x, y)
+            for y in range(current.body_image.height())
+            for x in range(current.body_image.width())
+            if current.body_image.pixelColor(x, y).alpha() > 0
+        )
+        body_cursor = QPoint(
+            round(body.x() + (opaque.x() + 0.5) * scale),
+            round(body.y() + (opaque.y() + 0.5) * scale),
+        )
+        controller._refresh_hover_snapshot(body_cursor)
+        assert controller.hover_snapshot.hit_test()
+        effect_cursor = QPoint(
+            round(
+                body.x()
+                - current.body_rect.width() * scale
+                + (opaque.x() + 0.5) * scale
+            ),
+            body_cursor.y(),
+        )
+        controller._refresh_hover_snapshot(effect_cursor)
+        assert not controller.hover_snapshot.hit_test()
+
+        controller.behavior.manual_finished()
+        gaze_cursor = QPoint(round(body.center().x() + 100), round(body.center().y()))
+        captured = []
+
+        class FixedCursor:
+            @staticmethod
+            def pos():
+                return gaze_cursor
+
+        monkeypatch.setattr(app_module, "QCursor", FixedCursor)
+        monkeypatch.setattr(
+            app_module,
+            "cursor_angle",
+            lambda dx, dy, dead_zone: captured.append((dx, dy, dead_zone)) or 0.0,
+        )
+        controller._gaze_tick()
+        assert captured[0][0] == pytest.approx(gaze_cursor.x() - body.center().x())
+        assert captured[0][1] == pytest.approx(gaze_cursor.y() - body.center().y())
+    finally:
+        controller.shutdown()
+
+
 def test_hook_start_failure_keeps_pet_running_and_disables_session_shortcut(qapp):
     hooks = []
     trays = []
@@ -755,7 +887,10 @@ def test_remaining_menu_commands_hook_digit_and_activation(qapp):
     controller.start(startup=True)
 
     controller.dispatch_menu(MenuCommand("look", 90.0))
-    assert controller.window.current_frame.row == 9
+    assert (
+        controller.window.current_frame.body_image
+        == controller.catalog.look_frame(90.0).image
+    )
     controller.dispatch_menu(MenuCommand("toggle", False, "hover_digits_enabled"))
     assert not hooks[0].enabled
     controller.dispatch_menu(MenuCommand("toggle", False, "always_on_top"))
