@@ -102,3 +102,30 @@ def test_repeated_and_unpaired_drag_calls_are_safe():
     assert engine.mode is BehaviorMode.WANDER
     engine.end_drag()
     assert engine.mode is BehaviorMode.WANDER
+
+
+def test_scripted_sequence_yields_to_drag_and_resumes_until_finished():
+    engine = BehaviorEngine(wander_enabled=True)
+
+    engine.begin_scripted("transformEnter")
+    assert engine.mode is BehaviorMode.SCRIPTED_SEQUENCE
+    assert engine.current_action == "transformEnter"
+
+    engine.begin_drag()
+    assert engine.mode is BehaviorMode.DRAGGING
+    engine.end_drag()
+    assert engine.mode is BehaviorMode.SCRIPTED_SEQUENCE
+
+    engine.scripted_finished()
+    assert engine.mode is BehaviorMode.WANDER
+
+
+def test_shutdown_has_priority_over_scripted_sequence_intents():
+    engine = BehaviorEngine()
+    engine.begin_scripted("transformEnter")
+    engine.begin_shutdown()
+
+    engine.begin_scripted("resident")
+    engine.scripted_finished()
+
+    assert engine.mode is BehaviorMode.SHUTTING_DOWN

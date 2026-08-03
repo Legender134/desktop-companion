@@ -9,6 +9,7 @@ class BehaviorMode(StrEnum):
     GAZE = "gaze"
     WANDER = "wander"
     MANUAL_ACTION = "manual_action"
+    SCRIPTED_SEQUENCE = "scripted_sequence"
     DRAGGING = "dragging"
     SHUTTING_DOWN = "shutting_down"
 
@@ -19,6 +20,7 @@ class BehaviorEngine:
     gaze_degrees: float | None = None
     mode: BehaviorMode = field(default=BehaviorMode.IDLE, init=False)
     current_action: ActionKey | None = field(default=None, init=False)
+    _scripted_active: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.mode = self._base_mode()
@@ -26,6 +28,7 @@ class BehaviorEngine:
     def trigger_manual(self, action: ActionKey) -> None:
         if self.mode is BehaviorMode.SHUTTING_DOWN:
             return
+        self._scripted_active = False
         if action is ActionId.IDLE:
             self.current_action = None
             if self.mode is not BehaviorMode.DRAGGING:
@@ -42,6 +45,22 @@ class BehaviorEngine:
         if self.mode is not BehaviorMode.DRAGGING:
             self.mode = self._base_mode()
 
+    def begin_scripted(self, action: ActionKey) -> None:
+        if self.mode is BehaviorMode.SHUTTING_DOWN:
+            return
+        self._scripted_active = True
+        self.current_action = action
+        if self.mode is not BehaviorMode.DRAGGING:
+            self.mode = BehaviorMode.SCRIPTED_SEQUENCE
+
+    def scripted_finished(self) -> None:
+        if self.mode is BehaviorMode.SHUTTING_DOWN:
+            return
+        self._scripted_active = False
+        self.current_action = None
+        if self.mode is not BehaviorMode.DRAGGING:
+            self.mode = self._base_mode()
+
     def begin_drag(self) -> None:
         if self.mode in {BehaviorMode.DRAGGING, BehaviorMode.SHUTTING_DOWN}:
             return
@@ -49,6 +68,9 @@ class BehaviorEngine:
 
     def end_drag(self) -> None:
         if self.mode is not BehaviorMode.DRAGGING:
+            return
+        if self._scripted_active:
+            self.mode = BehaviorMode.SCRIPTED_SEQUENCE
             return
         if self.current_action is not None:
             self.mode = BehaviorMode.MANUAL_ACTION
@@ -59,6 +81,7 @@ class BehaviorEngine:
         self.wander_enabled = enabled
         if self.mode not in {
             BehaviorMode.MANUAL_ACTION,
+            BehaviorMode.SCRIPTED_SEQUENCE,
             BehaviorMode.DRAGGING,
             BehaviorMode.SHUTTING_DOWN,
         }:
@@ -68,6 +91,7 @@ class BehaviorEngine:
         self.gaze_degrees = degrees
         if self.mode not in {
             BehaviorMode.MANUAL_ACTION,
+            BehaviorMode.SCRIPTED_SEQUENCE,
             BehaviorMode.DRAGGING,
             BehaviorMode.SHUTTING_DOWN,
         }:

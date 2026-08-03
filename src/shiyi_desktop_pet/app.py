@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .animation_catalog import AnimationCatalog
 from .animation_player import AnimationTimeline
+from .autoplay import AutoplayBucketScheduler, AutoplayCandidate
 from .behavior import BehaviorEngine, BehaviorMode
 from .constants import KEY_TO_ACTION
 from .gaze import GazeSmoother, cursor_angle
@@ -27,6 +28,7 @@ from .geometry import Point, Rect, Size, clamp_position
 from .keyboard_hook import LowLevelKeyboardHook
 from .logging_setup import configure_logging, install_exception_hook
 from .menu_controller import MenuCommand, MenuController
+from .multiform import MultiformController, RuntimeCommand, RuntimeCommandKind
 from .models import (
     ActionId,
     ActionKey,
@@ -317,14 +319,22 @@ class DesktopPetApplication:
         self._state_active_started_ms: int | None = None
         self._state_last_action: ActionKey | None = None
         self._state_exit_requested = False
+        self.multiform: MultiformController | None = None
+        self.v4_autoplay: AutoplayBucketScheduler | None = None
+        self._runtime_repeat_remaining = 0
+        self._runtime_step_hold_ms = 0
+        self._runtime_hold_until_ms: int | None = None
 
         self._clock = QElapsedTimer()
         self._clock.start()
+        self._configure_v4_runtime(selected_pet)
         self._last_cursor_position = QCursor.pos()
         self._last_cursor_move_ms = self._now_ms()
         self._live_gaze_active = False
         self._autonomous_not_before_ms = 0
-        self.timeline.start(self.catalog.idle_action, self._now_ms())
+        self.timeline.start(
+            self.catalog.idle_action_for(self._current_form()), self._now_ms()
+        )
 
         self.menu_controller = MenuController(
             lambda: self.settings,
@@ -374,7 +384,10 @@ class DesktopPetApplication:
         for screen in self.qapp.screens():
             self._connect_screen(screen)
 
-        initial = self.catalog.rendered_frames(self.catalog.idle_action)[0]
+        initial = self.catalog.rendered_frames(
+            self.catalog.idle_action_for(self._current_form()),
+            self._effects_quality(),
+        )[0]
         self._show_frame(initial)
         self._restore_position()
         self._refresh_hover_snapshot()
@@ -408,7 +421,144 @@ class DesktopPetApplication:
             return self.behavior.current_action
         if self._wander_target is not None and self._wander_action is not None:
             return self._wander_action
-        return self.catalog.idle_action
+        return self.catalog.idle_action_for(self._current_form())
+
+    def _configure_v4_runtime(self, definition: PetDefinition) -> None:
+        self._runtime_repeat_remaining = 0
+        self._runtime_step_hold_ms = 0
+        self._runtime_hold_until_ms = None
+        if self.catalog.sprite_version != 4:
+            self.multiform = None
+            self.v4_autoplay = None
+            return
+        if definition.sprite_version != 4 or definition.pet_id != self.catalog.pet_id:
+            selected = self._pet_snapshot.by_id(self.catalog.pet_id)
+            if selected is None or selected.sprite_version != 4:
+                raise ValueError("v4 catalog requires its matching pet definition")
+            definition = selected
+        self.multiform = MultiformController(
+            default_form=definition.default_form,
+            forms=definition.forms,
+            transformations=definition.transformations,
+            sequences=definition.sequences,
+            rng=self._rng,
+        )
+        self.v4_autoplay = AutoplayBucketScheduler(
+            definition.transformations,
+            definition.sequences,
+            definition.cooldown_groups,
+            default_form=definition.default_form,
+            rng=self._rng,
+        )
+        self.v4_autoplay.reset(self._now_ms())
+
+    def _current_form(self) -> str:
+        if self.multiform is not None:
+            return self.multiform.current_form
+        return self.catalog.default_form
+
+    def _v4_candidate(self, kind: str, key: str) -> AutoplayCandidate | None:
+        scheduler = self.v4_autoplay
+        if scheduler is None:
+            return None
+        return next(
+            (
+                candidate
+                for candidate in scheduler.candidates
+                if candidate.kind == kind and candidate.key == key
+            ),
+            None,
+        )
+
+    def trigger_transformation(self, key: str, manual: bool = True) -> bool:
+        controller = self.multiform
+        if controller is None:
+            raise ValueError("transformations require a v4 pet")
+        command = controller.request_transformation(
+            key, manual=manual, now_ms=self._now_ms()
+        )
+        if command is None:
+            return False
+        self._cancel_showcase()
+        self._execute_runtime_command(command)
+        if manual:
+            candidate = self._v4_candidate("transformation", key)
+            if candidate is not None and self.v4_autoplay is not None:
+                self.v4_autoplay.record_started(candidate, self._now_ms())
+            self._defer_autonomous()
+        return True
+
+    def trigger_sequence(self, key: str, manual: bool = True) -> bool:
+        controller = self.multiform
+        if controller is None:
+            raise ValueError("sequences require a v4 pet")
+        command = controller.request_sequence(
+            key, manual=manual, now_ms=self._now_ms()
+        )
+        if command is None:
+            return False
+        self._cancel_showcase()
+        self._execute_runtime_command(command)
+        if manual:
+            candidate = self._v4_candidate("sequence", key)
+            if candidate is not None and self.v4_autoplay is not None:
+                self.v4_autoplay.record_started(candidate, self._now_ms())
+            self._defer_autonomous()
+        return True
+
+    def _execute_runtime_command(self, command: RuntimeCommand) -> None:
+        if command.kind is RuntimeCommandKind.CLEANUP:
+            self._runtime_repeat_remaining = 0
+            self._runtime_step_hold_ms = 0
+            self._runtime_hold_until_ms = None
+            self.behavior.scripted_finished()
+            self._show_v4_cleanup_frame()
+            return
+        if command.kind is RuntimeCommandKind.FINISH or command.action is None:
+            self._runtime_repeat_remaining = 0
+            self._runtime_step_hold_ms = 0
+            self._runtime_hold_until_ms = None
+            self.behavior.scripted_finished()
+            self._resume_base_mode()
+            return
+
+        action = command.action
+        if action not in self.catalog.action_ids:
+            raise ValueError(f"unsupported action: {action}")
+        self.autonomous_timer.stop()
+        self._fixed_look_degrees = None
+        self._interrupt_wander(reschedule=False)
+        self._runtime_repeat_remaining = command.repeat_count
+        self._runtime_step_hold_ms = command.hold_ms
+        self._runtime_hold_until_ms = None
+        self.behavior.begin_scripted(action)
+        self.timeline.start(action, self._now_ms())
+        self._last_frame_index = None
+        self._manual_burst_start = None
+        self._manual_burst_target = None
+        self._last_action_played_ms[action] = self._now_ms()
+
+    def _show_v4_cleanup_frame(self) -> None:
+        action = self.catalog.idle_action_for(self.catalog.default_form)
+        frame = self.catalog.rendered_frames(action, "simplified")[0]
+        if frame.image.size() != frame.body_image.size() or frame.body_rect.topLeft() != QPoint():
+            frame = RenderedFrame(
+                frame.body_image,
+                frame.body_image,
+                QRect(0, 0, frame.body_image.width(), frame.body_image.height()),
+                frame.anchor - frame.body_rect.topLeft(),
+                ("v4-cleanup", frame.identity),
+            )
+        self._displayed_frame = None
+        self._show_frame(frame)
+
+    def _hard_cancel_v4(self) -> bool:
+        controller = self.multiform
+        if controller is None:
+            return False
+        for command in controller.hard_cancel():
+            self._execute_runtime_command(command)
+        return True
 
     def start(self, *, startup: bool = False) -> None:
         if self._started or self._shut_down:
@@ -445,6 +595,7 @@ class DesktopPetApplication:
     def shutdown(self) -> None:
         if self._shut_down:
             return
+        self._hard_cancel_v4()
         self._shut_down = True
         self.behavior.begin_shutdown()
         self.animation_timer.stop()
@@ -484,6 +635,8 @@ class DesktopPetApplication:
         self.qapp.quit()
 
     def trigger_action(self, action: ActionKey) -> None:
+        if self.multiform is not None and self.multiform.busy:
+            self._hard_cancel_v4()
         if action is ActionId.RANDOM:
             action = self._choose_random_action()
         else:
@@ -671,7 +824,11 @@ class DesktopPetApplication:
             return
         spec = self.catalog.spec(action)
         step = self.timeline.advance(self._adjusted_animation_time(now_ms), spec)
-        self._show_frame(self.catalog.rendered_frames(action)[step.frame_index])
+        self._show_frame(
+            self.catalog.rendered_frames(
+                action, self._effects_quality()
+            )[step.frame_index]
+        )
         if not step.finished:
             return
         if self._state_phase == "enter":
@@ -699,7 +856,7 @@ class DesktopPetApplication:
         now_ms = self._now_ms()
         weighted: list[tuple[ActionKey, int]] = []
         normal_fallbacks: list[PetActionDefinition] = []
-        for definition in self.catalog.movement_actions(direction):
+        for definition in self._movement_actions_for_current(direction):
             if definition.role is ActionRole.BURST_MOVE:
                 if definition.autoplay_weight <= 0 or distance < definition.min_distance:
                     continue
@@ -752,7 +909,7 @@ class DesktopPetApplication:
                 if candidate_direction > 0
                 else current.x - min_x
             )
-            for definition in self.catalog.movement_actions(candidate_direction):
+            for definition in self._movement_actions_for_current(candidate_direction):
                 ratio = definition.travel_distance_ratio
                 if (
                     definition.role is not ActionRole.BURST_MOVE
@@ -776,7 +933,7 @@ class DesktopPetApplication:
             return None
 
         normal_definitions = list(
-            self.catalog.movement_actions(direction, include_burst=False)
+            self._movement_actions_for_current(direction, include_burst=False)
         )
         if not normal_definitions:
             return None
@@ -802,6 +959,7 @@ class DesktopPetApplication:
         return burst.action_id, planned, burst.direction
 
     def start_showcase(self) -> None:
+        self._hard_cancel_v4()
         self._cancel_showcase()
         self._cancel_active_state()
         self._showcase_active = True
@@ -850,8 +1008,13 @@ class DesktopPetApplication:
             self._wander_area = None
             self._wander_action = None
             self._wander_start = None
-            self.timeline.start(self.catalog.idle_action, self._now_ms())
-            self._show_frame(self.catalog.rendered_frames(self.catalog.idle_action)[0])
+            self.timeline.start(
+                self.catalog.idle_action_for(self._current_form()), self._now_ms()
+            )
+            idle = self.catalog.idle_action_for(self._current_form())
+            self._show_frame(
+                self.catalog.rendered_frames(idle, self._effects_quality())[0]
+            )
             self._schedule_wander()
             return
         distance = math.hypot(
@@ -968,8 +1131,10 @@ class DesktopPetApplication:
         if not force and pet_id == self._settings.pet_id and self.catalog.pet_id == pet_id:
             return
         catalog = self._catalog_loader(definition)
+        self._hard_cancel_v4()
         self._cancel_active_state()
         self.catalog = catalog
+        self._configure_v4_runtime(definition)
         self._fixed_look_degrees = None
         self._live_gaze_active = False
         self.gaze_smoother.reset()
@@ -986,7 +1151,9 @@ class DesktopPetApplication:
         self._last_random_action = None
         self._last_random_group = None
         self._last_action_played_ms.clear()
-        self.timeline.start(self.catalog.idle_action, self._now_ms())
+        self.timeline.start(
+            self.catalog.idle_action_for(self._current_form()), self._now_ms()
+        )
         self._render_current_frame()
         self._recover_window_visibility()
         self.settings_store.save(self._settings)
@@ -1165,7 +1332,7 @@ class DesktopPetApplication:
                 )
             )
             return
-        if mode is BehaviorMode.MANUAL_ACTION:
+        if mode in {BehaviorMode.MANUAL_ACTION, BehaviorMode.SCRIPTED_SEQUENCE}:
             self._advance_manual(now_ms)
             return
         if mode is BehaviorMode.WANDER and self._wander_target is not None:
@@ -1174,6 +1341,12 @@ class DesktopPetApplication:
         self._render_base(now_ms)
 
     def _advance_manual(self, now_ms: int) -> None:
+        if (
+            self.multiform is not None
+            and self.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE
+        ):
+            self._advance_v4_runtime(now_ms)
+            return
         if self._active_state is not None:
             self._advance_active_state(now_ms)
             return
@@ -1190,7 +1363,7 @@ class DesktopPetApplication:
         )
         adjusted_now = self._adjusted_animation_time(now_ms)
         step = self.timeline.advance(adjusted_now, playback_spec)
-        frames = self.catalog.rendered_frames(action)
+        frames = self.catalog.rendered_frames(action, self._effects_quality())
         self._show_frame(frames[step.frame_index])
         if definition.role is ActionRole.BURST_MOVE:
             self._advance_manual_burst(adjusted_now, definition)
@@ -1208,6 +1381,35 @@ class DesktopPetApplication:
                 return
             self.behavior.manual_finished()
             self._resume_base_mode()
+
+    def _advance_v4_runtime(self, now_ms: int) -> None:
+        controller = self.multiform
+        action = self.behavior.current_action
+        if controller is None or action is None:
+            self._hard_cancel_v4()
+            return
+        frames = self.catalog.rendered_frames(action, self._effects_quality())
+        if self._runtime_hold_until_ms is not None:
+            self._show_frame(frames[-1])
+            if now_ms < self._runtime_hold_until_ms:
+                return
+            self._runtime_hold_until_ms = None
+            self._execute_runtime_command(controller.action_finished(now_ms))
+            return
+
+        spec = self.catalog.spec(action)
+        step = self.timeline.advance(self._adjusted_animation_time(now_ms), spec)
+        self._show_frame(frames[step.frame_index])
+        if not step.finished:
+            return
+        if self._runtime_repeat_remaining > 1:
+            self._runtime_repeat_remaining -= 1
+            self.timeline.start(action, now_ms)
+            return
+        if self._runtime_step_hold_ms > 0:
+            self._runtime_hold_until_ms = now_ms + self._runtime_step_hold_ms
+            return
+        self._execute_runtime_command(controller.action_finished(now_ms))
 
     def _animation_speed_multiplier(self) -> float:
         return _ANIMATION_SPEED.get(self._settings.animation_speed, 1.0)
@@ -1250,13 +1452,20 @@ class DesktopPetApplication:
         if requested_room + 0.001 >= minimum_visible_distance:
             return definition.action_id
 
-        for candidate in self.catalog.movement_actions(-definition.direction):
+        for candidate in self._movement_actions_for_current(-definition.direction):
             if (
                 candidate.role is ActionRole.BURST_MOVE
                 and candidate.travel_distance_ratio is not None
             ):
                 return candidate.action_id
         return definition.action_id
+
+    def _movement_actions_for_current(
+        self, direction: int, *, include_burst: bool = True
+    ) -> tuple[PetActionDefinition, ...]:
+        if self.catalog.sprite_version == 4:
+            return self.catalog.movement_actions_for(self._current_form(), direction)
+        return self.catalog.movement_actions(direction, include_burst=include_burst)
 
     def _prepare_manual_burst(self, definition: PetActionDefinition) -> None:
         area = self._current_screen_area()
@@ -1305,7 +1514,11 @@ class DesktopPetApplication:
         adjusted_now = self._adjusted_animation_time(now_ms)
         elapsed = max(0, adjusted_now - self.timeline.started_ms)
         frame_index = spec.frame_index_at(elapsed)
-        self._show_frame(self.catalog.rendered_frames(action)[frame_index])
+        self._show_frame(
+            self.catalog.rendered_frames(
+                action, self._effects_quality()
+            )[frame_index]
+        )
 
         current = self._pet_position()
         if definition.role is ActionRole.BURST_MOVE:
@@ -1342,7 +1555,7 @@ class DesktopPetApplication:
         self._wander_area = None
         self._wander_action = None
         self._wander_start = None
-        self.timeline.start(self.catalog.idle_action, now_ms)
+        self.timeline.start(self.catalog.idle_action_for(self._current_form()), now_ms)
         if self._rng.random() < 0.35:
             self.trigger_action(ActionId.RANDOM)
         else:
@@ -1381,7 +1594,10 @@ class DesktopPetApplication:
                 self._schedule_autonomous()
         if self._fixed_look_degrees is not None:
             return
-        if not self.catalog.supports_gaze or not self._settings.gaze_enabled:
+        if (
+            not self.catalog.supports_gaze_for(self._current_form())
+            or not self._settings.gaze_enabled
+        ):
             self._live_gaze_active = False
             self.gaze_smoother.reset()
             self.behavior.request_gaze(None)
@@ -1396,13 +1612,16 @@ class DesktopPetApplication:
                 self._live_gaze_active = False
                 self.gaze_smoother.reset()
                 self.behavior.request_gaze(None)
-                self.timeline.start(self.catalog.idle_action, now_ms)
+                self.timeline.start(
+                    self.catalog.idle_action_for(self._current_form()), now_ms
+                )
                 self._render_current_frame()
                 self._schedule_wander()
                 self._schedule_autonomous()
             return
         if self.behavior.mode in {
             BehaviorMode.MANUAL_ACTION,
+            BehaviorMode.SCRIPTED_SEQUENCE,
             BehaviorMode.DRAGGING,
             BehaviorMode.SHUTTING_DOWN,
         }:
@@ -1428,45 +1647,59 @@ class DesktopPetApplication:
         self.behavior.request_gaze(0.0 if smoothed is None else smoothed)
 
     def _render_base(self, now_ms: int) -> None:
-        if self._fixed_look_degrees is not None and self.catalog.supports_gaze:
+        current_form = self._current_form()
+        supports_gaze = self.catalog.supports_gaze_for(current_form)
+        if self._fixed_look_degrees is not None and supports_gaze:
             self._show_frame(
                 self.catalog.look_frame_for(
-                    self.catalog.default_form, self._fixed_look_degrees
+                    current_form, self._fixed_look_degrees
                 )
             )
             return
         if (
-            self.catalog.supports_gaze
+            supports_gaze
             and self.behavior.mode is BehaviorMode.GAZE
             and self.behavior.gaze_degrees is not None
         ):
             self._show_frame(self._nearest_rendered_look_frame(self.behavior.gaze_degrees))
             return
-        idle = self.catalog.idle_action
+        idle = self.catalog.idle_action_for(current_form)
         spec = self.catalog.spec(idle)
         step = self.timeline.advance(self._adjusted_animation_time(now_ms), spec)
         if self.timeline.action != idle:
             self.timeline.start(idle, now_ms)
             step = self.timeline.advance(now_ms, spec)
-        self._show_frame(self.catalog.rendered_frames(idle)[step.frame_index])
+        self._show_frame(
+            self.catalog.rendered_frames(idle, self._effects_quality())[step.frame_index]
+        )
 
     def _render_current_frame(self) -> None:
         self._displayed_frame = None
-        if self.behavior.mode is BehaviorMode.MANUAL_ACTION and self.behavior.current_action:
+        if self.behavior.mode in {
+            BehaviorMode.MANUAL_ACTION,
+            BehaviorMode.SCRIPTED_SEQUENCE,
+        } and self.behavior.current_action:
             action = self.behavior.current_action
             step = self.timeline.advance(self._now_ms(), self.catalog.spec(action))
-            self._show_frame(self.catalog.rendered_frames(action)[step.frame_index])
+            self._show_frame(
+                self.catalog.rendered_frames(
+                    action, self._effects_quality()
+                )[step.frame_index]
+            )
         else:
             self._render_base(self._now_ms())
 
     def _resume_base_mode(self) -> None:
         now = self._now_ms()
-        self.timeline.start(self.catalog.idle_action, now)
+        self.timeline.start(self.catalog.idle_action_for(self._current_form()), now)
         self._last_frame_index = None
         self._render_base(now)
         if self.behavior.mode is BehaviorMode.WANDER:
             self._schedule_wander()
         self._schedule_autonomous()
+
+    def _effects_quality(self) -> str:
+        return getattr(self._settings, "effects_quality", "full")
 
     def _show_frame(self, frame: RenderedFrame) -> None:
         identity = (frame.identity, self._settings.scale_percent)
@@ -1487,7 +1720,7 @@ class DesktopPetApplication:
                     (candidate - degrees + 180.0) % 360.0 - 180.0
                 ),
             )
-        return self.catalog.look_frame_for(self.catalog.default_form, nearest)
+        return self.catalog.look_frame_for(self._current_form(), nearest)
 
     def _schedule_wander(self) -> None:
         if (
@@ -1542,12 +1775,43 @@ class DesktopPetApplication:
                 )
             activity_delay = 0
         cooldown_delay = max(0, self._autonomous_not_before_ms - now_ms)
-        self.autonomous_timer.start(max(1, activity_delay, cooldown_delay))
+        delay = max(1, activity_delay, cooldown_delay)
+        if self.v4_autoplay is not None:
+            deadline = self.v4_autoplay.next_deadline_ms()
+            if deadline is not None:
+                delay = min(delay, max(1, deadline - now_ms))
+        self.autonomous_timer.start(delay)
 
     def _autonomous_timeout(self) -> None:
         if not self._autonomous_eligible():
             return
         now_ms = self._now_ms()
+        if self.v4_autoplay is not None and self.multiform is not None:
+            candidate = self.v4_autoplay.choose_due(
+                now_ms,
+                self._current_form(),
+                self._rng,
+                is_wandering=self._wander_target is not None,
+                always_gaze=(
+                    self._settings.gaze_enabled
+                    and self._settings.gaze_mode == "always"
+                ),
+                sequence_active=self.multiform.busy,
+                autonomous_enabled=self._settings.autonomous_actions_enabled,
+            )
+            if candidate is not None:
+                if candidate.kind == "transformation":
+                    accepted = self.trigger_transformation(
+                        candidate.key, manual=False
+                    )
+                else:
+                    accepted = self.trigger_sequence(candidate.key, manual=False)
+                if accepted:
+                    self.v4_autoplay.record_started(
+                        candidate, now_ms, automatic=True
+                    )
+                self._schedule_autonomous()
+                return
         if now_ms < self._autonomous_not_before_ms:
             self._schedule_autonomous()
             return
@@ -1571,7 +1835,15 @@ class DesktopPetApplication:
 
     def _choose_random_action(self) -> ActionKey:
         now_ms = self._now_ms()
-        configured = list(self.catalog.autoplay_actions())
+        current_interactions = self.catalog.interaction_actions_for(
+            self._current_form()
+        )
+        allowed_interactions = set(current_interactions)
+        configured = [
+            item
+            for item in self.catalog.autoplay_actions()
+            if item[0] in allowed_interactions
+        ]
         weighted = [
             (action, weight)
             for action, weight in configured
@@ -1598,10 +1870,10 @@ class DesktopPetApplication:
                 weighted = without_repeat
         if not weighted:
             if configured:
-                return self.catalog.idle_action
-            weighted = [(action, 1) for action in self.catalog.interaction_actions()]
+                return self.catalog.idle_action_for(self._current_form())
+            weighted = [(action, 1) for action in current_interactions]
         if not weighted:
-            return self.catalog.idle_action
+            return self.catalog.idle_action_for(self._current_form())
         target = self._rng.randint(1, sum(weight for _, weight in weighted))
         for action, weight in weighted:
             target -= weight
@@ -1623,9 +1895,14 @@ class DesktopPetApplication:
         self._wander_start = None
         if was_active and self.behavior.mode is BehaviorMode.WANDER:
             now_ms = self._now_ms()
-            self.timeline.start(self.catalog.idle_action, now_ms)
+            self.timeline.start(
+                self.catalog.idle_action_for(self._current_form()), now_ms
+            )
             self._last_frame_index = None
-            self._show_frame(self.catalog.rendered_frames(self.catalog.idle_action)[0])
+            idle = self.catalog.idle_action_for(self._current_form())
+            self._show_frame(
+                self.catalog.rendered_frames(idle, self._effects_quality())[0]
+            )
         if reschedule:
             self._schedule_wander()
             self._schedule_autonomous()
@@ -1636,9 +1913,12 @@ class DesktopPetApplication:
         self.autonomous_timer.stop()
         self._cancel_showcase()
         self._cancel_active_state()
+        self._hard_cancel_v4()
         if self.behavior.current_action is not None:
             self.behavior.manual_finished()
-            self.timeline.start(self.catalog.idle_action, self._now_ms())
+            self.timeline.start(
+                self.catalog.idle_action_for(self._current_form()), self._now_ms()
+            )
         self._manual_burst_start = None
         self._manual_burst_target = None
         self.behavior.begin_drag()

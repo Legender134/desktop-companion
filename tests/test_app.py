@@ -27,8 +27,27 @@ from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.geometry import Point, Rect, Size
 from shiyi_desktop_pet.logging_setup import configure_logging, install_exception_hook
 from shiyi_desktop_pet.menu_controller import MenuCommand
-from shiyi_desktop_pet.models import ActionId, AnimationSpec, RenderedFrame
-from shiyi_desktop_pet.pet_registry import PetRegistry
+from shiyi_desktop_pet.models import (
+    ActionId,
+    ActionRole,
+    AnimationSpec,
+    PetActionDefinition,
+    PetActionLayerDefinition,
+    PetAtlasDefinition,
+    PetAutoplayDefinition,
+    PetCooldownGroupDefinition,
+    PetFormDefinition,
+    PetSequenceDefinition,
+    PetSequenceStep,
+    PetStateActionChoice,
+    PetTransformationDefinition,
+    RenderedFrame,
+)
+from shiyi_desktop_pet.pet_registry import (
+    PetDefinition,
+    PetRegistry,
+    PetRegistrySnapshot,
+)
 from shiyi_desktop_pet.pet_window import PetWindow
 from shiyi_desktop_pet.resource_locator import resource_root
 from shiyi_desktop_pet.settings import AppSettings
@@ -405,6 +424,159 @@ def _controller(
         open_pet_directory=open_pet_directory or (lambda path: True),
     )
     return controller, store, startup, hooks, trays
+
+
+class _StaticPetRegistry:
+    def __init__(self, *pets):
+        self._snapshot = PetRegistrySnapshot(tuple(pets), ())
+        self.user_root = None
+
+    def refresh(self):
+        return self._snapshot
+
+
+def _v4_definition(tmp_path: Path) -> PetDefinition:
+    atlas_path = tmp_path / "runtime.webp"
+    atlas = QImage(64 * 8, 12 * 8, QImage.Format.Format_RGBA8888)
+    atlas.fill(QColor(80, 120, 200, 255))
+    atlas.setPixelColor(atlas.width() - 1, atlas.height() - 1, QColor(0, 0, 0, 0))
+    assert atlas.save(str(atlas_path), "WEBP")
+    atlas_definition = PetAtlasDefinition("runtime", atlas_path, 8, 8)
+
+    def action(
+        key,
+        row,
+        frame_count=1,
+        *,
+        loops=1,
+        role=ActionRole.INTERACTION,
+        direction=0,
+        optional_effect=False,
+    ):
+        layers = [
+            PetActionLayerDefinition(
+                "runtime", row, 0, 4, 8, hit_test=True
+            )
+        ]
+        if optional_effect:
+            layers.append(
+                PetActionLayerDefinition(
+                    "runtime",
+                    row,
+                    1,
+                    4,
+                    8,
+                    offset_x=12,
+                    optional_in_simplified=True,
+                )
+            )
+        return PetActionDefinition(
+            key,
+            key,
+            key,
+            0,
+            spec=AnimationSpec(row, frame_count, 100, loops),
+            role=role,
+            direction=direction,
+            layers=tuple(layers),
+        )
+
+    actions = (
+        action("humanIdle", 0, loops=None, role=ActionRole.IDLE),
+        action("humanRight", 1, loops=None, role=ActionRole.MOVE, direction=1),
+        action("humanLeft", 2, loops=None, role=ActionRole.MOVE, direction=-1),
+        action("humanGaze", 3, 64, loops=None, role=ActionRole.GAZE),
+        action("foxIdle", 4, loops=None, role=ActionRole.IDLE),
+        action("foxRight", 5, loops=None, role=ActionRole.MOVE, direction=1),
+        action("foxLeft", 6, loops=None, role=ActionRole.MOVE, direction=-1),
+        action("changeEnter", 7, 2),
+        action("foxResident", 8),
+        action("changeExit", 9, 2),
+        action("spell", 10, optional_effect=True),
+        action("finalPose", 11),
+    )
+    forms = (
+        PetFormDefinition(
+            "human",
+            "Human",
+            "humanIdle",
+            "humanRight",
+            "humanLeft",
+            "humanGaze",
+            "humanIdle",
+            ("spell",),
+        ),
+        PetFormDefinition(
+            "whiteFox",
+            "White fox",
+            "foxIdle",
+            "foxRight",
+            "foxLeft",
+            None,
+            "foxIdle",
+            ("foxResident",),
+        ),
+    )
+    autoplay = PetAutoplayDefinition("rare", 1, 500, 500, ("magic",))
+    transformation = PetTransformationDefinition(
+        "whiteFoxChange",
+        "White fox",
+        "human",
+        "whiteFox",
+        "changeEnter",
+        (PetStateActionChoice("foxResident", 1),),
+        "changeExit",
+        300,
+        300,
+        True,
+        autoplay,
+    )
+    sequence = PetSequenceDefinition(
+        "ritual",
+        "Ritual",
+        True,
+        (
+            PetSequenceStep("spell", 2, 50, "whiteFox", True),
+            PetSequenceStep("finalPose", 1, 30, "human", True),
+        ),
+        autoplay,
+    )
+    return PetDefinition(
+        "runtime-v4",
+        "Runtime v4",
+        "",
+        tmp_path / "pet.json",
+        atlas_path,
+        False,
+        (0, 0),
+        actions,
+        sprite_version=4,
+        atlases=(atlas_definition,),
+        forms=forms,
+        default_form="human",
+        transformations=(transformation,),
+        cooldown_groups=(PetCooldownGroupDefinition("magic", 1_000),),
+        sequences=(sequence,),
+        icon_atlas="runtime",
+    )
+
+
+def _v4_controller(qapp, tmp_path, *, settings=None):
+    definition = _v4_definition(tmp_path)
+    legacy = PetRegistry(resource_root() / "pets", None).refresh().by_id("shiyi")
+    assert legacy is not None
+    return _controller(
+        qapp,
+        settings=settings
+        or replace(
+            AppSettings(),
+            pet_id=definition.pet_id,
+            gaze_enabled=False,
+            wander_enabled=False,
+        ),
+        pet_registry=_StaticPetRegistry(definition, legacy),
+        catalog_factory=None,
+    )
 
 
 def test_digit_and_random_action_mapping():
@@ -1998,3 +2170,319 @@ def test_self_test_cli_writes_one_json_object(qapp):
     )
     assert result == 0
     assert json.loads("".join(chunks))["ok"] is True
+
+
+def test_v4_manual_transformation_runs_enter_resident_exit_and_restores_form(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        assert controller.multiform is not None
+        assert controller.v4_autoplay is not None
+
+        controller.trigger_transformation("whiteFoxChange")
+        assert controller.behavior.mode is BehaviorMode.SCRIPTED_SEQUENCE
+        assert controller.current_action == "changeEnter"
+
+        now[0] = 200
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "whiteFox"
+        assert controller.current_action == "foxResident"
+        assert controller.catalog.idle_action_for(controller._current_form()) == "foxIdle"
+        assert controller.catalog.movement_actions_for(
+            controller._current_form(), 1
+        )[0].action_id == "foxRight"
+
+        now[0] = 300
+        controller._advance_manual(now[0])
+        assert controller.current_action == "changeExit"
+
+        now[0] = 500
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "human"
+        assert controller.current_action == "humanIdle"
+        assert controller.behavior.mode is BehaviorMode.IDLE
+    finally:
+        controller.shutdown()
+
+
+def test_v4_sequence_repeats_complete_actions_then_holds_before_next_step(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("ritual")
+        assert controller.current_action == "spell"
+
+        now[0] = 100
+        controller._advance_manual(now[0])
+        assert controller.current_action == "spell"
+        assert controller.timeline.started_ms == 100
+
+        now[0] = 200
+        controller._advance_manual(now[0])
+        assert controller.current_action == "spell"
+        assert controller._current_form() == "human"
+
+        now[0] = 249
+        controller._advance_manual(now[0])
+        assert controller.current_action == "spell"
+        now[0] = 250
+        controller._advance_manual(now[0])
+        assert controller.current_action == "finalPose"
+        assert controller._current_form() == "whiteFox"
+
+        now[0] = 350
+        controller._advance_manual(now[0])
+        assert controller.current_action == "finalPose"
+        now[0] = 379
+        controller._advance_manual(now[0])
+        assert controller.current_action == "finalPose"
+        now[0] = 380
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "human"
+        assert controller.current_action == "humanIdle"
+    finally:
+        controller.shutdown()
+
+
+def test_v4_non_default_form_suspends_gaze_and_restores_it_after_exit(
+    qapp, tmp_path, monkeypatch
+):
+    controller, *_ = _v4_controller(
+        qapp,
+        tmp_path,
+        settings=replace(
+            AppSettings(),
+            pet_id="runtime-v4",
+            gaze_enabled=True,
+            gaze_mode="always",
+            wander_enabled=False,
+        ),
+    )
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    cursor = QPoint(500, 300)
+
+    class FixedCursor:
+        @staticmethod
+        def pos():
+            return cursor
+
+    monkeypatch.setattr(app_module, "QCursor", FixedCursor)
+    try:
+        controller.trigger_transformation("whiteFoxChange")
+        now[0] = 200
+        controller._advance_manual(now[0])
+        controller._gaze_tick()
+        controller._render_base(now[0])
+        assert controller.settings.gaze_enabled
+        assert controller.window.current_frame.identity[1] != "humanGaze"
+
+        now[0] = 300
+        controller._advance_manual(now[0])
+        now[0] = 500
+        controller._advance_manual(now[0])
+        controller._gaze_tick()
+        controller._render_base(now[0])
+        assert controller.settings.gaze_enabled
+        assert controller.window.current_frame.identity[1] == "humanGaze"
+        assert len(controller.catalog.look_degrees) == 64
+    finally:
+        controller.shutdown()
+
+
+def test_v4_autoplay_consumes_deadline_only_after_accepted_offer(
+    qapp, tmp_path, monkeypatch
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [100]
+    controller._now_ms = lambda: now[0]
+    scheduler = controller.v4_autoplay
+    assert scheduler is not None
+    scheduler.deadlines["rare"] = 100
+    candidate = next(item for item in scheduler.candidates if item.kind == "transformation")
+    monkeypatch.setattr(scheduler, "choose_due", lambda *args, **kwargs: candidate)
+    original_request = controller.multiform.request_transformation
+    monkeypatch.setattr(controller.multiform, "request_transformation", lambda *args, **kwargs: None)
+
+    controller._autonomous_timeout()
+    assert scheduler.deadlines["rare"] == 100
+
+    monkeypatch.setattr(controller.multiform, "request_transformation", original_request)
+    controller._autonomous_timeout()
+    assert scheduler.deadlines["rare"] == 600
+    assert scheduler.cooldown_deadlines["magic"] == 1_100
+    controller.shutdown()
+
+
+def test_v4_safe_stop_waits_for_repeats_and_step_hold(qapp, tmp_path):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("ritual")
+        now[0] = 100
+        controller._advance_manual(now[0])
+        controller.multiform.request_stop()
+
+        now[0] = 200
+        controller._advance_manual(now[0])
+        assert controller.current_action == "spell"
+        now[0] = 249
+        controller._advance_manual(now[0])
+        assert controller.current_action == "spell"
+
+        now[0] = 250
+        controller._advance_manual(now[0])
+        assert not controller.multiform.busy
+        assert controller._current_form() == "human"
+        assert controller.current_action == "humanIdle"
+    finally:
+        controller.shutdown()
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ("enter", "resident", "exit", "sequence-first", "sequence-second"),
+)
+@pytest.mark.parametrize("interrupt", ("drag", "pet-switch", "shutdown"))
+def test_v4_hard_cleanup_is_idempotent_at_every_runtime_boundary(
+    qapp, tmp_path, phase, interrupt
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    if phase.startswith("sequence"):
+        controller.trigger_sequence("ritual")
+        controller._advance_manual(0)
+        if phase == "sequence-second":
+            now[0] = 100
+            controller._advance_manual(now[0])
+            now[0] = 200
+            controller._advance_manual(now[0])
+            now[0] = 250
+            controller._advance_manual(now[0])
+    else:
+        controller.trigger_transformation("whiteFoxChange")
+        controller._advance_manual(0)
+        if phase in {"resident", "exit"}:
+            now[0] = 200
+            controller._advance_manual(now[0])
+        if phase == "exit":
+            now[0] = 300
+            controller._advance_manual(now[0])
+
+    runtime = controller.multiform
+    assert runtime is not None and runtime.busy
+    if interrupt == "drag":
+        controller._begin_drag()
+        assert controller.behavior.mode is BehaviorMode.DRAGGING
+        assert not controller.autonomous_timer.isActive()
+        assert not controller.wander_timer.isActive()
+    elif interrupt == "pet-switch":
+        controller._switch_pet("shiyi", force=True)
+        assert controller.multiform is None
+        assert controller.v4_autoplay is None
+    else:
+        controller.shutdown()
+        assert not controller.animation_timer.isActive()
+        assert not controller.gaze_timer.isActive()
+        assert not controller.wander_timer.isActive()
+        assert not controller.autonomous_timer.isActive()
+
+    assert not runtime.busy
+    assert runtime.current_form == "human"
+    assert not runtime._sequence_steps
+    frame = controller.window.current_frame
+    assert frame.image.size() == frame.body_image.size()
+    assert frame.body_rect == QRect(0, 0, frame.body_image.width(), frame.body_image.height())
+    controller._hard_cancel_v4()
+    controller._hard_cancel_v4()
+    controller.shutdown()
+
+
+def test_legacy_catalogs_do_not_construct_v4_runtime(qapp):
+    v2, *_ = _controller(qapp)
+    v3, *_ = _controller(qapp, catalog_factory=_state_catalog)
+    try:
+        assert v2.multiform is None and v2.v4_autoplay is None
+        assert v3.multiform is None and v3.v4_autoplay is None
+        v3.trigger_action("rooftopEnter")
+        assert v3.active_state is not None
+    finally:
+        v2.shutdown()
+        v3.shutdown()
+
+
+def test_v4_wander_selection_uses_only_current_form_movement(qapp, tmp_path):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    now = [0]
+    controller._now_ms = lambda: now[0]
+    try:
+        controller.trigger_sequence("ritual")
+        now[0] = 100
+        controller._advance_manual(now[0])
+        now[0] = 200
+        controller._advance_manual(now[0])
+        now[0] = 250
+        controller._advance_manual(now[0])
+        assert controller._current_form() == "whiteFox"
+
+        assert controller._choose_wander_action(1, 100) == "foxRight"
+    finally:
+        controller.shutdown()
+
+
+def test_v4_random_interaction_fallback_uses_current_form_pool(qapp, tmp_path):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    controller.multiform._current_form = "whiteFox"
+    try:
+        assert controller._choose_random_action() == "foxResident"
+    finally:
+        controller.shutdown()
+
+
+def test_v4_manual_start_records_cooldown_without_consuming_bucket(qapp, tmp_path):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    controller._now_ms = lambda: 100
+    scheduler = controller.v4_autoplay
+    try:
+        scheduler.deadlines["rare"] = 500
+
+        assert controller.trigger_sequence("ritual", manual=True)
+
+        assert scheduler.deadlines["rare"] == 500
+        assert scheduler.cooldown_deadlines["magic"] == 1_100
+    finally:
+        controller.shutdown()
+
+
+def test_v4_autonomous_timer_uses_earlier_bucket_and_retains_due_while_busy(
+    qapp, tmp_path
+):
+    controller, *_ = _v4_controller(qapp, tmp_path)
+    controller._now_ms = lambda: 0
+    scheduler = controller.v4_autoplay
+    try:
+        controller._autonomous_not_before_ms = 2_000
+        scheduler.deadlines["rare"] = 500
+        controller._schedule_autonomous()
+        assert controller.autonomous_timer.interval() == 500
+
+        controller.trigger_sequence("ritual")
+        scheduler.deadlines["rare"] = 0
+        controller._schedule_autonomous()
+        assert not controller.autonomous_timer.isActive()
+        assert scheduler.deadlines["rare"] == 0
+
+        controller._hard_cancel_v4()
+        controller._schedule_autonomous()
+        assert controller.autonomous_timer.interval() == 1
+        assert scheduler.deadlines["rare"] == 0
+    finally:
+        controller.shutdown()
