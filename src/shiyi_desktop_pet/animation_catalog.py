@@ -531,9 +531,7 @@ class AnimationCatalog:
                 )
                 if local_index is None:
                     continue
-                layer_image = self._v4_layer_image(
-                    layer, local_index, definition.mirror_of is not None
-                )
+                layer_image = self._v4_layer_image(layer, local_index)
                 left = layer.offset_x - round(
                     layer.anchor_x * layer.scale_percent / 100
                 )
@@ -572,6 +570,19 @@ class AnimationCatalog:
                 body_image = self._transparent_body_image(body_layer)
                 body_rect = self._v4_layer_rect(body_layer, body_image)
             translated_body = body_rect.translated(-union.left(), -union.top())
+            anchor = QPoint(-union.left(), -union.top())
+            if definition.mirror_of is not None:
+                composed = composed.flipped(Qt.Orientation.Horizontal)
+                body_image = body_image.flipped(Qt.Orientation.Horizontal)
+                translated_body = QRect(
+                    composed.width()
+                    - translated_body.x()
+                    - translated_body.width(),
+                    translated_body.y(),
+                    translated_body.width(),
+                    translated_body.height(),
+                )
+                anchor = QPoint(composed.width() - anchor.x(), anchor.y())
             identity = (
                 self.pet_id,
                 action,
@@ -587,7 +598,7 @@ class AnimationCatalog:
                     composed,
                     body_image,
                     translated_body,
-                    QPoint(-union.left(), -union.top()),
+                    anchor,
                     identity,
                 )
             )
@@ -597,7 +608,6 @@ class AnimationCatalog:
         self,
         layer: PetActionLayerDefinition,
         local_index: int,
-        mirror: bool,
     ) -> QImage:
         atlas_definition: PetAtlasDefinition = self._atlas_definitions[
             layer.atlas_id
@@ -610,8 +620,6 @@ class AnimationCatalog:
             atlas_definition.cell_width,
             atlas_definition.cell_height,
         )
-        if mirror:
-            image = image.flipped(Qt.Orientation.Horizontal)
         if layer.scale_percent != 100:
             image = image.scaled(
                 round(image.width() * layer.scale_percent / 100),

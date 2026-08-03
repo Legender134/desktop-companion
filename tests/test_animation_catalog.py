@@ -297,6 +297,45 @@ def test_v4_rendering_mirrors_layer_pixels_and_body_alpha_together():
     assert frame.body_image.pixelColor(191, 50).alpha() == 255
 
 
+def test_v4_rendering_mirrors_asymmetric_world_geometry_as_one_transform():
+    catalog = _synthetic_v4_catalog()
+    body = QImage(4, 2, QImage.Format.Format_RGBA8888)
+    body.fill(QColor(0, 0, 0, 0))
+    body.setPixelColor(0, 0, QColor(255, 0, 0, 255))
+    effect = QImage(2, 2, QImage.Format.Format_RGBA8888)
+    effect.fill(QColor(0, 0, 0, 0))
+    effect.setPixelColor(0, 0, QColor(0, 0, 255, 255))
+    catalog._atlas_definitions = {
+        "body": PetAtlasDefinition("body", Path("body.webp"), 4, 2),
+        "effect": PetAtlasDefinition("effect", Path("effect.webp"), 2, 2),
+    }
+    catalog._atlases = {"body": body, "effect": effect}
+    catalog._action_map["mirrored"] = PetActionDefinition(
+        "mirrored",
+        "mirrored",
+        "Mirrored",
+        0,
+        spec=AnimationSpec(0, 1, 100, 1),
+        mirror_of="source",
+        layers=(
+            PetActionLayerDefinition("body", 0, 0, 1, 1, hit_test=True),
+            PetActionLayerDefinition(
+                "effect", 0, 0, 0, 0, offset_x=4, offset_y=-1
+            ),
+        ),
+    )
+
+    frame = catalog.rendered_frames("mirrored")[0]
+
+    assert frame.image.size() == QSize(7, 2)
+    assert frame.image.pixelColor(6, 0) == QColor(255, 0, 0, 255)
+    assert frame.image.pixelColor(1, 0) == QColor(0, 0, 255, 255)
+    assert frame.image.pixelColor(0, 0).alpha() == 0
+    assert frame.body_image.pixelColor(3, 0) == QColor(255, 0, 0, 255)
+    assert frame.body_rect == QRect(3, 0, 4, 2)
+    assert frame.anchor == QPoint(6, 1)
+
+
 def test_v4_loads_each_atlas_once_and_enforces_decoded_pixel_budget(
     monkeypatch, tmp_path
 ):
