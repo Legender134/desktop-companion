@@ -75,6 +75,16 @@ class MultiformController:
             transformation.to_form: transformation
             for transformation in transformations
         }
+        missing_exits = (
+            set(self._form_map)
+            - {self._default_form}
+            - set(self._transformation_by_form)
+        )
+        if missing_exits:
+            raise ValueError(
+                "non-default forms must have a transformation exit: "
+                + ", ".join(sorted(missing_exits))
+            )
         self._sequence_map = {sequence.key: sequence for sequence in sequences}
         self._rng = rng
 

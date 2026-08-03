@@ -22,6 +22,7 @@ DEFAULT_FORM = "foxEaredHuman"
 def _controller(
     *,
     sequence_safe_flags: tuple[bool, ...] = (False, True, False),
+    include_sequence_only_form: bool = False,
 ) -> MultiformController:
     forms = (
         PetFormDefinition(
@@ -65,6 +66,19 @@ def _controller(
             ("corpseGreet",),
         ),
     )
+    if include_sequence_only_form:
+        forms += (
+            PetFormDefinition(
+                "sequenceOnly",
+                "Sequence only",
+                "sequenceIdle",
+                "sequenceRight",
+                "sequenceLeft",
+                None,
+                "sequenceGreet",
+                ("sequenceGreet",),
+            ),
+        )
     transformations = (
         PetTransformationDefinition(
             "whiteFoxChange",
@@ -390,3 +404,11 @@ def test_unknown_requests_fail_without_mutating_controller():
 
     assert controller.current_form == DEFAULT_FORM
     assert controller.busy is False
+
+
+def test_controller_rejects_non_default_form_without_a_declared_exit():
+    with pytest.raises(
+        ValueError,
+        match="non-default forms must have a transformation exit: sequenceOnly",
+    ):
+        _controller(include_sequence_only_form=True)
