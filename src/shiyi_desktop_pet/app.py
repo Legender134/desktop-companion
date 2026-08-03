@@ -102,8 +102,15 @@ class HoverSnapshot:
     def hit_test(self) -> bool:
         if not self.visible or self.scale <= 0:
             return False
-        source_x = int((self.cursor_x - self.window_x) / self.scale)
-        source_y = int((self.cursor_y - self.window_y) / self.scale)
+        local_x = self.cursor_x - self.window_x
+        local_y = self.cursor_y - self.window_y
+        if not (
+            0 <= local_x < self.width * self.scale
+            and 0 <= local_y < self.height * self.scale
+        ):
+            return False
+        source_x = int(local_x / self.scale)
+        source_y = int(local_y / self.scale)
         if not (0 <= source_x < self.width and 0 <= source_y < self.height):
             return False
         offset = source_y * self.bytes_per_line + source_x
@@ -1469,10 +1476,17 @@ class DesktopPetApplication:
         self._refresh_hover_snapshot()
 
     def _nearest_rendered_look_frame(self, degrees: float) -> RenderedFrame:
-        nearest = min(
-            self.catalog.look_degrees,
-            key=lambda candidate: abs((candidate - degrees + 180.0) % 360.0 - 180.0),
-        )
+        if self.catalog.sprite_version != 4:
+            step = 360.0 / len(self.catalog.look_degrees)
+            index = round(degrees / step) % len(self.catalog.look_degrees)
+            nearest = self.catalog.look_degrees[index]
+        else:
+            nearest = min(
+                self.catalog.look_degrees,
+                key=lambda candidate: abs(
+                    (candidate - degrees + 180.0) % 360.0 - 180.0
+                ),
+            )
         return self.catalog.look_frame_for(self.catalog.default_form, nearest)
 
     def _schedule_wander(self) -> None:

@@ -527,6 +527,66 @@ def test_hover_snapshot_is_immutable_and_alpha_aware():
         snapshot.visible = False
 
 
+@pytest.mark.parametrize("scale", (1.25, 1.5))
+@pytest.mark.parametrize("edge", ("left", "top"))
+def test_hover_snapshot_rejects_fractional_points_before_scaled_body_edges(
+    scale, edge
+):
+    snapshot = HoverSnapshot(
+        alpha=bytes([255, 255, 255, 255]),
+        width=2,
+        height=2,
+        bytes_per_line=2,
+        scale=scale,
+        window_x=10.0,
+        window_y=20.0,
+        visible=True,
+        cursor_x=10.0,
+        cursor_y=20.0,
+    )
+    outside = (
+        replace(snapshot, cursor_x=snapshot.window_x - 0.25)
+        if edge == "left"
+        else replace(snapshot, cursor_y=snapshot.window_y - 0.25)
+    )
+    inside = (
+        replace(snapshot, cursor_x=snapshot.window_x)
+        if edge == "left"
+        else replace(snapshot, cursor_y=snapshot.window_y)
+    )
+
+    assert not outside.hit_test()
+    assert inside.hit_test()
+    assert replace(
+        snapshot,
+        cursor_x=snapshot.window_x + snapshot.width * scale - 0.01,
+        cursor_y=snapshot.window_y + snapshot.height * scale - 0.01,
+    ).hit_test()
+    assert not replace(
+        snapshot, cursor_x=snapshot.window_x + snapshot.width * scale
+    ).hit_test()
+    assert not replace(
+        snapshot, cursor_y=snapshot.window_y + snapshot.height * scale
+    ).hit_test()
+
+
+def test_rendered_gaze_half_step_matches_legacy_nearest_frame_identity(qapp):
+    controller, _, _, _, _ = _controller(qapp)
+    try:
+        legacy = controller.catalog.nearest_look_frame(33.75)
+
+        rendered = controller._nearest_rendered_look_frame(33.75)
+
+        assert rendered.identity[-3:] == (
+            legacy.row,
+            legacy.column,
+            legacy.variant,
+        )
+        assert rendered.body_image == legacy.image
+    finally:
+        controller.shutdown()
+
+
 @pytest.mark.parametrize("scale_percent", (100, 125, 150))
 def test_wide_effect_movement_clamping_gaze_and_hover_use_body_geometry(
     qapp, monkeypatch, scale_percent
