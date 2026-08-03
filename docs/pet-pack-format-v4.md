@@ -159,11 +159,11 @@ role 限制按有效值判断：非 `interaction` action 可以显式写 `autopl
 | `opacityPercent` | 否 | 0–100，默认 100 |
 | `hitTest` | 否 | 默认 `false`；一个 action 必须恰好有一层为 `true` |
 | `optionalInSimplified` | 否 | 默认 `false` |
-| `frameMap` | 否 | `frameCount` 个整数或 `null` |
+| `frameMap` | 否 | 整体为 `null`，或由 `frameCount` 个整数/`null` 组成的数组 |
 
-没有 `frameMap` 时，第 N 个 action 帧读取该 layer 的第 N 个本地帧。从 `row`、`startColumn` 开始按从左到右读取，超过本行列数后继续下一行。
+`frameMap` 字段整体显式写为 `null` 与省略该字段完全相同：第 N 个 action 帧读取该 layer 的第 N 个本地帧。从 `row`、`startColumn` 开始按从左到右读取，超过本行列数后继续下一行。
 
-有 `frameMap` 时，数组长度必须恰好等于 action 的 `frameCount`。整数是本地图层帧索引，当前运行时要求在 `0..frameCount-1` 内；可以重复以复用一格。`null` 表示该 action 帧不绘制此 layer。被引用格最终还必须位于对应 atlas 内，否则图像目录加载阶段失败。
+`frameMap` 为数组时，数组长度必须恰好等于 action 的 `frameCount`。整数是本地图层帧索引，当前运行时要求在 `0..frameCount-1` 内；可以重复以复用一格。只有 `frameMap` 数组中的某一项为 `null` 时，对应的 action 帧才不绘制此 layer。被引用格最终还必须位于对应 atlas 内，否则图像目录加载阶段失败。
 
 v4 的 `mirrorOf` **不继承**源 action 的时长、层或帧数。镜像 action 仍须完整声明自己的 `frameCount`、时长和 `layers`。源 action 必须存在、不能自身也是镜像，并且两者 role 相同、方向相反。运行时先正常合成镜像 action 自己的全部层，再把整张合成图、身体图和身体几何一起水平翻转。
 
@@ -215,21 +215,21 @@ mirroredBodyX   = W - bodyRect.x - bodyRect.width
 - 宠物的保存位置、移动目标、屏幕夹取和对外尺寸都使用身体矩形，而不是所有层的并集窗口。
 - 拖动偏移相对身体左上角计算，特效出现或消失不会改变抓取位置。
 - hover alpha、穿透判断同样读取 `bodyImage`，不会把特效算作身体。
-- `opacityPercent` 会作用于身体 alpha；`frameMap: null` 的身体帧会产生透明身体。通常不要把身体层设为完全透明或 `optionalInSimplified: true`。
+- `opacityPercent` 会作用于身体 alpha；身体 layer 的 `frameMap` 数组中对应 action 帧的一项为 `null` 时，该帧会产生透明身体。通常不要把身体层设为完全透明或 `optionalInSimplified: true`。
 
 ## Full 与 Simplified 特效质量
 
-`full` 绘制该帧所有非 `null` layer。`simplified` 仅跳过 `optionalInSimplified: true` 的层；它不会改变动作进度、当前 form、身体 layer、身体世界坐标或窗口保存位置。
+`full` 绘制该帧所有未被 `frameMap` 数组当前项 `null` 跳过的 layer。`simplified` 在此基础上再跳过 `optionalInSimplified: true` 的层；它不会改变动作进度、当前 form、身体 layer、身体世界坐标或窗口保存位置。
 
 由于并集只包含实际绘制的层，simplified 的窗口尺寸和 `renderedAnchor` 数值可以比 full 小；上述锚点等式保证身体相对世界锚点仍相同。质量设置只对 v4 显示。切换质量会在当前动作、当前帧上重新合成。
 
-每一种特效质量下的每一个 action 帧都必须至少有一层实际绘制。若某帧所有 layer 的 `frameMap` 都是 `null`，full 也没有内容；若 simplified 下该帧所有非 `null` layer 都是 `optionalInSimplified: true`，简化质量同样没有内容。运行时不会生成一个无层帧，而会拒绝渲染并报告：
+每一种特效质量下的每一个 action 帧都必须至少有一层实际绘制。若某个 action 帧在所有 layer 的 `frameMap` 数组中对应项都是 `null`，full 也没有内容；若 simplified 下该帧所有未被数组项 `null` 跳过的 layer 都是 `optionalInSimplified: true`，简化质量同样没有内容。运行时不会生成一个无层帧，而会拒绝渲染并报告：
 
 ```text
 action <id> frame has no rendered layers
 ```
 
-身体 layer 的 `frameMap: null` 不一定立即触发该错误：只要仍有其他实际绘制层，帧可以合成，但 `bodyImage` 会变成同尺寸的全透明图，身体命中消失。身体 layer 若标为 `optionalInSimplified: true`，simplified 合成图不会画它，运行时却仍从源格生成 `bodyImage`，可能形成“身体不可见但仍可点击”的区域；当其余层也被省略时还会触发无层错误。制作者应让身体在每帧都有本地帧、不要把身体标为 optional，并逐 action、逐 frame 验证 full 与 simplified 两种质量；失败消息可用于定位并隔离有问题的宠物包，而不应靠全空帧表达“暂时隐藏”。
+身体 layer 的 `frameMap` 数组当前项为 `null` 不一定立即触发该错误：只要仍有其他实际绘制层，帧可以合成，但 `bodyImage` 会变成同尺寸的全透明图，身体命中消失。身体 layer 若标为 `optionalInSimplified: true`，simplified 合成图不会画它，运行时却仍从源格生成 `bodyImage`，可能形成“身体不可见但仍可点击”的区域；当其余层也被省略时还会触发无层错误。制作者应让身体在每帧都有本地帧、不要把身体标为 optional，并逐 action、逐 frame 验证 full 与 simplified 两种质量；失败消息可用于定位并隔离有问题的宠物包，而不应靠全空帧表达“暂时隐藏”。
 
 ## Form 对象和注视限制
 
@@ -439,7 +439,7 @@ sequence 本身包含 `label`、`showInMenu`、`steps`，以及可选 `autoplay`
 | `actions.wideSpell must contain exactly one hitTest layer` | 没有身体层或有多个身体层 |
 | `actions.wideSpell.layers[0].frameMap length must match frameCount` | 映射长度错误 |
 | `action layer references an unavailable effects atlas cell` | 取帧越过 atlas 格网 |
-| `action wideSpell frame has no rendered layers` | 当前质量下该帧所有 layer 都被 `null` 或 optional 规则跳过 |
+| `action wideSpell frame has no rendered layers` | 当前质量下该帧所有 layer 都被 `frameMap` 数组项 `null` 或 optional 规则跳过 |
 | `forms.smallAnimal references an unknown action` | form action 引用不存在 |
 | `only the default form may define gazeAction` | 非默认 form 声明了 gaze |
 | `autoplay bucket shapeEvents references an unknown cooldown group` | bucket 使用未声明共享冷却 |

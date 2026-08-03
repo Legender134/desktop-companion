@@ -57,6 +57,13 @@ def test_v4_documentation_explains_renderability_and_zero_value_role_exceptions(
     assert "action <id> frame has no rendered layers" in format_guide
     assert "显式 `minDistance: 0`" in format_guide
     assert "显式 `autoplayGroup: \"\"`" in format_guide
+    assert (
+        "`frameMap` 字段整体显式写为 `null` 与省略该字段完全相同"
+        in format_guide
+    )
+    assert "`frameMap` 数组中的某一项为 `null`" in format_guide
+    assert "`frameMap: null` 的身体帧" not in format_guide
+    assert "所有 layer 的 `frameMap` 都是 `null`" not in format_guide
     assert "上面的 pytest 命令只验证仓库自带 fixture" in new_pet_guide
     assert "自己的 v4 包" in new_pet_guide
 
