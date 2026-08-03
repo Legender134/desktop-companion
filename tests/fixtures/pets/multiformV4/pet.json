@@ -1,0 +1,315 @@
+{
+  "id": "multiformV4",
+  "displayName": "多形态几何测试宠物",
+  "description": "由圆形、矩形和折线构成的 v4 多图集集成测试素材。",
+  "spriteVersionNumber": 4,
+  "defaultForm": "defaultHuman",
+  "iconFrame": {
+    "atlas": "character",
+    "row": 0,
+    "column": 0
+  },
+  "atlases": {
+    "character": {
+      "path": "character.webp",
+      "cellWidth": 192,
+      "cellHeight": 208
+    },
+    "effects": {
+      "path": "effects.webp",
+      "cellWidth": 384,
+      "cellHeight": 208
+    }
+  },
+  "cooldownGroups": {
+    "sharedShape": {
+      "cooldownMs": 500
+    }
+  },
+  "actions": {
+    "humanIdle": {
+      "label": "几何人形待机",
+      "role": "idle",
+      "frameCount": 2,
+      "frameDurations": [120, 180],
+      "loop": true,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 0,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "humanMoveRight": {
+      "label": "几何人形右移",
+      "role": "move",
+      "direction": "right",
+      "frameCount": 2,
+      "frameMs": 90,
+      "loop": true,
+      "autoplayWeight": 10,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 1,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "humanMoveLeft": {
+      "label": "几何人形左移",
+      "role": "move",
+      "direction": "left",
+      "mirrorOf": "humanMoveRight",
+      "frameCount": 2,
+      "frameMs": 90,
+      "loop": true,
+      "autoplayWeight": 10,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 1,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "humanGaze": {
+      "label": "几何人形注视",
+      "role": "gaze",
+      "frameCount": 16,
+      "frameMs": 100,
+      "loop": true,
+      "showInMenu": false,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 2,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "wideSpell": {
+      "label": "宽幅几何波",
+      "role": "interaction",
+      "frameCount": 3,
+      "frameMs": 80,
+      "showInMenu": true,
+      "includeInShowcase": true,
+      "autoplayWeight": 0,
+      "layers": [
+        {
+          "atlas": "effects",
+          "row": 0,
+          "startColumn": 0,
+          "anchorX": 192,
+          "anchorY": 208,
+          "opacityPercent": 80,
+          "optionalInSimplified": true,
+          "frameMap": [0, null, 2]
+        },
+        {
+          "atlas": "character",
+          "row": 6,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true,
+          "frameMap": [0, 1, 2]
+        }
+      ]
+    },
+    "transformEnter": {
+      "label": "缩为小动物",
+      "role": "interaction",
+      "frameCount": 2,
+      "frameMs": 100,
+      "showInMenu": false,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 7,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "transformExit": {
+      "label": "恢复几何人形",
+      "role": "interaction",
+      "frameCount": 2,
+      "frameMs": 100,
+      "showInMenu": false,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 8,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "animalIdle": {
+      "label": "小动物待机",
+      "role": "idle",
+      "frameCount": 2,
+      "frameMs": 140,
+      "loop": true,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 9,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "animalMoveRight": {
+      "label": "小动物右移",
+      "role": "move",
+      "direction": "right",
+      "frameCount": 2,
+      "frameMs": 90,
+      "loop": true,
+      "autoplayWeight": 10,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 10,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "animalMoveLeft": {
+      "label": "小动物左移",
+      "role": "move",
+      "direction": "left",
+      "mirrorOf": "animalMoveRight",
+      "frameCount": 2,
+      "frameMs": 90,
+      "loop": true,
+      "autoplayWeight": 10,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 10,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    },
+    "animalResident": {
+      "label": "小动物几何滚动",
+      "role": "interaction",
+      "frameCount": 2,
+      "frameMs": 110,
+      "showInMenu": false,
+      "layers": [
+        {
+          "atlas": "character",
+          "row": 11,
+          "startColumn": 0,
+          "anchorX": 96,
+          "anchorY": 208,
+          "hitTest": true
+        }
+      ]
+    }
+  },
+  "forms": {
+    "defaultHuman": {
+      "label": "默认几何人形",
+      "idleAction": "humanIdle",
+      "moveRightAction": "humanMoveRight",
+      "moveLeftAction": "humanMoveLeft",
+      "gazeAction": "humanGaze",
+      "representativeAction": "humanIdle",
+      "interactionActions": ["wideSpell", "transformEnter"]
+    },
+    "smallAnimal": {
+      "label": "几何小动物",
+      "idleAction": "animalIdle",
+      "moveRightAction": "animalMoveRight",
+      "moveLeftAction": "animalMoveLeft",
+      "representativeAction": "animalIdle",
+      "interactionActions": ["animalResident"]
+    }
+  },
+  "transformations": {
+    "becomeAnimal": {
+      "label": "变成几何小动物",
+      "fromForm": "defaultHuman",
+      "toForm": "smallAnimal",
+      "enterAction": "transformEnter",
+      "residentActions": [
+        {
+          "action": "animalResident",
+          "weight": 100
+        }
+      ],
+      "exitAction": "transformExit",
+      "minDurationMs": 200,
+      "maxDurationMs": 200,
+      "showInMenu": true,
+      "autoplay": {
+        "bucket": "shapeEvents",
+        "weight": 3,
+        "minDelayMs": 100,
+        "maxDelayMs": 100,
+        "cooldownGroups": ["sharedShape"]
+      }
+    }
+  },
+  "sequences": {
+    "shapeBurst": {
+      "label": "几何形态连段",
+      "showInMenu": true,
+      "steps": [
+        {
+          "action": "wideSpell",
+          "repeatCount": 2,
+          "holdMs": 125,
+          "formAfter": "smallAnimal",
+          "safeStopAfter": false
+        },
+        {
+          "action": "animalResident",
+          "repeatCount": 1,
+          "holdMs": 0,
+          "formAfter": "defaultHuman",
+          "safeStopAfter": true
+        }
+      ],
+      "autoplay": {
+        "bucket": "shapeEvents",
+        "weight": 1,
+        "minDelayMs": 100,
+        "maxDelayMs": 100,
+        "cooldownGroups": ["sharedShape"]
+      }
+    }
+  }
+}
