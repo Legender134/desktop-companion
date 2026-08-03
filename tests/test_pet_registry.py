@@ -366,6 +366,15 @@ def test_registry_loads_v4_forms_layers_transformations_and_sequences(tmp_path: 
     assert directory.joinpath("character.webp").is_file()
 
 
+def test_registry_preserves_non_first_v4_icon_atlas(tmp_path: Path):
+    manifest = _valid_v4_manifest()
+    manifest["iconFrame"]["atlas"] = "effects"
+
+    definition = _write_and_refresh_v4(tmp_path, manifest).by_id("fixtureV4")
+
+    assert definition.icon_atlas == "effects"
+
+
 def test_registry_uses_v4_label_limits_for_display_name(tmp_path: Path):
     manifest = _valid_v4_manifest()
     manifest["displayName"] = "V" * 80

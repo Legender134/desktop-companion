@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QImage, QPainter
 
 from .constants import (
     ACTION_SPECS,
@@ -18,6 +18,10 @@ from .models import (
     AnimationSpec,
     FrameAsset,
     PetActionDefinition,
+    PetActionLayerDefinition,
+    PetAtlasDefinition,
+    PetFormDefinition,
+    RenderedFrame,
     PetStateDefinition,
 )
 from .pet_registry import PetDefinition, PetRegistry
@@ -110,6 +114,7 @@ class AnimationCatalog:
         self.pet_id = pet_id
         self.display_name = display_name
         self.sprite_version = sprite_version
+        self.icon_atlas = None
         self._atlas = atlas.convertToFormat(QImage.Format.Format_RGBA8888)
         self.columns = self._atlas.width() // CELL_WIDTH
         self.rows = self._atlas.height() // CELL_HEIGHT
@@ -160,6 +165,11 @@ class AnimationCatalog:
             raise ValueError("state references an unknown action")
         self._specs: dict[ActionKey, AnimationSpec] = {}
         self._actions: dict[ActionKey, tuple[FrameAsset, ...]] = {}
+        self._rendered_actions: dict[
+            tuple[ActionKey, str], tuple[RenderedFrame, ...]
+        ] = {}
+        self.default_form = "default"
+        self._form_map: dict[str, PetFormDefinition] = {}
 
         if sprite_version == 2:
             used_counts = (7, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8)
@@ -199,6 +209,7 @@ class AnimationCatalog:
         gaze = next(
             (item for item in actions if item.role is ActionRole.GAZE), None
         )
+        self._gaze_action = gaze.action_id if gaze is not None else None
         if sprite_version == 2:
             self.look_degrees = LOOK_DEGREES
             self._look_frames = tuple(
@@ -235,6 +246,8 @@ class AnimationCatalog:
 
     @classmethod
     def load_definition(cls, definition: PetDefinition) -> "AnimationCatalog":
+        if definition.sprite_version == 4:
+            return cls._load_v4_definition(definition)
         return cls(
             QImage(str(definition.spritesheet_path)),
             pet_id=definition.pet_id,
@@ -245,17 +258,196 @@ class AnimationCatalog:
             sprite_version=definition.sprite_version,
         )
 
+    @classmethod
+    def _load_v4_definition(cls, definition: PetDefinition) -> "AnimationCatalog":
+        atlases: dict[str, QImage] = {}
+        atlas_definitions = {item.key: item for item in definition.atlases}
+        decoded_pixels = 0
+        for atlas_definition in definition.atlases:
+            image = QImage(str(atlas_definition.path))
+            if image.isNull():
+                raise ValueError(
+                    f"v4 atlas {atlas_definition.key} could not be decoded"
+                )
+            if not image.hasAlphaChannel():
+                raise ValueError(
+                    f"v4 atlas {atlas_definition.key} must have alpha"
+                )
+            if (
+                image.width() <= 0
+                or image.height() <= 0
+                or image.width() % atlas_definition.cell_width
+                or image.height() % atlas_definition.cell_height
+            ):
+                raise ValueError(
+                    f"v4 atlas {atlas_definition.key} dimensions must be cell-size multiples"
+                )
+            decoded_pixels += image.width() * image.height()
+            if decoded_pixels > 50_000_000:
+                raise ValueError(
+                    "v4 atlases may contain at most 50,000,000 decoded pixels"
+                )
+            atlases[atlas_definition.key] = image.convertToFormat(
+                QImage.Format.Format_RGBA8888
+            )
+
+        catalog = cls.__new__(cls)
+        catalog.pet_id = definition.pet_id
+        catalog.display_name = definition.display_name
+        catalog.sprite_version = 4
+        catalog._atlas_definitions = atlas_definitions
+        catalog._atlases = atlases
+        first_atlas = definition.atlases[0]
+        catalog._atlas = atlases[first_atlas.key]
+        catalog.columns = catalog._atlas.width() // first_atlas.cell_width
+        catalog.rows = catalog._atlas.height() // first_atlas.cell_height
+        catalog.icon_frame = definition.icon_frame
+        catalog.icon_atlas = definition.icon_atlas or first_atlas.key
+        catalog._action_definitions = tuple(definition.actions)
+        catalog._action_map = {
+            action.action_id: action for action in definition.actions
+        }
+        catalog._state_definitions = tuple(definition.states)
+        catalog._state_map = {state.key: state for state in definition.states}
+        catalog._state_by_enter_action = {
+            state.enter_action: state for state in definition.states
+        }
+        catalog._specs = {
+            action.action_id: action.spec
+            for action in definition.actions
+            if action.spec is not None
+        }
+        catalog._actions = {}
+        catalog._rendered_actions = {}
+        catalog.default_form = definition.default_form
+        catalog._form_map = {form.key: form for form in definition.forms}
+        catalog._idle_action = catalog.idle_action_for(catalog.default_form)
+        default_form = catalog._form_map[catalog.default_form]
+        catalog._gaze_action = default_form.gaze_action
+        if catalog._gaze_action is not None:
+            gaze_spec = catalog.spec(catalog._gaze_action)
+            step = 360.0 / gaze_spec.frame_count
+            catalog.look_degrees = tuple(
+                index * step for index in range(gaze_spec.frame_count)
+            )
+        else:
+            catalog.look_degrees = ()
+        catalog._look_frames = ()
+        menu_stride = max(1, len(catalog.look_degrees) // 16)
+        catalog.manual_look_degrees = catalog.look_degrees[::menu_stride]
+
+        for action in definition.actions:
+            spec = action.spec
+            if spec is None:
+                raise ValueError(f"action {action.key} has no animation timing")
+            for layer in action.layers:
+                local_indices = (
+                    tuple(
+                        index for index in layer.frame_map if index is not None
+                    )
+                    if layer.frame_map is not None
+                    else tuple(range(spec.frame_count))
+                )
+                for local_index in local_indices:
+                    catalog._v4_cell_coordinates(layer, local_index)
+
+        icon_atlas_definition = atlas_definitions[catalog.icon_atlas]
+        icon_atlas = atlases[catalog.icon_atlas]
+        icon_row, icon_column = definition.icon_frame
+        if (
+            not 0 <= icon_row
+            < icon_atlas.height() // icon_atlas_definition.cell_height
+            or not 0 <= icon_column
+            < icon_atlas.width() // icon_atlas_definition.cell_width
+        ):
+            raise ValueError("iconFrame is outside the atlas")
+        catalog._icon_image = icon_atlas.copy(
+            icon_column * icon_atlas_definition.cell_width,
+            icon_row * icon_atlas_definition.cell_height,
+            icon_atlas_definition.cell_width,
+            icon_atlas_definition.cell_height,
+        )
+        if not _has_visible_pixel(catalog._icon_image):
+            raise ValueError("iconFrame must select a visible atlas cell")
+        return catalog
+
     @property
     def idle_action(self) -> ActionKey:
         return self._idle_action
 
     @property
     def supports_gaze(self) -> bool:
+        if self.sprite_version == 4:
+            return self.supports_gaze_for(self.default_form)
         return bool(self._look_frames)
 
     @property
+    def form_keys(self) -> tuple[str, ...]:
+        if self.sprite_version == 4:
+            return tuple(self._form_map)
+        return ("default",)
+
+    def _form_definition(self, form_key: str) -> PetFormDefinition | None:
+        if self.sprite_version != 4:
+            if form_key != "default":
+                raise ValueError(f"unknown form: {form_key}")
+            return None
+        try:
+            return self._form_map[form_key]
+        except KeyError as error:
+            raise ValueError(f"unknown form: {form_key}") from error
+
+    def idle_action_for(self, form_key: str) -> ActionKey:
+        form = self._form_definition(form_key)
+        return self._idle_action if form is None else form.idle_action
+
+    def supports_gaze_for(self, form_key: str) -> bool:
+        form = self._form_definition(form_key)
+        return bool(self._look_frames) if form is None else form.gaze_action is not None
+
+    def look_frame_for(self, form_key: str, degrees: float) -> RenderedFrame:
+        form = self._form_definition(form_key)
+        if form is None:
+            if not self.supports_gaze_for(form_key):
+                raise ValueError("direction must be a supported gaze step")
+            frame = self.look_frame(degrees)
+            return self._render_legacy_frame("gaze", frame, "full")
+
+        gaze_action = form.gaze_action
+        frames = self.rendered_frames(gaze_action, "full") if gaze_action else ()
+        step = 360.0 / len(frames) if frames else 0.0
+        index = round(degrees / step) if step else 0
+        if (
+            not frames
+            or not 0.0 <= degrees < 360.0
+            or abs(degrees - index * step) > 1e-6
+        ):
+            raise ValueError("direction must be a supported gaze step")
+        return frames[index % len(frames)]
+
+    def movement_actions_for(
+        self, form_key: str, direction: int
+    ) -> tuple[PetActionDefinition, ...]:
+        form = self._form_definition(form_key)
+        if form is None:
+            return self.movement_actions(direction)
+        if direction == 1:
+            return (self.definition(form.move_right_action),)
+        if direction == -1:
+            return (self.definition(form.move_left_action),)
+        return ()
+
+    def interaction_actions_for(self, form_key: str) -> tuple[ActionKey, ...]:
+        form = self._form_definition(form_key)
+        return self.interaction_actions() if form is None else form.interaction_actions
+
+    def representative_action_for(self, form_key: str) -> ActionKey:
+        form = self._form_definition(form_key)
+        return self.idle_action if form is None else form.representative_action
+
+    @property
     def action_ids(self) -> tuple[ActionKey, ...]:
-        return tuple(self._actions)
+        return tuple(self._action_map)
 
     @property
     def atlas_size(self) -> tuple[int, int]:
@@ -278,6 +470,207 @@ class AnimationCatalog:
 
     def frames(self, action: ActionKey) -> tuple[FrameAsset, ...]:
         return self._actions[action]
+
+    def rendered_frames(
+        self, action: ActionKey, effects_quality: str = "full"
+    ) -> tuple[RenderedFrame, ...]:
+        """Return cached, anchor-aligned frames for legacy or layered actions."""
+        if effects_quality not in {"full", "simplified"}:
+            raise ValueError("effects quality must be full or simplified")
+        cache_key = (action, effects_quality)
+        cached = self._rendered_actions.get(cache_key)
+        if cached is not None:
+            return cached
+        if self.sprite_version != 4:
+            rendered = tuple(
+                self._render_legacy_frame(action, frame, effects_quality)
+                for frame in self.frames(action)
+            )
+        else:
+            rendered = self._compose_v4_frames(action, effects_quality)
+        self._rendered_actions[cache_key] = rendered
+        return rendered
+
+    def _render_legacy_frame(
+        self, action: ActionKey, frame: FrameAsset, effects_quality: str
+    ) -> RenderedFrame:
+        image = frame.image
+        return RenderedFrame(
+            image,
+            image,
+            QRect(0, 0, image.width(), image.height()),
+            QPoint(image.width() // 2, image.height()),
+            (
+                self.pet_id,
+                action,
+                effects_quality,
+                frame.row,
+                frame.column,
+                frame.variant,
+            ),
+        )
+
+    def _compose_v4_frames(
+        self, action: ActionKey, effects_quality: str
+    ) -> tuple[RenderedFrame, ...]:
+        definition = self._action_map[action]
+        spec = definition.spec
+        if spec is None:
+            raise ValueError(f"action {definition.key} has no animation timing")
+        body_layer = next(layer for layer in definition.layers if layer.hit_test)
+        frames: list[RenderedFrame] = []
+        for frame_index in range(spec.frame_count):
+            drawn_layers: list[tuple[PetActionLayerDefinition, int, QRect, QImage]] = []
+            body_rect: QRect | None = None
+            body_image: QImage | None = None
+            for layer in definition.layers:
+                local_index = (
+                    layer.frame_map[frame_index]
+                    if layer.frame_map is not None
+                    else frame_index
+                )
+                if local_index is None:
+                    continue
+                layer_image = self._v4_layer_image(
+                    layer, local_index, definition.mirror_of is not None
+                )
+                left = layer.offset_x - round(
+                    layer.anchor_x * layer.scale_percent / 100
+                )
+                top = layer.offset_y - round(
+                    layer.anchor_y * layer.scale_percent / 100
+                )
+                rect = QRect(left, top, layer_image.width(), layer_image.height())
+                if layer is body_layer:
+                    body_rect = rect
+                    body_image = self._image_with_opacity(
+                        layer_image, layer.opacity_percent
+                    )
+                if (
+                    effects_quality == "simplified"
+                    and layer.optional_in_simplified
+                ):
+                    continue
+                drawn_layers.append((layer, local_index, rect, layer_image))
+
+            if not drawn_layers:
+                raise ValueError(f"action {definition.key} frame has no rendered layers")
+            union = QRect(drawn_layers[0][2])
+            for _, _, rect, _ in drawn_layers[1:]:
+                union = union.united(rect)
+            composed = QImage(
+                union.width(), union.height(), QImage.Format.Format_RGBA8888
+            )
+            composed.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(composed)
+            for layer, _, rect, layer_image in drawn_layers:
+                painter.setOpacity(layer.opacity_percent / 100)
+                painter.drawImage(rect.topLeft() - union.topLeft(), layer_image)
+            painter.end()
+
+            if body_rect is None or body_image is None:
+                body_image = self._transparent_body_image(body_layer)
+                body_rect = self._v4_layer_rect(body_layer, body_image)
+            translated_body = body_rect.translated(-union.left(), -union.top())
+            identity = (
+                self.pet_id,
+                action,
+                effects_quality,
+                frame_index,
+                tuple(
+                    (layer.atlas_id, local_index)
+                    for layer, local_index, _, _ in drawn_layers
+                ),
+            )
+            frames.append(
+                RenderedFrame(
+                    composed,
+                    body_image,
+                    translated_body,
+                    QPoint(-union.left(), -union.top()),
+                    identity,
+                )
+            )
+        return tuple(frames)
+
+    def _v4_layer_image(
+        self,
+        layer: PetActionLayerDefinition,
+        local_index: int,
+        mirror: bool,
+    ) -> QImage:
+        atlas_definition: PetAtlasDefinition = self._atlas_definitions[
+            layer.atlas_id
+        ]
+        atlas = self._atlases[layer.atlas_id]
+        row, column = self._v4_cell_coordinates(layer, local_index)
+        image = atlas.copy(
+            column * atlas_definition.cell_width,
+            row * atlas_definition.cell_height,
+            atlas_definition.cell_width,
+            atlas_definition.cell_height,
+        )
+        if mirror:
+            image = image.flipped(Qt.Orientation.Horizontal)
+        if layer.scale_percent != 100:
+            image = image.scaled(
+                round(image.width() * layer.scale_percent / 100),
+                round(image.height() * layer.scale_percent / 100),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        return image
+
+    def _v4_cell_coordinates(
+        self, layer: PetActionLayerDefinition, local_index: int
+    ) -> tuple[int, int]:
+        atlas_definition: PetAtlasDefinition = self._atlas_definitions[
+            layer.atlas_id
+        ]
+        atlas = self._atlases[layer.atlas_id]
+        columns = atlas.width() // atlas_definition.cell_width
+        start = layer.row * columns + layer.start_column
+        row, column = divmod(start + local_index, columns)
+        if row >= atlas.height() // atlas_definition.cell_height:
+            raise ValueError(
+                f"action layer references an unavailable {layer.atlas_id} atlas cell"
+            )
+        return row, column
+
+    @staticmethod
+    def _image_with_opacity(image: QImage, opacity_percent: int) -> QImage:
+        if opacity_percent == 100:
+            return image
+        result = QImage(image.size(), QImage.Format.Format_RGBA8888)
+        result.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(result)
+        painter.setOpacity(opacity_percent / 100)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        return result
+
+    def _transparent_body_image(self, layer: PetActionLayerDefinition) -> QImage:
+        atlas_definition: PetAtlasDefinition = self._atlas_definitions[
+            layer.atlas_id
+        ]
+        image = QImage(
+            round(atlas_definition.cell_width * layer.scale_percent / 100),
+            round(atlas_definition.cell_height * layer.scale_percent / 100),
+            QImage.Format.Format_RGBA8888,
+        )
+        image.fill(Qt.GlobalColor.transparent)
+        return image
+
+    @staticmethod
+    def _v4_layer_rect(
+        layer: PetActionLayerDefinition, image: QImage
+    ) -> QRect:
+        return QRect(
+            layer.offset_x - round(layer.anchor_x * layer.scale_percent / 100),
+            layer.offset_y - round(layer.anchor_y * layer.scale_percent / 100),
+            image.width(),
+            image.height(),
+        )
 
     def spec(self, action: ActionKey) -> AnimationSpec:
         return self._specs[action]
@@ -474,7 +867,7 @@ class AnimationCatalog:
         )
 
     def resolve_action(self, requested: ActionKey) -> ActionKey:
-        if requested in self._actions:
+        if requested in self._action_map:
             return self._action_map[requested].action_id
         if requested is ActionId.IDLE:
             return self.idle_action

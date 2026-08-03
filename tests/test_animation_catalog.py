@@ -1,10 +1,25 @@
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
+from PySide6.QtCore import QPoint, QRect, QSize
 from PySide6.QtGui import QColor, QImage
 
+import shiyi_desktop_pet.animation_catalog as animation_catalog_module
 from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.animation_player import AnimationTimeline
-from shiyi_desktop_pet.models import ActionId, ActionRole, FrameAsset
-from shiyi_desktop_pet.pet_registry import PetRegistry
+from shiyi_desktop_pet.models import (
+    ActionId,
+    ActionRole,
+    AnimationSpec,
+    FrameAsset,
+    PetActionDefinition,
+    PetActionLayerDefinition,
+    PetAtlasDefinition,
+    PetFormDefinition,
+    RenderedFrame,
+)
+from shiyi_desktop_pet.pet_registry import PetDefinition, PetRegistry
 
 
 USED_COUNTS = (7, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8)
@@ -109,6 +124,272 @@ def _valid_dynamic_atlas() -> QImage:
                 column * 192 + 5, row * 208 + 5, QColor(255, 255, 255, 255)
             )
     return atlas
+
+
+def _synthetic_v4_catalog() -> AnimationCatalog:
+    body = QImage(192, 208, QImage.Format.Format_RGBA8888)
+    body.fill(QColor(255, 255, 255, 255))
+    effects = QImage(768, 416, QImage.Format.Format_RGBA8888)
+    effects.fill(QColor(0, 0, 0, 0))
+    effects.setPixelColor(383, 415, QColor(0, 0, 255, 255))
+    effects.setPixelColor(384 + 5, 5, QColor(255, 0, 0, 255))
+
+    action = PetActionDefinition(
+        "spell",
+        "spell",
+        "Spell",
+        0,
+        spec=AnimationSpec(0, 1, 100, 1),
+        layers=(
+            PetActionLayerDefinition(
+                "effects", 0, 0, 192, 400
+            ),
+            PetActionLayerDefinition(
+                "character", 0, 0, 96, 200, hit_test=True
+            ),
+            PetActionLayerDefinition(
+                "effects",
+                0,
+                1,
+                192,
+                400,
+                optional_in_simplified=True,
+            ),
+        ),
+    )
+    catalog = AnimationCatalog.__new__(AnimationCatalog)
+    catalog.pet_id = "synthetic-v4"
+    catalog.sprite_version = 4
+    catalog._atlas_definitions = {
+        "character": PetAtlasDefinition(
+            "character", Path("character.webp"), 192, 208
+        ),
+        "effects": PetAtlasDefinition("effects", Path("effects.webp"), 384, 416),
+    }
+    catalog._atlases = {"character": body, "effects": effects}
+    catalog._action_map = {"spell": action}
+    catalog._rendered_actions = {}
+    catalog.default_form = "human"
+    catalog._form_map = {
+        "human": PetFormDefinition(
+            "human",
+            "Human",
+            "spell",
+            "spell",
+            "spell",
+            "spell",
+            "spell",
+            ("spell",),
+        ),
+        "whiteFox": PetFormDefinition(
+            "whiteFox",
+            "White fox",
+            "spell",
+            "spell",
+            "spell",
+            None,
+            "spell",
+            ("spell",),
+        ),
+    }
+    return catalog
+
+
+def _minimal_v4_definition(
+    tmp_path: Path, atlases: tuple[PetAtlasDefinition, ...]
+) -> PetDefinition:
+    action = PetActionDefinition(
+        "idle",
+        "idle",
+        "Idle",
+        0,
+        spec=AnimationSpec(0, 1, 100, None),
+        role=ActionRole.IDLE,
+        layers=(
+            PetActionLayerDefinition(
+                atlases[0].key, 0, 0, 0, 0, hit_test=True
+            ),
+        ),
+    )
+    form = PetFormDefinition(
+        "human", "Human", "idle", "idle", "idle", None, "idle", ("idle",)
+    )
+    return PetDefinition(
+        "synthetic-v4",
+        "Synthetic v4",
+        "",
+        tmp_path / "pet.json",
+        atlases[0].path,
+        False,
+        (0, 0),
+        (action,),
+        sprite_version=4,
+        atlases=atlases,
+        forms=(form,),
+        default_form="human",
+    )
+
+
+def test_v4_catalog_composes_layers_around_one_anchor_and_keeps_body_hit_area():
+    catalog = _synthetic_v4_catalog()
+    full = catalog.rendered_frames("spell", "full")[0]
+    simple = catalog.rendered_frames("spell", "simplified")[0]
+
+    assert full.image.size() == QSize(384, 416)
+    assert simple.identity != full.identity
+    assert full.body_rect == QRect(96, 200, 192, 208)
+    assert full.anchor == QPoint(192, 400)
+    assert full.body_image.size() == QSize(192, 208)
+    assert full.image.pixelColor(5, 5).alpha() > 0
+    assert simple.image.pixelColor(5, 5).alpha() == 0
+
+
+def test_v4_rendering_resolves_frame_maps_caches_and_drops_only_optional_layers():
+    catalog = _synthetic_v4_catalog()
+    action = catalog._action_map["spell"]
+    layers = tuple(
+        replace(
+            layer,
+            frame_map=(0, 0, 0)
+            if layer.atlas_id == "character" or not layer.optional_in_simplified
+            else (0, None, 0),
+        )
+        for layer in action.layers
+    )
+    catalog._action_map["spell"] = replace(
+        action, spec=AnimationSpec(0, 3, 100, 1), layers=layers
+    )
+
+    full = catalog.rendered_frames("spell", "full")
+    simplified = catalog.rendered_frames("spell", "simplified")
+
+    assert catalog.rendered_frames("spell", "full") is full
+    assert catalog.rendered_frames("spell", "simplified") is simplified
+    assert len(full) == 3
+    assert full[0].image.pixelColor(5, 5).alpha() > 0
+    assert full[1].image.pixelColor(5, 5).alpha() == 0
+    assert full[2].image.pixelColor(5, 5).alpha() > 0
+    assert simplified[0].image.pixelColor(5, 5).alpha() == 0
+    assert simplified[0].image.pixelColor(383, 415).alpha() > 0
+    assert simplified[0].body_image.pixelColor(0, 0).alpha() > 0
+
+
+def test_v4_rendering_mirrors_layer_pixels_and_body_alpha_together():
+    catalog = _synthetic_v4_catalog()
+    body = QImage(192, 208, QImage.Format.Format_RGBA8888)
+    body.fill(QColor(0, 0, 0, 0))
+    body.setPixelColor(0, 50, QColor(255, 255, 255, 255))
+    catalog._atlases["character"] = body
+    source = catalog._action_map["spell"]
+    body_layer = next(layer for layer in source.layers if layer.hit_test)
+    catalog._action_map["mirrored"] = replace(
+        source,
+        key="mirrored",
+        action_id="mirrored",
+        mirror_of="source",
+        layers=(body_layer,),
+    )
+
+    frame = catalog.rendered_frames("mirrored")[0]
+
+    assert frame.image.pixelColor(191, 50).alpha() == 255
+    assert frame.image.pixelColor(0, 50).alpha() == 0
+    assert frame.body_image.pixelColor(191, 50).alpha() == 255
+
+
+def test_v4_loads_each_atlas_once_and_enforces_decoded_pixel_budget(
+    monkeypatch, tmp_path
+):
+    class ReportedSizeImage(QImage):
+        def __init__(self, width: int, height: int, color: QColor):
+            super().__init__(1, 1, QImage.Format.Format_RGBA8888)
+            self.fill(color)
+            self._reported_width = width
+            self._reported_height = height
+            self._color = color
+
+        def width(self) -> int:
+            return self._reported_width
+
+        def height(self) -> int:
+            return self._reported_height
+
+        def convertToFormat(self, *args, **kwargs):
+            image = QImage(1, 1, QImage.Format.Format_RGBA8888)
+            image.fill(self._color)
+            return image
+
+    images = {
+        "first.webp": ReportedSizeImage(5_000, 5_000, QColor(255, 0, 0, 255)),
+        "second.webp": ReportedSizeImage(5_000, 5_000, QColor(0, 0, 255, 255)),
+        "one-more.webp": ReportedSizeImage(1, 1, QColor(255, 255, 255, 255)),
+    }
+    calls: list[str] = []
+
+    class RecordingQImage:
+        Format = QImage.Format
+
+        def __new__(cls, path):
+            name = Path(path).name
+            calls.append(name)
+            return images[name]
+
+    monkeypatch.setattr(animation_catalog_module, "QImage", RecordingQImage)
+    first = PetAtlasDefinition("first", tmp_path / "first.webp", 1, 1)
+    second = PetAtlasDefinition("second", tmp_path / "second.webp", 1, 1)
+    accepted = _minimal_v4_definition(tmp_path, (first, second))
+    object.__setattr__(accepted, "icon_atlas", "second")
+
+    catalog = AnimationCatalog.load_definition(accepted)
+
+    assert catalog.sprite_version == 4
+    assert calls == ["first.webp", "second.webp"]
+    assert catalog.icon_image().pixelColor(0, 0) == QColor(0, 0, 255, 255)
+
+    calls.clear()
+    rejected = replace(
+        accepted,
+        atlases=accepted.atlases
+        + (PetAtlasDefinition("extra", tmp_path / "one-more.webp", 1, 1),),
+    )
+    with pytest.raises(ValueError, match="50,000,000 decoded pixels"):
+        AnimationCatalog.load_definition(rejected)
+    assert calls == ["first.webp", "second.webp", "one-more.webp"]
+
+
+def test_form_aware_catalog_api_preserves_legacy_defaults_and_unifies_rendering():
+    v2 = AnimationCatalog(_valid_synthetic_atlas())
+    v3 = AnimationCatalog(
+        _valid_dynamic_atlas(), actions=_dynamic_actions(), sprite_version=3
+    )
+
+    for catalog in (v2, v3):
+        assert catalog.default_form == "default"
+        assert catalog.form_keys == ("default",)
+        assert catalog.idle_action_for("default") == catalog.idle_action
+        assert catalog.supports_gaze_for("default") == catalog.supports_gaze
+        assert catalog.movement_actions_for("default", 1) == catalog.movement_actions(1)
+        assert catalog.interaction_actions_for("default") == catalog.interaction_actions()
+        assert catalog.representative_action_for("default") == catalog.idle_action
+        with pytest.raises(ValueError, match="unknown form"):
+            catalog.idle_action_for("missing")
+
+    gaze = v2.look_frame_for("default", 0.0)
+    assert isinstance(gaze, RenderedFrame)
+    assert gaze.body_image == v2.look_frame(0.0).image
+    with pytest.raises(ValueError, match="supported gaze step"):
+        v3.look_frame_for("default", 0.0)
+
+
+def test_v4_non_default_form_exposes_no_gaze_frames():
+    catalog = _synthetic_v4_catalog()
+
+    assert catalog.form_keys == ("human", "whiteFox")
+    assert catalog.supports_gaze_for("human")
+    assert not catalog.supports_gaze_for("whiteFox")
+    assert isinstance(catalog.look_frame_for("human", 0.0), RenderedFrame)
+    with pytest.raises(ValueError, match="supported gaze step"):
+        catalog.look_frame_for("whiteFox", 0.0)
 
 
 def test_catalog_exposes_all_actions_and_look_directions():

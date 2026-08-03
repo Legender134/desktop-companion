@@ -57,6 +57,7 @@ class PetDefinition:
     transformations: tuple[PetTransformationDefinition, ...] = ()
     cooldown_groups: tuple[PetCooldownGroupDefinition, ...] = ()
     sequences: tuple[PetSequenceDefinition, ...] = ()
+    icon_atlas: str | None = None
 
 
 @dataclass(frozen=True)
@@ -307,6 +308,7 @@ class PetRegistry:
             transformations: tuple[PetTransformationDefinition, ...] = ()
             cooldown_groups: tuple[PetCooldownGroupDefinition, ...] = ()
             sequences: tuple[PetSequenceDefinition, ...] = ()
+            icon_atlas = None
         elif sprite_version == 3:
             actions = PetRegistry._parse_v3_actions(manifest.get("actions"))
             states = PetRegistry._parse_v3_states(
@@ -318,6 +320,7 @@ class PetRegistry:
             transformations = ()
             cooldown_groups = ()
             sequences = ()
+            icon_atlas = None
         else:
             if "states" in manifest:
                 raise ValueError("states are only supported by sprite version 3")
@@ -343,6 +346,7 @@ class PetRegistry:
                 icon_frame["atlas"],
             )
             states = ()
+            icon_atlas = icon_frame["atlas"]
 
         if sprite_version == 4:
             spritesheet_path = atlases[0].path
@@ -373,6 +377,7 @@ class PetRegistry:
             transformations=transformations,
             cooldown_groups=cooldown_groups,
             sequences=sequences,
+            icon_atlas=icon_atlas,
         )
 
     @staticmethod
