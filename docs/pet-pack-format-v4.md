@@ -163,7 +163,7 @@ role 限制按有效值判断：非 `interaction` action 可以显式写 `autopl
 
 `frameMap` 字段整体显式写为 `null` 与省略该字段完全相同：第 N 个 action 帧读取该 layer 的第 N 个本地帧。从 `row`、`startColumn` 开始按从左到右读取，超过本行列数后继续下一行。
 
-`frameMap` 为数组时，数组长度必须恰好等于 action 的 `frameCount`。整数是本地图层帧索引，当前运行时要求在 `0..frameCount-1` 内；可以重复以复用一格。只有 `frameMap` 数组中的某一项为 `null` 时，对应的 action 帧才不绘制此 layer。被引用格最终还必须位于对应 atlas 内，否则图像目录加载阶段失败。
+`frameMap` 为数组时，数组长度必须恰好等于 action 的 `frameCount`。整数是本地图层帧索引，必须在 `0..511` 内；可以映射到 action 帧数之外的本地格，也可以重复以复用一格。只有 `frameMap` 数组中的某一项为 `null` 时，对应的 action 帧才不绘制此 layer。被引用格最终还必须位于对应 atlas 内，否则图像目录加载阶段失败。
 
 v4 的 `mirrorOf` **不继承**源 action 的时长、层或帧数。镜像 action 仍须完整声明自己的 `frameCount`、时长和 `layers`。源 action 必须存在、不能自身也是镜像，并且两者 role 相同、方向相反。运行时先正常合成镜像 action 自己的全部层，再把整张合成图、身体图和身体几何一起水平翻转。
 
@@ -438,6 +438,7 @@ sequence 本身包含 `label`、`showInMenu`、`steps`，以及可选 `autoplay`
 | `actions.wideSpell must contain exactly one of frameMs or frameDurations` | 时长字段缺失或同时出现 |
 | `actions.wideSpell must contain exactly one hitTest layer` | 没有身体层或有多个身体层 |
 | `actions.wideSpell.layers[0].frameMap length must match frameCount` | 映射长度错误 |
+| `actions.wideSpell.layers[0].frameMap entries must be null or integers from 0 through 511` | 映射值不是 `null` 或超出本地索引范围 |
 | `action layer references an unavailable effects atlas cell` | 取帧越过 atlas 格网 |
 | `action wideSpell frame has no rendered layers` | 当前质量下该帧所有 layer 都被 `frameMap` 数组项 `null` 或 optional 规则跳过 |
 | `forms.smallAnimal references an unknown action` | form action 引用不存在 |

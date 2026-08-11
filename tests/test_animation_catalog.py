@@ -230,6 +230,31 @@ def _minimal_v4_definition(
     )
 
 
+def _mapped_two_frame_v4_definition(
+    tmp_path: Path, frame_map: tuple[int | None, ...]
+) -> PetDefinition:
+    atlas_path = tmp_path / "mapped.webp"
+    image = QImage(4, 1, QImage.Format.Format_RGBA8888)
+    image.fill(QColor(255, 255, 255, 255))
+    image.setPixelColor(0, 0, QColor(255, 255, 255, 254))
+    assert image.save(str(atlas_path), "WEBP")
+    definition = _minimal_v4_definition(
+        tmp_path,
+        (PetAtlasDefinition("mapped", atlas_path, 1, 1),),
+    )
+    action = definition.actions[0]
+    return replace(
+        definition,
+        actions=(
+            replace(
+                action,
+                spec=AnimationSpec(0, 2, 100, None),
+                layers=(replace(action.layers[0], frame_map=frame_map),),
+            ),
+        ),
+    )
+
+
 def test_v4_catalog_composes_layers_around_one_anchor_and_keeps_body_hit_area():
     catalog = _synthetic_v4_catalog()
     full = catalog.rendered_frames("spell", "full")[0]
@@ -394,6 +419,25 @@ def test_v4_loads_each_atlas_once_and_enforces_decoded_pixel_budget(
     with pytest.raises(ValueError, match="50,000,000 decoded pixels"):
         AnimationCatalog.load_definition(rejected)
     assert calls == ["first.webp", "second.webp", "one-more.webp"]
+
+
+def test_v4_catalog_accepts_two_action_frames_mapped_to_local_cells_two_and_three(
+    tmp_path: Path,
+):
+    definition = _mapped_two_frame_v4_definition(tmp_path, (2, 3))
+
+    catalog = AnimationCatalog.load_definition(definition)
+
+    assert len(catalog.rendered_frames("idle")) == 2
+
+
+def test_v4_catalog_rejects_mapped_local_cell_outside_decoded_atlas(
+    tmp_path: Path,
+):
+    definition = _mapped_two_frame_v4_definition(tmp_path, (2, 4))
+
+    with pytest.raises(ValueError, match="unavailable mapped atlas cell"):
+        AnimationCatalog.load_definition(definition)
 
 
 def test_form_aware_catalog_api_preserves_legacy_defaults_and_unifies_rendering():

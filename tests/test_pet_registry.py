@@ -394,6 +394,21 @@ def test_registry_accepts_schema_valid_v4_camel_case_pet_id(tmp_path: Path):
     assert snapshot.issues == ()
 
 
+def test_registry_accepts_frame_map_indices_beyond_action_frame_count(
+    tmp_path: Path,
+):
+    manifest = _valid_v4_manifest()
+    manifest["actions"]["spell"]["frameCount"] = 2
+    manifest["actions"]["spell"]["layers"][0]["frameMap"] = [2, 3]
+
+    snapshot = _write_and_refresh_v4(tmp_path, manifest)
+
+    assert snapshot.issues == ()
+    definition = snapshot.by_id("fixtureV4")
+    spell = next(action for action in definition.actions if action.key == "spell")
+    assert spell.layers[0].frame_map == (2, 3)
+
+
 @pytest.mark.parametrize("pet_id", ("fox_pet", "FoxPet"))
 def test_registry_rejects_v4_pet_id_outside_schema_grammar(
     tmp_path: Path, pet_id: str
@@ -520,10 +535,10 @@ def _add_mismatched_sequence_autoplay(pack: dict[str, object]) -> None:
         ),
         (
             lambda pack: pack["actions"]["spell"]["layers"][0].update(
-                frameMap=[0, 1, 2, 4]
+                frameMap=[0, 1, 2, 512]
             ),
             None,
-            "frameMap references an unavailable atlas cell",
+            "frameMap entries must be null or integers from 0 through 511",
         ),
         (_add_mismatched_sequence_autoplay, None, "autoplay bucket definitions must match"),
         (

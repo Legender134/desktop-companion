@@ -14,6 +14,7 @@ from shiyi_desktop_pet.animation_catalog import AnimationCatalog
 from shiyi_desktop_pet.autoplay import AutoplayBucketScheduler
 from shiyi_desktop_pet.multiform import MultiformController, RuntimeCommandKind
 from shiyi_desktop_pet.pet_registry import PetRegistry
+from shiyi_desktop_pet.settings import AppSettings, SettingsStore
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "pets"
@@ -40,6 +41,18 @@ def test_real_v4_fixture_loads_through_registry_and_catalog():
     frame = catalog.rendered_frames("wideSpell", "full")[0]
     assert frame.image.size() == QSize(384, 208)
     assert frame.body_image.size() == QSize(192, 208)
+
+
+def test_real_v4_fixture_resolves_after_settings_restart(tmp_path: Path):
+    store = SettingsStore(tmp_path / "settings.ini")
+    store.save(AppSettings(pet_id="multiformV4"))
+
+    restarted_settings = SettingsStore(store.path).load()
+    restarted_snapshot = PetRegistry(FIXTURE_ROOT, None).refresh()
+    restarted_definition = restarted_snapshot.by_id(restarted_settings.pet_id)
+
+    assert restarted_definition is not None
+    assert AnimationCatalog.load_definition(restarted_definition).pet_id == "multiformV4"
 
 
 def test_fixture_manifest_validates_against_the_published_schema(repo_root: Path):

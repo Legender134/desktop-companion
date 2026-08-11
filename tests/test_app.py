@@ -2692,24 +2692,60 @@ def test_v4_autoplay_consumes_deadline_only_after_accepted_offer(
     controller.shutdown()
 
 
-def test_v4_safe_stop_waits_for_repeats_and_step_hold(qapp, tmp_path):
-    controller, *_ = _v4_controller(qapp, tmp_path)
+@pytest.mark.parametrize(
+    ("animation_speed", "first_end_ms", "second_end_ms", "hold_end_ms"),
+    (
+        ("slow", 125, 250, 312),
+        ("normal", 100, 200, 250),
+        ("fast", 75, 150, 188),
+    ),
+)
+def test_v4_safe_stop_waits_for_speed_scaled_repeats_and_step_hold(
+    qapp,
+    tmp_path,
+    animation_speed,
+    first_end_ms,
+    second_end_ms,
+    hold_end_ms,
+):
+    controller, *_ = _v4_controller(
+        qapp,
+        tmp_path,
+        settings=replace(
+            AppSettings(),
+            pet_id="runtime-v4",
+            animation_speed=animation_speed,
+            gaze_enabled=False,
+            wander_enabled=False,
+        ),
+    )
     now = [0]
     controller._now_ms = lambda: now[0]
     try:
         controller.trigger_sequence("ritual")
-        now[0] = 100
+        now[0] = first_end_ms - 1
         controller._advance_manual(now[0])
+        assert controller._runtime_repeat_remaining == 2
+
+        now[0] = first_end_ms
+        controller._advance_manual(now[0])
+        assert controller._runtime_repeat_remaining == 1
         controller.multiform.request_stop()
 
-        now[0] = 200
-        controller._advance_manual(now[0])
-        assert controller.current_action == "spell"
-        now[0] = 249
+        now[0] = second_end_ms - 1
         controller._advance_manual(now[0])
         assert controller.current_action == "spell"
 
-        now[0] = 250
+        now[0] = second_end_ms
+        controller._advance_manual(now[0])
+        assert controller.current_action == "spell"
+        assert controller._runtime_hold_until_ms == hold_end_ms
+
+        now[0] = hold_end_ms - 1
+        controller._advance_manual(now[0])
+        assert controller.current_action == "spell"
+
+        now[0] = hold_end_ms
         controller._advance_manual(now[0])
         assert not controller.multiform.busy
         assert controller._current_form() == "human"

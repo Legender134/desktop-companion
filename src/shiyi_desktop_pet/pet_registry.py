@@ -700,10 +700,13 @@ class PetRegistry:
                 raise ValueError(f"{prefix}.frameMap length must match frameCount")
             if any(
                 item is not None
-                and not PetRegistry._is_int_between(item, 0, frame_count - 1)
+                and not PetRegistry._is_int_between(item, 0, 511)
                 for item in frame_map_value
             ):
-                raise ValueError(f"{prefix}.frameMap references an unavailable atlas cell")
+                raise ValueError(
+                    f"{prefix}.frameMap entries must be null or integers "
+                    "from 0 through 511"
+                )
             frame_map = tuple(frame_map_value)
         return PetActionLayerDefinition(
             atlas_id,

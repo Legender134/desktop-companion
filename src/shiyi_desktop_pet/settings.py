@@ -93,7 +93,7 @@ class SettingsStore:
         defaults = AppSettings()
         section = parser["settings"]
         values = asdict(defaults)
-        pet_id = section.get("pet_id", defaults.pet_id).strip().lower()
+        pet_id = section.get("pet_id", defaults.pet_id).strip()
         values["pet_id"] = pet_id if is_valid_pet_id(pet_id) else defaults.pet_id
         values["wander_enabled"] = self._read_bool(section, "wander_enabled", defaults.wander_enabled)
         wander_intensity = section.get(
@@ -234,5 +234,5 @@ class SettingsStore:
 
     @staticmethod
     def _normalize_pet_id(value: object) -> str:
-        normalized = value.strip().lower() if isinstance(value, str) else ""
+        normalized = value.strip() if isinstance(value, str) else ""
         return normalized if is_valid_pet_id(normalized) else AppSettings.pet_id

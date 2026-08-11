@@ -1492,7 +1492,9 @@ class DesktopPetApplication:
             self.timeline.start(action, now_ms)
             return
         if self._runtime_step_hold_ms > 0:
-            self._runtime_hold_until_ms = now_ms + self._runtime_step_hold_ms
+            self._runtime_hold_until_ms = now_ms + round(
+                self._runtime_step_hold_ms * self._animation_speed_multiplier()
+            )
             return
         self._execute_runtime_command(controller.action_finished(now_ms))
 

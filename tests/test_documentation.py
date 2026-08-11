@@ -62,6 +62,11 @@ def test_v4_documentation_explains_renderability_and_zero_value_role_exceptions(
         in format_guide
     )
     assert "`frameMap` 数组中的某一项为 `null`" in format_guide
+    assert "`0..511`" in format_guide
+    assert (
+        "frameMap entries must be null or integers from 0 through 511"
+        in format_guide
+    )
     assert "`frameMap: null` 的身体帧" not in format_guide
     assert "所有 layer 的 `frameMap` 都是 `null`" not in format_guide
     assert "上面的 pytest 命令只验证仓库自带 fixture" in new_pet_guide

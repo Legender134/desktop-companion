@@ -66,6 +66,24 @@ def test_unknown_but_valid_pet_id_is_preserved_for_dynamic_registry(tmp_path: Pa
     assert SettingsStore(path).load().pet_id == "new_pet"
 
 
+def test_camel_case_v4_pet_id_is_preserved_when_loaded(tmp_path: Path):
+    path = tmp_path / "settings.ini"
+    path.write_text(
+        "[settings]\nschema_version=7\npet_id=multiformV4\n",
+        encoding="utf-8",
+    )
+
+    assert SettingsStore(path).load().pet_id == "multiformV4"
+
+
+def test_camel_case_v4_pet_id_round_trips_trimmed_without_case_loss(tmp_path: Path):
+    store = SettingsStore(tmp_path / "settings.ini")
+
+    store.save(replace(AppSettings(), pet_id="  multiformV4  "))
+
+    assert store.load().pet_id == "multiformV4"
+
+
 def test_invalid_values_are_normalized_and_future_schema_falls_back(tmp_path: Path):
     path = tmp_path / "settings.ini"
     path.write_text(
