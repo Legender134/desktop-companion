@@ -43,6 +43,7 @@ def _run_preflight(test_dir: Path) -> subprocess.CompletedProcess[str]:
         env=environment,
         text=True,
         encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=60,
         check=False,
