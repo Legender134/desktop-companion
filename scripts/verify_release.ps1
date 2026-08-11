@@ -2433,7 +2433,6 @@ if (-not (Test-Path -LiteralPath $workRoot -PathType Container)) {
 $recordedInstallLocations = @(Get-RecordedInstallLocations)
 $protectedPaths = @(
     $installerPath,
-    $env:USERPROFILE,
     $env:APPDATA,
     $env:LOCALAPPDATA,
     $roamingPath,
